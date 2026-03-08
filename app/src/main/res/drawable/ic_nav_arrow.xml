@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="48dp"
-    android:height="48dp"
-    android:viewportWidth="48"
-    android:viewportHeight="48">
-    <!-- Red triangle arrow pointing UP (north/forward) -->
+    android:width="56dp"
+    android:height="56dp"
+    android:viewportWidth="56"
+    android:viewportHeight="56">
+    <!-- Red navigation arrow pointing UP -->
     <path
         android:fillColor="#E8380A"
-        android:pathData="M24,3 L42,42 L24,35 L6,42 Z"/>
-    <!-- Dark border for visibility -->
+        android:pathData="M28,4 L44,46 L28,38 L12,46 Z"/>
+    <!-- White center dot -->
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#CC2200"
-        android:strokeWidth="1.5"
-        android:pathData="M24,3 L42,42 L24,35 L6,42 Z"/>
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,28 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0"/>
 </vector>

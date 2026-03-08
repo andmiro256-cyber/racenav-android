@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
@@ -15,6 +17,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.andreykoff.racenav.databinding.FragmentMapBinding
@@ -28,11 +31,21 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
+import com.mapbox.mapboxsdk.style.layers.LineLayer
+import com.mapbox.mapboxsdk.style.layers.PropertyFactory
+import com.mapbox.mapboxsdk.style.layers.SymbolLayer
+import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
+import com.mapbox.mapboxsdk.utils.BitmapUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class MapFragment : Fragment() {
 
@@ -43,61 +56,55 @@ class MapFragment : Fragment() {
     enum class FollowMode { FREE, FOLLOW_NORTH, FOLLOW_COURSE }
     private var followMode = FollowMode.FREE
 
+    // Track recording
+    private val trackPoints = mutableListOf<LatLng>()
+    private var isRecording = false
+    private var lastArrowLat = 0.0
+    private var lastArrowLon = 0.0
+    private val arrowPoints = mutableListOf<Pair<LatLng, Float>>() // position + bearing
+
+    companion object {
+        const val TRACK_SOURCE_ID = "track-source"
+        const val TRACK_ARROWS_SOURCE_ID = "track-arrows-source"
+        const val TRACK_LAYER_ID = "track-layer"
+        const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
+        const val TRACK_ARROW_ICON = "track-arrow-icon"
+        const val ARROW_DISTANCE_M = 80.0 // place arrow every 80 meters
+    }
+
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
 
     private val tileSources = linkedMapOf(
-        "osm" to TileSource(
-            "OpenStreetMap",
-            listOf(
-                "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            )
-        ),
-        "satellite" to TileSource(
-            "Спутник ESRI",
-            listOf("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}")
-        ),
-        "topo" to TileSource(
-            "OpenTopoMap",
-            listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png")
-        ),
-        "google" to TileSource(
-            "Google Спутник",
-            listOf(
-                "https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-                "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-                "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-                "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-            )
-        ),
-        "genshtab250" to TileSource(
-            "Генштаб 250м",
-            listOf(
-                "https://a.tiles.nakarte.me/g250/{z}/{x}/{y}",
-                "https://b.tiles.nakarte.me/g250/{z}/{x}/{y}",
-                "https://c.tiles.nakarte.me/g250/{z}/{x}/{y}"
-            ),
-            tms = true
-        ),
-        "genshtab500" to TileSource(
-            "Генштаб 500м",
-            listOf(
-                "https://a.tiles.nakarte.me/g500/{z}/{x}/{y}",
-                "https://b.tiles.nakarte.me/g500/{z}/{x}/{y}",
-                "https://c.tiles.nakarte.me/g500/{z}/{x}/{y}"
-            ),
-            tms = true
-        ),
-        "ggc500" to TileSource(
-            "ГосГисЦентр 500м",
-            listOf(
-                "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
-                "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
-                "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"
-            ),
-            tms = true
-        )
+        "osm" to TileSource("OpenStreetMap", listOf(
+            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        )),
+        "satellite" to TileSource("Спутник ESRI", listOf(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        )),
+        "topo" to TileSource("OpenTopoMap", listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png")),
+        "google" to TileSource("Google Спутник", listOf(
+            "https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+        )),
+        "genshtab250" to TileSource("Генштаб 250м", listOf(
+            "https://a.tiles.nakarte.me/g250/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/g250/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/g250/{z}/{x}/{y}"
+        ), tms = true),
+        "genshtab500" to TileSource("Генштаб 500м", listOf(
+            "https://a.tiles.nakarte.me/g500/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/g500/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/g500/{z}/{x}/{y}"
+        ), tms = true),
+        "ggc500" to TileSource("ГосГисЦентр 500м", listOf(
+            "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"
+        ), tms = true)
     )
 
     private var currentTileKey = "osm"
@@ -124,17 +131,16 @@ class MapFragment : Fragment() {
     private fun buildStyleJson(key: String): String {
         val source = tileSources[key] ?: return ""
         val tilesArray = source.urls.joinToString(",") { "\"$it\"" }
-        val schemeField = if (source.tms) "\"scheme\": \"tms\"," else ""
-        return """{"version":8,"sources":{"rt":{"type":"raster","tiles":[$tilesArray],"tileSize":256${ if (source.tms) ",\"scheme\":\"tms\"" else ""}}},"layers":[{"id":"rl","type":"raster","source":"rt","minzoom":0,"maxzoom":22}]}"""
+        val scheme = if (source.tms) ",\"scheme\":\"tms\"" else ""
+        return """{"version":8,"sources":{"rt":{"type":"raster","tiles":[$tilesArray],"tileSize":256$scheme}},"layers":[{"id":"rl","type":"raster","source":"rt","minzoom":0,"maxzoom":22}]}"""
     }
 
     private fun loadTileStyle(key: String) {
         currentTileKey = key
         val json = buildStyleJson(key)
-        Log.d("RaceNav", "Loading style for $key: ${json.take(200)}")
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
-            Log.d("RaceNav", "Style loaded OK for $key")
             enableLocation(style)
+            setupTrackLayers(style)
         }
     }
 
@@ -148,46 +154,57 @@ class MapFragment : Fragment() {
             return
         }
 
-        val navArrow = ContextCompat.getDrawable(ctx, R.drawable.ic_nav_arrow)
-
         val options = LocationComponentOptions.builder(ctx)
             .foregroundDrawable(R.drawable.ic_nav_arrow)
-            .accuracyAlpha(0.15f)
-            .accuracyColor(Color.parseColor("#4DE8380A"))
+            .accuracyAlpha(0f)
+            .accuracyAnimationEnabled(false)
             .elevation(0f)
-            .build()
-
-        val activationOptions = LocationComponentActivationOptions.builder(ctx, style)
-            .locationComponentOptions(options)
+            .pulsingEnabled(false)
             .build()
 
         val lc = mapboxMap?.locationComponent ?: return
-        lc.activateLocationComponent(activationOptions)
+        lc.activateLocationComponent(LocationComponentActivationOptions.builder(ctx, style)
+            .locationComponentOptions(options).build())
         lc.isLocationComponentEnabled = true
         applyFollowMode()
     }
 
-    private fun applyFollowMode() {
-        val lc = mapboxMap?.locationComponent ?: return
-        when (followMode) {
-            FollowMode.FREE -> {
-                lc.cameraMode = CameraMode.NONE
-                lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_my_location)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E1E1E"))
-            }
-            FollowMode.FOLLOW_NORTH -> {
-                lc.cameraMode = CameraMode.TRACKING
-                lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_my_location)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1565C0"))
-            }
-            FollowMode.FOLLOW_COURSE -> {
-                lc.cameraMode = CameraMode.TRACKING_GPS
-                lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_nav_arrow)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E8380A"))
-            }
+    private fun setupTrackLayers(style: Style) {
+        // Add track arrow icon
+        val ctx = context ?: return
+        val arrowDrawable = ContextCompat.getDrawable(ctx, R.drawable.ic_track_arrow)
+        if (arrowDrawable != null) {
+            val bitmap = arrowDrawable.toBitmap(32, 32)
+            style.addImage(TRACK_ARROW_ICON, bitmap)
+        }
+
+        // Track line source
+        style.addSource(GeoJsonSource(TRACK_SOURCE_ID))
+
+        // Track arrows source
+        style.addSource(GeoJsonSource(TRACK_ARROWS_SOURCE_ID))
+
+        // Track line layer (red, 4dp)
+        style.addLayer(LineLayer(TRACK_LAYER_ID, TRACK_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#FF2200"),
+            PropertyFactory.lineWidth(4f),
+            PropertyFactory.lineCap("round"),
+            PropertyFactory.lineJoin("round")
+        ))
+
+        // Track arrows layer
+        style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_ARROWS_SOURCE_ID).withProperties(
+            PropertyFactory.iconImage(TRACK_ARROW_ICON),
+            PropertyFactory.iconRotationAlignment("map"),
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true),
+            PropertyFactory.iconRotate(com.mapbox.mapboxsdk.style.expressions.Expression.get("bearing")),
+            PropertyFactory.iconSize(0.8f)
+        ))
+
+        // Redraw track if exists
+        if (trackPoints.isNotEmpty()) {
+            updateTrackOnMap()
         }
     }
 
@@ -214,32 +231,130 @@ class MapFragment : Fragment() {
 
         binding.compassView.setOnClickListener {
             when (followMode) {
-                FollowMode.FREE -> {
-                    // Reset bearing to north
-                    map.animateCamera(CameraUpdateFactory.bearingTo(0.0))
-                }
-                FollowMode.FOLLOW_NORTH -> {
-                    followMode = FollowMode.FOLLOW_COURSE
-                    applyFollowMode()
-                    Toast.makeText(context, "Курс вверху", Toast.LENGTH_SHORT).show()
-                }
-                FollowMode.FOLLOW_COURSE -> {
-                    followMode = FollowMode.FOLLOW_NORTH
-                    applyFollowMode()
-                    Toast.makeText(context, "Север вверху", Toast.LENGTH_SHORT).show()
-                }
+                FollowMode.FREE -> map.animateCamera(CameraUpdateFactory.bearingTo(0.0))
+                FollowMode.FOLLOW_NORTH -> { followMode = FollowMode.FOLLOW_COURSE; applyFollowMode() }
+                FollowMode.FOLLOW_COURSE -> { followMode = FollowMode.FOLLOW_NORTH; applyFollowMode() }
             }
         }
 
+        binding.btnRec.setOnClickListener { toggleRecording() }
+
         map.addOnCameraMoveListener { updateCompass() }
-        map.addOnCameraIdleListener {
-            updateCompass()
-            // If user manually moved map, switch to FREE mode
-            if (followMode != FollowMode.FREE) {
-                val lc = map.locationComponent
-                if (lc.isLocationComponentEnabled) {
-                    // Keep mode — don't reset on camera idle from tracking
+        map.addOnCameraIdleListener { updateCompass() }
+
+        // Track GPS updates for recording
+        map.locationComponent.addOnLocationStaleListener { }
+        setupLocationTracking(map)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun setupLocationTracking(map: MapboxMap) {
+        val engine = map.locationComponent.locationEngine ?: return
+        engine.requestLocationUpdates(
+            com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.Builder(1000L)
+                .setPriority(com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
+                .setMaxWaitTime(2000L)
+                .build(),
+            object : com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult> {
+                override fun onSuccess(result: com.mapbox.mapboxsdk.location.engine.LocationEngineResult) {
+                    val loc = result.lastLocation ?: return
+                    if (isRecording) {
+                        val newPoint = LatLng(loc.latitude, loc.longitude)
+                        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0) {
+                            trackPoints.add(newPoint)
+
+                            // Add direction arrow every ARROW_DISTANCE_M meters
+                            if (lastArrowLat == 0.0 || distanceM(LatLng(lastArrowLat, lastArrowLon), newPoint) >= ARROW_DISTANCE_M) {
+                                if (trackPoints.size >= 2) {
+                                    val prev = trackPoints[trackPoints.size - 2]
+                                    val bearing = bearingBetween(prev, newPoint).toFloat()
+                                    arrowPoints.add(Pair(newPoint, bearing))
+                                    lastArrowLat = loc.latitude
+                                    lastArrowLon = loc.longitude
+                                }
+                            }
+
+                            updateTrackOnMap()
+                        }
+                    }
                 }
+                override fun onFailure(exception: Exception) {
+                    Log.e("RaceNav", "Location error: ${exception.message}")
+                }
+            },
+            android.os.Looper.getMainLooper()
+        )
+    }
+
+    private fun toggleRecording() {
+        isRecording = !isRecording
+        if (isRecording) {
+            trackPoints.clear()
+            arrowPoints.clear()
+            lastArrowLat = 0.0
+            lastArrowLon = 0.0
+            binding.btnRec.setImageResource(R.drawable.ic_rec)
+            binding.btnRec.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#CC0000"))
+            Toast.makeText(context, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
+        } else {
+            binding.btnRec.setImageResource(R.drawable.ic_rec_start)
+            binding.btnRec.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E1E1E"))
+            Toast.makeText(context, "⏹ Запись остановлена (${trackPoints.size} точек)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updateTrackOnMap() {
+        val style = mapboxMap?.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID) ?: return
+        val arrowSource = style.getSourceAs<GeoJsonSource>(TRACK_ARROWS_SOURCE_ID) ?: return
+
+        // Build LineString
+        if (trackPoints.size >= 2) {
+            val coords = JSONArray()
+            trackPoints.forEach { pt ->
+                coords.put(JSONArray().put(pt.longitude).put(pt.latitude))
+            }
+            val geojson = JSONObject()
+                .put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+                .put("properties", JSONObject())
+            source.setGeoJson(geojson.toString())
+        }
+
+        // Build arrow points FeatureCollection
+        val features = JSONArray()
+        arrowPoints.forEach { (pt, bearing) ->
+            val feature = JSONObject()
+                .put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "Point")
+                    .put("coordinates", JSONArray().put(pt.longitude).put(pt.latitude)))
+                .put("properties", JSONObject().put("bearing", bearing))
+            features.put(feature)
+        }
+        val fc = JSONObject().put("type", "FeatureCollection").put("features", features)
+        arrowSource.setGeoJson(fc.toString())
+    }
+
+    private fun applyFollowMode() {
+        val lc = mapboxMap?.locationComponent ?: return
+        when (followMode) {
+            FollowMode.FREE -> {
+                lc.cameraMode = CameraMode.NONE
+                lc.renderMode = RenderMode.GPS
+                binding.btnGps.setImageResource(R.drawable.ic_my_location)
+                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E1E1E"))
+            }
+            FollowMode.FOLLOW_NORTH -> {
+                lc.cameraMode = CameraMode.TRACKING
+                lc.renderMode = RenderMode.GPS
+                binding.btnGps.setImageResource(R.drawable.ic_my_location)
+                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1565C0"))
+            }
+            FollowMode.FOLLOW_COURSE -> {
+                lc.cameraMode = CameraMode.TRACKING_GPS
+                lc.renderMode = RenderMode.GPS
+                binding.btnGps.setImageResource(R.drawable.ic_nav_arrow)
+                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E8380A"))
             }
         }
     }
@@ -253,7 +368,6 @@ class MapFragment : Fragment() {
         val dialog = BottomSheetDialog(requireContext(), R.style.BottomSheetTheme)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_layers, null)
         dialog.setContentView(view)
-
         val radioGroup = view.findViewById<RadioGroup>(R.id.layerRadioGroup)
         tileSources.forEach { (key, source) ->
             val rb = RadioButton(requireContext()).apply {
@@ -267,7 +381,6 @@ class MapFragment : Fragment() {
             }
             radioGroup.addView(rb)
         }
-
         radioGroup.setOnCheckedChangeListener { group, id ->
             val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
             loadTileStyle(key)
@@ -276,12 +389,30 @@ class MapFragment : Fragment() {
         dialog.show()
     }
 
+    // Haversine distance in meters
+    private fun distanceM(a: LatLng, b: LatLng): Double {
+        val R = 6371000.0
+        val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
+        val dLat = Math.toRadians(b.latitude - a.latitude)
+        val dLon = Math.toRadians(b.longitude - a.longitude)
+        val x = sin(dLat/2)*sin(dLat/2) + cos(lat1)*cos(lat2)*sin(dLon/2)*sin(dLon/2)
+        return R * 2 * atan2(sqrt(x), sqrt(1-x))
+    }
+
+    // Bearing from point a to b in degrees
+    private fun bearingBetween(a: LatLng, b: LatLng): Double {
+        val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
+        val dLon = Math.toRadians(b.longitude - a.longitude)
+        val y = sin(dLon) * cos(lat2)
+        val x = cos(lat1)*sin(lat2) - sin(lat1)*cos(lat2)*cos(dLon)
+        return (Math.toDegrees(atan2(y, x)) + 360) % 360
+    }
+
     private fun checkForUpdates() {
         lifecycleScope.launch {
             try {
                 val latest = withContext(Dispatchers.IO) {
-                    val json = URL("https://api.github.com/repos/andmiro256-cyber/racenav-android/releases/latest").readText()
-                    JSONObject(json).getString("tag_name")
+                    JSONObject(URL("https://api.github.com/repos/andmiro256-cyber/racenav-android/releases/latest").readText()).getString("tag_name")
                 }
                 val current = "v${requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName}"
                 if (latest != current) {
@@ -290,11 +421,10 @@ class MapFragment : Fragment() {
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
                                 "https://github.com/andmiro256-cyber/racenav-android/releases/download/$latest/racenav-$latest.apk"
                             )))
-                        }
-                        .show()
+                        }.show()
                 }
             } catch (e: Exception) {
-                Log.d("RaceNav", "Update check failed: ${e.message}")
+                Log.d("RaceNav", "Update check: ${e.message}")
             }
         }
     }
@@ -312,9 +442,5 @@ class MapFragment : Fragment() {
     override fun onStop() { super.onStop(); _binding?.mapView?.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); _binding?.mapView?.onSaveInstanceState(outState) }
     override fun onLowMemory() { super.onLowMemory(); _binding?.mapView?.onLowMemory() }
-    override fun onDestroyView() {
-        super.onDestroyView()
-        _binding?.mapView?.onDestroy()
-        _binding = null
-    }
+    override fun onDestroyView() { super.onDestroyView(); _binding?.mapView?.onDestroy(); _binding = null }
 }
