@@ -27,11 +27,20 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/racenav-release.jks
+
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Build Release APK
+        env:
+          KEYSTORE_PATH: /tmp/racenav-release.jks
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Get version name
         id: version
@@ -41,14 +50,14 @@ jobs:
 
       - name: Rename APK
         run: |
-          mv app/build/outputs/apk/debug/app-debug.apk \
-             app/build/outputs/apk/debug/racenav-${{ steps.version.outputs.name }}.apk
+          mv app/build/outputs/apk/release/app-release.apk \
+             app/build/outputs/apk/release/racenav-${{ steps.version.outputs.name }}.apk
 
       - name: Upload artifact (every build)
         uses: actions/upload-artifact@v4
         with:
           name: RaceNav-${{ steps.version.outputs.name }}-build${{ github.run_number }}
-          path: app/build/outputs/apk/debug/racenav-${{ steps.version.outputs.name }}.apk
+          path: app/build/outputs/apk/release/racenav-${{ steps.version.outputs.name }}.apk
           retention-days: 14
 
       - name: Create GitHub Release (on tag push only)
@@ -56,7 +65,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Trophy Navigator ${{ github.ref_name }}
-          files: app/build/outputs/apk/debug/racenav-${{ steps.version.outputs.name }}.apk
+          files: app/build/outputs/apk/release/racenav-${{ steps.version.outputs.name }}.apk
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

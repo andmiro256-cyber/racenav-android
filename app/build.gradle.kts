@@ -11,14 +11,35 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.5.1"
+        versionCode = 8
+        versionName = "1.5.2"
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystoreFile = System.getenv("KEYSTORE_PATH")
+            val keystoreAlias = System.getenv("KEY_ALIAS") ?: "racenav"
+            val keystorePass = System.getenv("STORE_PASSWORD") ?: ""
+            val keyPass = System.getenv("KEY_PASSWORD") ?: ""
+            if (keystoreFile != null) {
+                storeFile = file(keystoreFile)
+                storePassword = keystorePass
+                keyAlias = keystoreAlias
+                keyPassword = keyPass
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            val ks = signingConfigs.getByName("release")
+            if (ks.storeFile != null) signingConfig = ks
+        }
+        debug {
+            val ks = signingConfigs.getByName("release")
+            if (ks.storeFile != null) signingConfig = ks
         }
     }
 
