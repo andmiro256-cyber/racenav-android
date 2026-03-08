@@ -33,6 +33,7 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
+import com.mapbox.mapboxsdk.style.layers.CircleLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
@@ -288,17 +289,12 @@ class MapFragment : Fragment() {
     }
 
     private fun setupWaypointLayers(style: Style) {
-        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val markerColor = prefs?.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
-        val wpBitmap = makeWaypointBitmap(Color.parseColor(markerColor))
-        style.addImage("wp-icon", wpBitmap)
-
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
-        style.addLayer(SymbolLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
-            PropertyFactory.iconImage("wp-icon"),
-            PropertyFactory.iconAllowOverlap(true),
-            PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconSize(1f)
+        style.addLayer(CircleLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
+            PropertyFactory.circleRadius(10f),
+            PropertyFactory.circleColor("#FF6F00"),
+            PropertyFactory.circleStrokeWidth(2f),
+            PropertyFactory.circleStrokeColor("#FFFFFF")
         ))
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("label")),
@@ -562,23 +558,6 @@ class MapFragment : Fragment() {
         // White center dot
         paint.color = Color.WHITE
         canvas.drawCircle(cx, cy + r * 0.1f, r * 0.18f, paint)
-        return bmp
-    }
-
-    /** Generate small triangle for waypoint markers */
-    private fun makeWaypointBitmap(color: Int): Bitmap {
-        val size = (28 * resources.displayMetrics.density).toInt()
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
-        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.85f
-        val path = Path().apply {
-            moveTo(cx, cy - r)
-            lineTo(cx - r * 0.75f, cy + r * 0.8f)
-            lineTo(cx + r * 0.75f, cy + r * 0.8f)
-            close()
-        }
-        canvas.drawPath(path, paint)
         return bmp
     }
 
