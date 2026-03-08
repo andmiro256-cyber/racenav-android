@@ -241,13 +241,7 @@ class MapFragment : Fragment() {
         }
         // Get marker settings from prefs
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val markerSizeDp = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
         val markerColor = prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
-
-        // Add custom colored arrow to style as image, use via SymbolLayer separately.
-        // LocationComponent only accepts @DrawableRes — use ic_nav_arrow + tint via DrawableCompat
-        val arrowDrawable = ContextCompat.getDrawable(ctx, R.drawable.ic_nav_arrow)!!.mutate()
-        androidx.core.graphics.drawable.DrawableCompat.setTint(arrowDrawable, Color.parseColor(markerColor))
 
         val options = LocationComponentOptions.builder(ctx)
             .foregroundDrawable(R.drawable.ic_nav_arrow)
@@ -262,6 +256,8 @@ class MapFragment : Fragment() {
             .locationComponentOptions(options).build())
         lc.isLocationComponentEnabled = true
         applyFollowMode()
+        // Start location tracking AFTER component is activated
+        mapboxMap?.let { setupLocationTracking(it) }
     }
 
     private fun setupTrackLayers(style: Style) {
@@ -375,7 +371,6 @@ class MapFragment : Fragment() {
 
         map.addOnCameraMoveListener { updateCompass() }
         map.addOnCameraIdleListener { updateCompass() }
-        setupLocationTracking(map)
     }
 
     private fun advanceWaypoint() {
