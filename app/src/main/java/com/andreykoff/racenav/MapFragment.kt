@@ -28,7 +28,7 @@ class MapFragment : Fragment() {
     private val binding get() = _binding!!
     private var mapboxMap: MapboxMap? = null
 
-    data class TileSource(val label: String, val urls: List<String>)
+    data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
 
     private val tileSources = linkedMapOf(
         "osm" to TileSource(
@@ -55,6 +55,33 @@ class MapFragment : Fragment() {
                 "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
                 "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
             )
+        ),
+        "genshtab250" to TileSource(
+            "Генштаб 250м",
+            listOf(
+                "https://a.tiles.nakarte.me/g250/{z}/{x}/{y}",
+                "https://b.tiles.nakarte.me/g250/{z}/{x}/{y}",
+                "https://c.tiles.nakarte.me/g250/{z}/{x}/{y}"
+            ),
+            tms = true
+        ),
+        "genshtab500" to TileSource(
+            "Генштаб 500м",
+            listOf(
+                "https://a.tiles.nakarte.me/g500/{z}/{x}/{y}",
+                "https://b.tiles.nakarte.me/g500/{z}/{x}/{y}",
+                "https://c.tiles.nakarte.me/g500/{z}/{x}/{y}"
+            ),
+            tms = true
+        ),
+        "ggc500" to TileSource(
+            "ГосГисЦентр 500м",
+            listOf(
+                "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
+                "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
+                "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"
+            ),
+            tms = true
         )
     )
 
@@ -81,6 +108,7 @@ class MapFragment : Fragment() {
     private fun buildStyleJson(key: String): String {
         val source = tileSources[key] ?: return ""
         val tilesArray = source.urls.joinToString(",") { "\"$it\"" }
+        val scheme = if (source.tms) "\"scheme\": \"tms\"," else ""
         return """
             {
               "version": 8,
@@ -88,7 +116,9 @@ class MapFragment : Fragment() {
                 "raster-tiles": {
                   "type": "raster",
                   "tiles": [$tilesArray],
-                  "tileSize": 256
+                  "tileSize": 256,
+                  $scheme
+                  "attribution": ""
                 }
               },
               "layers": [{
