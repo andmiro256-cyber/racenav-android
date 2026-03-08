@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Red triangle arrow pointing UP (north/forward) -->
+    <path
+        android:fillColor="#E8380A"
+        android:pathData="M24,3 L42,42 L24,35 L6,42 Z"/>
+    <!-- Dark border for visibility -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#CC2200"
+        android:strokeWidth="1.5"
+        android:pathData="M24,3 L42,42 L24,35 L6,42 Z"/>
+</vector>
