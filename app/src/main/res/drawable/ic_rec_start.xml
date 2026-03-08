@@ -4,14 +4,12 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <circle
+    <!-- Grey outer circle -->
+    <path
         android:fillColor="#888888"
-        android:centerX="12"
-        android:centerY="12"
-        android:radius="8"/>
-    <circle
+        android:pathData="M12,4 A8,8 0 1,0 12.001,4 Z"/>
+    <!-- Red inner circle -->
+    <path
         android:fillColor="#FF0000"
-        android:centerX="12"
-        android:centerY="12"
-        android:radius="5"/>
+        android:pathData="M12,7 A5,5 0 1,0 12.001,7 Z"/>
 </vector>
