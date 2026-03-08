@@ -71,7 +71,6 @@ class MapFragment : Fragment() {
         binding.mapView.getMapAsync { map ->
             mapboxMap = map
             map.uiSettings.isCompassEnabled = false
-            map.uiSettings.isZoomControlsEnabled = false
             map.uiSettings.isAttributionEnabled = false
             map.uiSettings.isLogoEnabled = false
             loadTileStyle("osm")
