@@ -4,8 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
@@ -18,6 +16,7 @@ import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import androidx.core.widget.ImageViewCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.andreykoff.racenav.databinding.FragmentMapBinding
@@ -35,7 +34,6 @@ import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
 import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
-import com.mapbox.mapboxsdk.utils.BitmapUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -61,7 +59,8 @@ class MapFragment : Fragment() {
     private var isRecording = false
     private var lastArrowLat = 0.0
     private var lastArrowLon = 0.0
-    private val arrowPoints = mutableListOf<Pair<LatLng, Float>>() // position + bearing
+    private val arrowPoints = mutableListOf<Pair<LatLng, Float>>()
+    private var trackLengthM = 0.0
 
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
@@ -69,7 +68,9 @@ class MapFragment : Fragment() {
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
         const val TRACK_ARROW_ICON = "track-arrow-icon"
-        const val ARROW_DISTANCE_M = 80.0 // place arrow every 80 meters
+        const val ARROW_DISTANCE_M = 80.0
+        const val PREFS_NAME = "racenav_prefs"
+        const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -128,6 +129,10 @@ class MapFragment : Fragment() {
         checkForUpdates()
     }
 
+    // Called by MainActivity for volume key zoom
+    fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
+    fun zoomOut() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomOut()) }
+
     private fun buildStyleJson(key: String): String {
         val source = tileSources[key] ?: return ""
         val tilesArray = source.urls.joinToString(",") { "\"$it\"" }
@@ -169,7 +174,6 @@ class MapFragment : Fragment() {
     }
 
     private fun setupTrackLayers(style: Style) {
-        // Add track arrow icon
         val ctx = context ?: return
         val arrowDrawable = ContextCompat.getDrawable(ctx, R.drawable.ic_track_arrow)
         if (arrowDrawable != null) {
@@ -177,13 +181,9 @@ class MapFragment : Fragment() {
             style.addImage(TRACK_ARROW_ICON, bitmap)
         }
 
-        // Track line source
         style.addSource(GeoJsonSource(TRACK_SOURCE_ID))
-
-        // Track arrows source
         style.addSource(GeoJsonSource(TRACK_ARROWS_SOURCE_ID))
 
-        // Track line layer (red, 4dp)
         style.addLayer(LineLayer(TRACK_LAYER_ID, TRACK_SOURCE_ID).withProperties(
             PropertyFactory.lineColor("#FF2200"),
             PropertyFactory.lineWidth(4f),
@@ -191,7 +191,6 @@ class MapFragment : Fragment() {
             PropertyFactory.lineJoin("round")
         ))
 
-        // Track arrows layer
         style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_ARROWS_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(TRACK_ARROW_ICON),
             PropertyFactory.iconRotationAlignment("map"),
@@ -201,10 +200,7 @@ class MapFragment : Fragment() {
             PropertyFactory.iconSize(0.8f)
         ))
 
-        // Redraw track if exists
-        if (trackPoints.isNotEmpty()) {
-            updateTrackOnMap()
-        }
+        if (trackPoints.isNotEmpty()) updateTrackOnMap()
     }
 
     private fun setupButtons(map: MapboxMap) {
@@ -238,11 +234,16 @@ class MapFragment : Fragment() {
 
         binding.btnRec.setOnClickListener { toggleRecording() }
 
+        binding.btnSettings.setOnClickListener {
+            parentFragmentManager.beginTransaction()
+                .replace(R.id.container, SettingsFragment())
+                .addToBackStack(null)
+                .commit()
+        }
+
         map.addOnCameraMoveListener { updateCompass() }
         map.addOnCameraIdleListener { updateCompass() }
 
-        // Track GPS updates for recording
-        map.locationComponent.addOnLocationStaleListener { }
         setupLocationTracking(map)
     }
 
@@ -257,10 +258,30 @@ class MapFragment : Fragment() {
             object : com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult> {
                 override fun onSuccess(result: com.mapbox.mapboxsdk.location.engine.LocationEngineResult) {
                     val loc = result.lastLocation ?: return
+                    val newPoint = LatLng(loc.latitude, loc.longitude)
+
+                    // Update bottom bar widgets
+                    val speedKmh = (loc.speed * 3.6).toInt()
+                    val bearingDeg = loc.bearing.toInt()
+                    val b = _binding ?: return
+                    b.widgetSpeed.text = if (loc.speed > 0.5f) speedKmh.toString() else "--"
+                    b.widgetBearing.text = "${bearingDeg}°"
+                    b.widgetDirectionArrow.rotation = loc.bearing
+                    if (loc.hasAltitude()) {
+                        b.widgetAltitude.text = loc.altitude.toInt().toString()
+                    }
+
+                    // Record track
                     if (isRecording) {
-                        val newPoint = LatLng(loc.latitude, loc.longitude)
                         if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0) {
+                            if (trackPoints.isNotEmpty()) {
+                                trackLengthM += distanceM(trackPoints.last(), newPoint)
+                            }
                             trackPoints.add(newPoint)
+
+                            // Update track length widget
+                            val lenKm = trackLengthM / 1000.0
+                            b.widgetTrackLen.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
 
                             // Add direction arrow every ARROW_DISTANCE_M meters
                             if (lastArrowLat == 0.0 || distanceM(LatLng(lastArrowLat, lastArrowLon), newPoint) >= ARROW_DISTANCE_M) {
@@ -290,15 +311,16 @@ class MapFragment : Fragment() {
         if (isRecording) {
             trackPoints.clear()
             arrowPoints.clear()
+            trackLengthM = 0.0
             lastArrowLat = 0.0
             lastArrowLon = 0.0
             binding.btnRec.setImageResource(R.drawable.ic_rec)
-            binding.btnRec.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#CC0000"))
+            binding.widgetTrackLen.text = "0.0"
             Toast.makeText(context, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
         } else {
             binding.btnRec.setImageResource(R.drawable.ic_rec_start)
-            binding.btnRec.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E1E1E"))
-            Toast.makeText(context, "⏹ Запись остановлена (${trackPoints.size} точек)", Toast.LENGTH_SHORT).show()
+            val lenKm = trackLengthM / 1000.0
+            Toast.makeText(context, "⏹ Запись: ${trackPoints.size} точек, ${String.format("%.1f", lenKm)} км", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -307,7 +329,6 @@ class MapFragment : Fragment() {
         val source = style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID) ?: return
         val arrowSource = style.getSourceAs<GeoJsonSource>(TRACK_ARROWS_SOURCE_ID) ?: return
 
-        // Build LineString
         if (trackPoints.size >= 2) {
             val coords = JSONArray()
             trackPoints.forEach { pt ->
@@ -320,7 +341,6 @@ class MapFragment : Fragment() {
             source.setGeoJson(geojson.toString())
         }
 
-        // Build arrow points FeatureCollection
         val features = JSONArray()
         arrowPoints.forEach { (pt, bearing) ->
             val feature = JSONObject()
@@ -330,37 +350,37 @@ class MapFragment : Fragment() {
                 .put("properties", JSONObject().put("bearing", bearing))
             features.put(feature)
         }
-        val fc = JSONObject().put("type", "FeatureCollection").put("features", features)
-        arrowSource.setGeoJson(fc.toString())
+        arrowSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
     }
 
     private fun applyFollowMode() {
         val lc = mapboxMap?.locationComponent ?: return
+        val b = _binding ?: return
         when (followMode) {
             FollowMode.FREE -> {
                 lc.cameraMode = CameraMode.NONE
                 lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_my_location)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E1E1E"))
+                b.btnGps.setImageResource(R.drawable.ic_my_location)
+                ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.WHITE))
             }
             FollowMode.FOLLOW_NORTH -> {
                 lc.cameraMode = CameraMode.TRACKING
                 lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_my_location)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1565C0"))
+                b.btnGps.setImageResource(R.drawable.ic_my_location)
+                ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.parseColor("#42A5F5")))
             }
             FollowMode.FOLLOW_COURSE -> {
                 lc.cameraMode = CameraMode.TRACKING_GPS
                 lc.renderMode = RenderMode.GPS
-                binding.btnGps.setImageResource(R.drawable.ic_nav_arrow)
-                binding.btnGps.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E8380A"))
+                b.btnGps.setImageResource(R.drawable.ic_nav_arrow)
+                ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.parseColor("#FF5722")))
             }
         }
     }
 
     private fun updateCompass() {
         val bearing = mapboxMap?.cameraPosition?.bearing ?: 0.0
-        binding.compassView.rotation = (-bearing).toFloat()
+        _binding?.compassView?.rotation = (-bearing).toFloat()
     }
 
     private fun showLayerPicker() {
@@ -388,7 +408,6 @@ class MapFragment : Fragment() {
         dialog.show()
     }
 
-    // Haversine distance in meters
     private fun distanceM(a: LatLng, b: LatLng): Double {
         val R = 6371000.0
         val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
@@ -398,7 +417,6 @@ class MapFragment : Fragment() {
         return R * 2 * atan2(sqrt(x), sqrt(1-x))
     }
 
-    // Bearing from point a to b in degrees
     private fun bearingBetween(a: LatLng, b: LatLng): Double {
         val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
         val dLon = Math.toRadians(b.longitude - a.longitude)

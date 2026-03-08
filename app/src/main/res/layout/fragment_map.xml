@@ -6,6 +6,7 @@
     android:layout_height="match_parent"
     android:background="#121212">
 
+    <!-- Full-screen map -->
     <com.mapbox.mapboxsdk.maps.MapView
         android:id="@+id/mapView"
         android:layout_width="0dp"
@@ -15,103 +16,249 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Layer switcher FAB -->
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/btnLayers"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="12dp"
-        android:layout_marginTop="12dp"
-        android:contentDescription="Layers"
-        app:srcCompat="@drawable/ic_layers"
-        app:backgroundTint="#1E1E1E"
-        app:tint="#FFFFFF"
-        app:fabSize="mini"
-        app:elevation="6dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <!-- Compass -->
-    <ImageView
-        android:id="@+id/compassView"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
-        android:layout_marginStart="12dp"
-        android:layout_marginTop="12dp"
-        android:src="@drawable/ic_compass"
-        android:contentDescription="Compass"
-        android:background="@drawable/bg_map_button"
-        android:padding="8dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
-
-    <!-- Zoom buttons -->
+    <!-- Top toolbar -->
     <LinearLayout
-        android:id="@+id/zoomPanel"
-        android:layout_width="44dp"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:background="@drawable/bg_map_button"
-        android:layout_marginEnd="12dp"
-        android:layout_marginBottom="80dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent">
+        android:id="@+id/topBar"
+        android:layout_width="0dp"
+        android:layout_height="52dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:background="#CC1A1A1A"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- Compass -->
+        <ImageView
+            android:id="@+id/compassView"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_compass"
+            android:contentDescription="Compass"
+            android:padding="6dp" />
+
+        <!-- Push buttons to right -->
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <!-- Zoom In -->
         <ImageButton
             android:id="@+id/btnZoomIn"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
             android:src="@drawable/ic_add"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Zoom in"
             android:tint="#FFFFFF"
-            android:padding="10dp" />
+            android:padding="8dp" />
 
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:background="#333333" />
-
+        <!-- Zoom Out -->
         <ImageButton
             android:id="@+id/btnZoomOut"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
             android:src="@drawable/ic_remove"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Zoom out"
             android:tint="#FFFFFF"
-            android:padding="10dp" />
+            android:padding="8dp" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="28dp"
+            android:background="#444444"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp" />
+
+        <!-- Layers -->
+        <ImageButton
+            android:id="@+id/btnLayers"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_layers"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Layers"
+            android:tint="#FFFFFF"
+            android:padding="8dp" />
+
+        <!-- GPS / Follow mode -->
+        <ImageButton
+            android:id="@+id/btnGps"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_my_location"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="My location"
+            android:tint="#FFFFFF"
+            android:padding="8dp" />
+
+        <!-- REC -->
+        <ImageButton
+            android:id="@+id/btnRec"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_rec_start"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Record track"
+            android:padding="7dp" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="28dp"
+            android:background="#444444"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp" />
+
+        <!-- Settings -->
+        <ImageButton
+            android:id="@+id/btnSettings"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_settings"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Settings"
+            android:tint="#FFFFFF"
+            android:padding="8dp" />
+
     </LinearLayout>
 
-    <!-- GPS FAB -->
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/btnGps"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="12dp"
-        android:layout_marginBottom="12dp"
-        android:contentDescription="My location"
-        app:srcCompat="@drawable/ic_my_location"
-        app:backgroundTint="#1E1E1E"
-        app:tint="#FFFFFF"
-        app:fabSize="mini"
-        app:elevation="6dp"
+    <!-- Bottom widget bar -->
+    <LinearLayout
+        android:id="@+id/bottomBar"
+        android:layout_width="0dp"
+        android:layout_height="68dp"
+        android:orientation="horizontal"
+        android:background="#CC1A1A1A"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
 
-    <!-- REC button -->
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/btnRec"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="12dp"
-        android:layout_marginBottom="12dp"
-        android:contentDescription="Record track"
-        app:srcCompat="@drawable/ic_rec_start"
-        app:backgroundTint="#1E1E1E"
-        app:fabSize="mini"
-        app:elevation="6dp"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        <!-- Speed -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+            <TextView
+                android:id="@+id/widgetSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="--"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="км/ч"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+
+        <!-- Direction arrow -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+            <ImageView
+                android:id="@+id/widgetDirectionArrow"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_nav_arrow"
+                android:contentDescription="Direction" />
+            <TextView
+                android:id="@+id/widgetBearing"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="---°"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+
+        <!-- Track length -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+            <TextView
+                android:id="@+id/widgetTrackLen"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0.0"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="км трек"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+
+        <!-- Next CP -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+            <TextView
+                android:id="@+id/widgetNextCp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="--"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="след.КП"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+
+        <!-- Altitude -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+            <TextView
+                android:id="@+id/widgetAltitude"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="--"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="м высота"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
