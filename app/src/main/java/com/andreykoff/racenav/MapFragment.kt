@@ -2,6 +2,7 @@ package com.andreykoff.racenav
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
@@ -16,6 +17,8 @@ import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.ImageViewCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -30,7 +33,6 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
-import com.mapbox.mapboxsdk.style.layers.CircleLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
@@ -79,6 +81,11 @@ class MapFragment : Fragment() {
         const val ARROW_DISTANCE_M = 80.0
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
+        const val PREF_FULLSCREEN = "fullscreen_enabled"
+        const val PREF_MARKER_COLOR = "marker_color"
+        const val PREF_MARKER_SIZE = "marker_size"
+        const val DEFAULT_MARKER_COLOR = "#FF2200"
+        const val DEFAULT_MARKER_SIZE = 56
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -152,6 +159,17 @@ class MapFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // Fix top bar overlap with system status bar
+        ViewCompat.setOnApplyWindowInsetsListener(binding.topBar) { v, insets ->
+            val statusBarHeight = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            v.setPadding(v.paddingLeft, statusBarHeight, v.paddingRight, v.paddingBottom)
+            insets
+        }
+
+        // Apply fullscreen mode from prefs
+        applyFullscreenPref()
+
         binding.mapView.onCreate(savedInstanceState)
         binding.mapView.getMapAsync { map ->
             mapboxMap = map
@@ -162,6 +180,13 @@ class MapFragment : Fragment() {
             setupButtons(map)
         }
         checkForUpdates()
+    }
+
+    fun applyFullscreenPref() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val fs = prefs.getBoolean(PREF_FULLSCREEN, false)
+        _binding?.topBar?.visibility = if (fs) View.GONE else View.VISIBLE
+        _binding?.bottomBar?.visibility = if (fs) View.GONE else View.VISIBLE
     }
 
     fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
@@ -213,8 +238,20 @@ class MapFragment : Fragment() {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 100)
             return
         }
+        // Get marker settings from prefs
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val markerSizeDp = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
+        val markerColor = prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
+
+        // Add custom colored arrow to style as image, use via SymbolLayer separately.
+        // LocationComponent only accepts @DrawableRes — use ic_nav_arrow + tint via DrawableCompat
+        val arrowDrawable = ContextCompat.getDrawable(ctx, R.drawable.ic_nav_arrow)!!.mutate()
+        androidx.core.graphics.drawable.DrawableCompat.setTint(arrowDrawable, Color.parseColor(markerColor))
+
         val options = LocationComponentOptions.builder(ctx)
             .foregroundDrawable(R.drawable.ic_nav_arrow)
+            .backgroundDrawable(R.drawable.ic_transparent)
+            .bearingTintColor(Color.parseColor(markerColor))
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
             .elevation(0f)
@@ -251,19 +288,24 @@ class MapFragment : Fragment() {
     }
 
     private fun setupWaypointLayers(style: Style) {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val markerColor = prefs?.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
+        val wpBitmap = makeWaypointBitmap(Color.parseColor(markerColor))
+        style.addImage("wp-icon", wpBitmap)
+
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
-        style.addLayer(CircleLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
-            PropertyFactory.circleRadius(10f),
-            PropertyFactory.circleColor("#FF6F00"),
-            PropertyFactory.circleStrokeWidth(2f),
-            PropertyFactory.circleStrokeColor("#FFFFFF")
+        style.addLayer(SymbolLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
+            PropertyFactory.iconImage("wp-icon"),
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true),
+            PropertyFactory.iconSize(1f)
         ))
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("label")),
             PropertyFactory.textColor("#FFFFFF"),
             PropertyFactory.textSize(11f),
             PropertyFactory.textAllowOverlap(true),
-            PropertyFactory.textOffset(arrayOf(0f, -2.2f)),
+            PropertyFactory.textOffset(arrayOf(0f, -2.5f)),
             PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
         ))
         if (waypoints.isNotEmpty()) updateWaypointsOnMap()
@@ -501,6 +543,45 @@ class MapFragment : Fragment() {
         dialog.show()
     }
 
+    /** Generate arrow triangle bitmap for nav marker and waypoints */
+    private fun makeArrowBitmap(sizeDp: Int, color: Int): Bitmap {
+        val density = resources.displayMetrics.density
+        val size = (sizeDp * density).toInt().coerceAtLeast(24)
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.85f
+        // Triangle pointing up: top center, bottom-left, bottom-right
+        val path = Path().apply {
+            moveTo(cx, cy - r)
+            lineTo(cx - r * 0.75f, cy + r * 0.8f)
+            lineTo(cx + r * 0.75f, cy + r * 0.8f)
+            close()
+        }
+        canvas.drawPath(path, paint)
+        // White center dot
+        paint.color = Color.WHITE
+        canvas.drawCircle(cx, cy + r * 0.1f, r * 0.18f, paint)
+        return bmp
+    }
+
+    /** Generate small triangle for waypoint markers */
+    private fun makeWaypointBitmap(color: Int): Bitmap {
+        val size = (28 * resources.displayMetrics.density).toInt()
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.85f
+        val path = Path().apply {
+            moveTo(cx, cy - r)
+            lineTo(cx - r * 0.75f, cy + r * 0.8f)
+            lineTo(cx + r * 0.75f, cy + r * 0.8f)
+            close()
+        }
+        canvas.drawPath(path, paint)
+        return bmp
+    }
+
     private fun distanceM(a: LatLng, b: LatLng): Double {
         val R = 6371000.0
         val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
@@ -543,7 +624,7 @@ class MapFragment : Fragment() {
     }
 
     override fun onStart() { super.onStart(); _binding?.mapView?.onStart() }
-    override fun onResume() { super.onResume(); _binding?.mapView?.onResume() }
+    override fun onResume() { super.onResume(); _binding?.mapView?.onResume(); applyFullscreenPref() }
     override fun onPause() { super.onPause(); _binding?.mapView?.onPause() }
     override fun onStop() { super.onStop(); _binding?.mapView?.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); _binding?.mapView?.onSaveInstanceState(outState) }
