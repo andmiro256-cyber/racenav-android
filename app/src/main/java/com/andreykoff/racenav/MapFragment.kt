@@ -4,7 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
+import android.graphics.*
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -30,6 +30,7 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
+import com.mapbox.mapboxsdk.style.layers.CircleLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
@@ -62,12 +63,19 @@ class MapFragment : Fragment() {
     private val arrowPoints = mutableListOf<Pair<LatLng, Float>>()
     private var trackLengthM = 0.0
 
+    // Waypoints (КП) from GPX/WPT
+    private val waypoints = mutableListOf<Waypoint>()
+    private var activeWpIndex = 0  // current target CP index
+
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
         const val TRACK_ARROWS_SOURCE_ID = "track-arrows-source"
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
         const val TRACK_ARROW_ICON = "track-arrow-icon"
+        const val WP_SOURCE_ID = "wp-source"
+        const val WP_LAYER_ID = "wp-layer"
+        const val WP_LABEL_LAYER_ID = "wp-label-layer"
         const val ARROW_DISTANCE_M = 80.0
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
@@ -76,39 +84,66 @@ class MapFragment : Fragment() {
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
 
     private val tileSources = linkedMapOf(
-        "osm" to TileSource("OpenStreetMap", listOf(
+        "osm"          to TileSource("OpenStreetMap", listOf(
             "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
             "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        )),
-        "satellite" to TileSource("Спутник ESRI", listOf(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-        )),
-        "topo" to TileSource("OpenTopoMap", listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png")),
-        "google" to TileSource("Google Спутник", listOf(
+            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png")),
+        "satellite"    to TileSource("Спутник ESRI", listOf(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}")),
+        "topo"         to TileSource("OpenTopoMap", listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png")),
+        "google"       to TileSource("Google Спутник", listOf(
             "https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-            "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-        )),
-        "genshtab250" to TileSource("Генштаб 250м", listOf(
+            "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}")),
+        "genshtab250"  to TileSource("Генштаб 250м", listOf(
             "https://a.tiles.nakarte.me/g250/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/g250/{z}/{x}/{y}",
-            "https://c.tiles.nakarte.me/g250/{z}/{x}/{y}"
-        ), tms = true),
-        "genshtab500" to TileSource("Генштаб 500м", listOf(
+            "https://c.tiles.nakarte.me/g250/{z}/{x}/{y}"), tms = true),
+        "genshtab500"  to TileSource("Генштаб 500м", listOf(
             "https://a.tiles.nakarte.me/g500/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/g500/{z}/{x}/{y}",
-            "https://c.tiles.nakarte.me/g500/{z}/{x}/{y}"
-        ), tms = true),
-        "ggc500" to TileSource("ГосГисЦентр 500м", listOf(
+            "https://c.tiles.nakarte.me/g500/{z}/{x}/{y}"), tms = true),
+        "ggc500"       to TileSource("ГосГисЦентр 500м", listOf(
             "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
-            "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"
-        ), tms = true)
+            "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"), tms = true)
+    )
+
+    // Overlay sources (transparent, shown on top of base)
+    data class OverlaySource(val label: String, val urls: List<String>, val tms: Boolean = false, val opacity: Float = 0.7f)
+
+    private val overlaySources = linkedMapOf(
+        "none"     to OverlaySource("Нет", emptyList()),
+        "hiking"   to OverlaySource("Пешие маршруты", listOf(
+            "https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png")),
+        "cycling"  to OverlaySource("Велотреки", listOf(
+            "https://tile.waymarkedtrails.org/cycling/{z}/{x}/{y}.png")),
+        "osm_ov"   to OverlaySource("OSM дороги", listOf(
+            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"), opacity = 0.5f),
+        "winter"   to OverlaySource("Лыжные трассы", listOf(
+            "https://tiles.opensnowmap.org/piste/{z}/{x}/{y}.png")),
+        "nakarte"  to OverlaySource("Nakarte треки", listOf(
+            "https://a.tiles.nakarte.me/osm/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/osm/{z}/{x}/{y}"), opacity = 0.6f)
     )
 
     private var currentTileKey = "osm"
+    private var currentOverlayKey = "none"
+
+    // Public method to load waypoints from SettingsFragment
+    fun loadWaypoints(wps: List<Waypoint>) {
+        waypoints.clear()
+        waypoints.addAll(wps)
+        activeWpIndex = 0
+        updateWaypointsOnMap()
+        updateNextCpWidget()
+        if (wps.isNotEmpty()) {
+            Toast.makeText(context, "Загружено ${wps.size} точек", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentMapBinding.inflate(inflater, container, false)
@@ -123,29 +158,49 @@ class MapFragment : Fragment() {
             map.uiSettings.isCompassEnabled = false
             map.uiSettings.isAttributionEnabled = false
             map.uiSettings.isLogoEnabled = false
-            loadTileStyle("osm")
+            loadTileStyle("osm", "none")
             setupButtons(map)
         }
         checkForUpdates()
     }
 
-    // Called by MainActivity for volume key zoom
     fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
     fun zoomOut() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomOut()) }
 
-    private fun buildStyleJson(key: String): String {
-        val source = tileSources[key] ?: return ""
-        val tilesArray = source.urls.joinToString(",") { "\"$it\"" }
-        val scheme = if (source.tms) ",\"scheme\":\"tms\"" else ""
-        return """{"version":8,"sources":{"rt":{"type":"raster","tiles":[$tilesArray],"tileSize":256$scheme}},"layers":[{"id":"rl","type":"raster","source":"rt","minzoom":0,"maxzoom":22}]}"""
+    private fun buildStyleJson(baseKey: String, overlayKey: String): String {
+        val base = tileSources[baseKey] ?: return ""
+        val baseTiles = base.urls.joinToString(",") { "\"$it\"" }
+        val baseScheme = if (base.tms) ",\"scheme\":\"tms\"" else ""
+
+        val overlay = overlaySources[overlayKey]
+        val hasOverlay = overlay != null && overlay.urls.isNotEmpty()
+
+        val sources = StringBuilder()
+        sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256$baseScheme}")
+        if (hasOverlay) {
+            val ovTiles = overlay!!.urls.joinToString(",") { "\"$it\"" }
+            val ovScheme = if (overlay.tms) ",\"scheme\":\"tms\"" else ""
+            sources.append(",\"ov\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256$ovScheme}")
+        }
+
+        val layers = StringBuilder()
+        layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
+        if (hasOverlay) {
+            val op = overlay!!.opacity
+            layers.append(",{\"id\":\"ol\",\"type\":\"raster\",\"source\":\"ov\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$op}}")
+        }
+
+        return """{"version":8,"sources":{$sources},"layers":[$layers]}"""
     }
 
-    private fun loadTileStyle(key: String) {
-        currentTileKey = key
-        val json = buildStyleJson(key)
+    private fun loadTileStyle(baseKey: String, overlayKey: String) {
+        currentTileKey = baseKey
+        currentOverlayKey = overlayKey
+        val json = buildStyleJson(baseKey, overlayKey)
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
             enableLocation(style)
             setupTrackLayers(style)
+            setupWaypointLayers(style)
         }
     }
 
@@ -158,14 +213,12 @@ class MapFragment : Fragment() {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 100)
             return
         }
-
         val options = LocationComponentOptions.builder(ctx)
             .foregroundDrawable(R.drawable.ic_nav_arrow)
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
             .elevation(0f)
             .build()
-
         val lc = mapboxMap?.locationComponent ?: return
         lc.activateLocationComponent(LocationComponentActivationOptions.builder(ctx, style)
             .locationComponentOptions(options).build())
@@ -175,22 +228,17 @@ class MapFragment : Fragment() {
 
     private fun setupTrackLayers(style: Style) {
         val ctx = context ?: return
-        val arrowDrawable = ContextCompat.getDrawable(ctx, R.drawable.ic_track_arrow)
-        if (arrowDrawable != null) {
-            val bitmap = arrowDrawable.toBitmap(32, 32)
-            style.addImage(TRACK_ARROW_ICON, bitmap)
+        ContextCompat.getDrawable(ctx, R.drawable.ic_track_arrow)?.let {
+            style.addImage(TRACK_ARROW_ICON, it.toBitmap(32, 32))
         }
-
         style.addSource(GeoJsonSource(TRACK_SOURCE_ID))
         style.addSource(GeoJsonSource(TRACK_ARROWS_SOURCE_ID))
-
         style.addLayer(LineLayer(TRACK_LAYER_ID, TRACK_SOURCE_ID).withProperties(
             PropertyFactory.lineColor("#FF2200"),
             PropertyFactory.lineWidth(4f),
             PropertyFactory.lineCap("round"),
             PropertyFactory.lineJoin("round")
         ))
-
         style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_ARROWS_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(TRACK_ARROW_ICON),
             PropertyFactory.iconRotationAlignment("map"),
@@ -199,8 +247,52 @@ class MapFragment : Fragment() {
             PropertyFactory.iconRotate(com.mapbox.mapboxsdk.style.expressions.Expression.get("bearing")),
             PropertyFactory.iconSize(0.8f)
         ))
-
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
+    }
+
+    private fun setupWaypointLayers(style: Style) {
+        style.addSource(GeoJsonSource(WP_SOURCE_ID))
+        style.addLayer(CircleLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
+            PropertyFactory.circleRadius(10f),
+            PropertyFactory.circleColor("#FF6F00"),
+            PropertyFactory.circleStrokeWidth(2f),
+            PropertyFactory.circleStrokeColor("#FFFFFF")
+        ))
+        style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
+            PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("label")),
+            PropertyFactory.textColor("#FFFFFF"),
+            PropertyFactory.textSize(11f),
+            PropertyFactory.textAllowOverlap(true),
+            PropertyFactory.textOffset(arrayOf(0f, -2.2f)),
+            PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
+        ))
+        if (waypoints.isNotEmpty()) updateWaypointsOnMap()
+    }
+
+    private fun updateWaypointsOnMap() {
+        val style = mapboxMap?.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(WP_SOURCE_ID) ?: return
+        val features = JSONArray()
+        waypoints.forEach { wp ->
+            val feature = JSONObject()
+                .put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "Point")
+                    .put("coordinates", JSONArray().put(wp.lon).put(wp.lat)))
+                .put("properties", JSONObject()
+                    .put("label", wp.index.toString())
+                    .put("name", wp.name))
+            features.put(feature)
+        }
+        source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+    }
+
+    private fun updateNextCpWidget() {
+        val b = _binding ?: return
+        if (waypoints.isEmpty() || activeWpIndex >= waypoints.size) {
+            b.widgetNextCp.text = "--"
+            return
+        }
+        // Distance will be updated on next GPS fix
     }
 
     private fun setupButtons(map: MapboxMap) {
@@ -214,12 +306,11 @@ class MapFragment : Fragment() {
                 FollowMode.FOLLOW_COURSE -> FollowMode.FREE
             }
             applyFollowMode()
-            val msg = when (followMode) {
+            Toast.makeText(context, when (followMode) {
                 FollowMode.FREE -> "Свободный режим"
                 FollowMode.FOLLOW_NORTH -> "Следить — север вверху"
                 FollowMode.FOLLOW_COURSE -> "Следить — курс вверху"
-            }
-            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }, Toast.LENGTH_SHORT).show()
         }
 
         binding.btnLayers.setOnClickListener { showLayerPicker() }
@@ -241,10 +332,18 @@ class MapFragment : Fragment() {
                 .commit()
         }
 
+        // Tap next CP widget to advance to next waypoint
+        binding.widgetNextCp.setOnClickListener { advanceWaypoint() }
+
         map.addOnCameraMoveListener { updateCompass() }
         map.addOnCameraIdleListener { updateCompass() }
-
         setupLocationTracking(map)
+    }
+
+    private fun advanceWaypoint() {
+        if (waypoints.isEmpty()) return
+        activeWpIndex = (activeWpIndex + 1) % waypoints.size
+        Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
     }
 
     @SuppressLint("MissingPermission")
@@ -259,43 +358,37 @@ class MapFragment : Fragment() {
                 override fun onSuccess(result: com.mapbox.mapboxsdk.location.engine.LocationEngineResult) {
                     val loc = result.lastLocation ?: return
                     val newPoint = LatLng(loc.latitude, loc.longitude)
-
-                    // Update bottom bar widgets
-                    val speedKmh = (loc.speed * 3.6).toInt()
-                    val bearingDeg = loc.bearing.toInt()
                     val b = _binding ?: return
+
+                    // Update widgets
+                    val speedKmh = (loc.speed * 3.6).toInt()
                     b.widgetSpeed.text = if (loc.speed > 0.5f) speedKmh.toString() else "--"
-                    b.widgetBearing.text = "${bearingDeg}°"
+                    b.widgetBearing.text = "${loc.bearing.toInt()}°"
                     b.widgetDirectionArrow.rotation = loc.bearing
-                    if (loc.hasAltitude()) {
-                        b.widgetAltitude.text = loc.altitude.toInt().toString()
+                    if (loc.hasAltitude()) b.widgetAltitude.text = loc.altitude.toInt().toString()
+
+                    // Next CP distance
+                    if (waypoints.isNotEmpty() && activeWpIndex < waypoints.size) {
+                        val wp = waypoints[activeWpIndex]
+                        val distM = distanceM(newPoint, LatLng(wp.lat, wp.lon))
+                        b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1f", distM / 1000)
                     }
 
-                    // Record track
-                    if (isRecording) {
-                        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0) {
-                            if (trackPoints.isNotEmpty()) {
-                                trackLengthM += distanceM(trackPoints.last(), newPoint)
+                    // Track recording
+                    if (isRecording && (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0)) {
+                        if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
+                        trackPoints.add(newPoint)
+                        val lenKm = trackLengthM / 1000.0
+                        b.widgetTrackLen.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
+
+                        if (lastArrowLat == 0.0 || distanceM(LatLng(lastArrowLat, lastArrowLon), newPoint) >= ARROW_DISTANCE_M) {
+                            if (trackPoints.size >= 2) {
+                                val prev = trackPoints[trackPoints.size - 2]
+                                arrowPoints.add(Pair(newPoint, bearingBetween(prev, newPoint).toFloat()))
+                                lastArrowLat = loc.latitude; lastArrowLon = loc.longitude
                             }
-                            trackPoints.add(newPoint)
-
-                            // Update track length widget
-                            val lenKm = trackLengthM / 1000.0
-                            b.widgetTrackLen.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
-
-                            // Add direction arrow every ARROW_DISTANCE_M meters
-                            if (lastArrowLat == 0.0 || distanceM(LatLng(lastArrowLat, lastArrowLon), newPoint) >= ARROW_DISTANCE_M) {
-                                if (trackPoints.size >= 2) {
-                                    val prev = trackPoints[trackPoints.size - 2]
-                                    val bearing = bearingBetween(prev, newPoint).toFloat()
-                                    arrowPoints.add(Pair(newPoint, bearing))
-                                    lastArrowLat = loc.latitude
-                                    lastArrowLon = loc.longitude
-                                }
-                            }
-
-                            updateTrackOnMap()
                         }
+                        updateTrackOnMap()
                     }
                 }
                 override fun onFailure(exception: Exception) {
@@ -309,48 +402,37 @@ class MapFragment : Fragment() {
     private fun toggleRecording() {
         isRecording = !isRecording
         if (isRecording) {
-            trackPoints.clear()
-            arrowPoints.clear()
-            trackLengthM = 0.0
-            lastArrowLat = 0.0
-            lastArrowLon = 0.0
+            trackPoints.clear(); arrowPoints.clear()
+            trackLengthM = 0.0; lastArrowLat = 0.0; lastArrowLon = 0.0
             binding.btnRec.setImageResource(R.drawable.ic_rec)
             binding.widgetTrackLen.text = "0.0"
             Toast.makeText(context, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
         } else {
             binding.btnRec.setImageResource(R.drawable.ic_rec_start)
-            val lenKm = trackLengthM / 1000.0
-            Toast.makeText(context, "⏹ Запись: ${trackPoints.size} точек, ${String.format("%.1f", lenKm)} км", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "⏹ ${trackPoints.size} точек, ${String.format("%.1f", trackLengthM / 1000)} км", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun updateTrackOnMap() {
         val style = mapboxMap?.style ?: return
-        val source = style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID) ?: return
-        val arrowSource = style.getSourceAs<GeoJsonSource>(TRACK_ARROWS_SOURCE_ID) ?: return
-
         if (trackPoints.size >= 2) {
             val coords = JSONArray()
-            trackPoints.forEach { pt ->
-                coords.put(JSONArray().put(pt.longitude).put(pt.latitude))
-            }
-            val geojson = JSONObject()
-                .put("type", "Feature")
-                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
-                .put("properties", JSONObject())
-            source.setGeoJson(geojson.toString())
+            trackPoints.forEach { coords.put(JSONArray().put(it.longitude).put(it.latitude)) }
+            style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(
+                JSONObject().put("type", "Feature")
+                    .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+                    .put("properties", JSONObject()).toString()
+            )
         }
-
         val features = JSONArray()
         arrowPoints.forEach { (pt, bearing) ->
-            val feature = JSONObject()
-                .put("type", "Feature")
+            features.put(JSONObject().put("type", "Feature")
                 .put("geometry", JSONObject().put("type", "Point")
                     .put("coordinates", JSONArray().put(pt.longitude).put(pt.latitude)))
-                .put("properties", JSONObject().put("bearing", bearing))
-            features.put(feature)
+                .put("properties", JSONObject().put("bearing", bearing)))
         }
-        arrowSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+        style.getSourceAs<GeoJsonSource>(TRACK_ARROWS_SOURCE_ID)
+            ?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
     }
 
     private fun applyFollowMode() {
@@ -358,20 +440,17 @@ class MapFragment : Fragment() {
         val b = _binding ?: return
         when (followMode) {
             FollowMode.FREE -> {
-                lc.cameraMode = CameraMode.NONE
-                lc.renderMode = RenderMode.GPS
+                lc.cameraMode = CameraMode.NONE; lc.renderMode = RenderMode.GPS
                 b.btnGps.setImageResource(R.drawable.ic_my_location)
                 ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.WHITE))
             }
             FollowMode.FOLLOW_NORTH -> {
-                lc.cameraMode = CameraMode.TRACKING
-                lc.renderMode = RenderMode.GPS
+                lc.cameraMode = CameraMode.TRACKING; lc.renderMode = RenderMode.GPS
                 b.btnGps.setImageResource(R.drawable.ic_my_location)
                 ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.parseColor("#42A5F5")))
             }
             FollowMode.FOLLOW_COURSE -> {
-                lc.cameraMode = CameraMode.TRACKING_GPS
-                lc.renderMode = RenderMode.GPS
+                lc.cameraMode = CameraMode.TRACKING_GPS; lc.renderMode = RenderMode.GPS
                 b.btnGps.setImageResource(R.drawable.ic_nav_arrow)
                 ImageViewCompat.setImageTintList(b.btnGps, android.content.res.ColorStateList.valueOf(Color.parseColor("#FF5722")))
             }
@@ -379,32 +458,46 @@ class MapFragment : Fragment() {
     }
 
     private fun updateCompass() {
-        val bearing = mapboxMap?.cameraPosition?.bearing ?: 0.0
-        _binding?.compassView?.rotation = (-bearing).toFloat()
+        _binding?.compassView?.rotation = (-(mapboxMap?.cameraPosition?.bearing ?: 0.0)).toFloat()
     }
 
     private fun showLayerPicker() {
         val dialog = BottomSheetDialog(requireContext(), R.style.BottomSheetTheme)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_layers, null)
         dialog.setContentView(view)
-        val radioGroup = view.findViewById<RadioGroup>(R.id.layerRadioGroup)
+
+        // Base layers
+        val baseGroup = view.findViewById<RadioGroup>(R.id.layerRadioGroup)
         tileSources.forEach { (key, source) ->
-            val rb = RadioButton(requireContext()).apply {
-                text = source.label
-                tag = key
+            baseGroup.addView(RadioButton(requireContext()).apply {
+                text = source.label; tag = key
                 isChecked = key == currentTileKey
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 16f
-                setPadding(32, 28, 32, 28)
-                id = View.generateViewId()
-            }
-            radioGroup.addView(rb)
+                setTextColor(0xFFFFFFFF.toInt()); textSize = 15f
+                setPadding(32, 20, 32, 20); id = View.generateViewId()
+            })
         }
-        radioGroup.setOnCheckedChangeListener { group, id ->
+        baseGroup.setOnCheckedChangeListener { group, id ->
             val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
-            loadTileStyle(key)
+            loadTileStyle(key, currentOverlayKey)
             dialog.dismiss()
         }
+
+        // Overlay layers
+        val overlayGroup = view.findViewById<RadioGroup>(R.id.overlayRadioGroup)
+        overlaySources.forEach { (key, source) ->
+            overlayGroup.addView(RadioButton(requireContext()).apply {
+                text = source.label; tag = key
+                isChecked = key == currentOverlayKey
+                setTextColor(if (key == "none") 0xFF888888.toInt() else 0xFFFFFFFF.toInt())
+                textSize = 15f; setPadding(32, 20, 32, 20); id = View.generateViewId()
+            })
+        }
+        overlayGroup.setOnCheckedChangeListener { group, id ->
+            val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
+            loadTileStyle(currentTileKey, key)
+            dialog.dismiss()
+        }
+
         dialog.show()
     }
 
@@ -420,9 +513,7 @@ class MapFragment : Fragment() {
     private fun bearingBetween(a: LatLng, b: LatLng): Double {
         val lat1 = Math.toRadians(a.latitude); val lat2 = Math.toRadians(b.latitude)
         val dLon = Math.toRadians(b.longitude - a.longitude)
-        val y = sin(dLon) * cos(lat2)
-        val x = cos(lat1)*sin(lat2) - sin(lat1)*cos(lat2)*cos(dLon)
-        return (Math.toDegrees(atan2(y, x)) + 360) % 360
+        return (Math.toDegrees(atan2(sin(dLon)*cos(lat2), cos(lat1)*sin(lat2)-sin(lat1)*cos(lat2)*cos(dLon))) + 360) % 360
     }
 
     private fun checkForUpdates() {
@@ -433,11 +524,9 @@ class MapFragment : Fragment() {
                 }
                 val current = "v${requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName}"
                 if (latest != current) {
-                    Snackbar.make(binding.root, "Доступна версия $latest", Snackbar.LENGTH_LONG)
-                        .setAction("Скачать") {
-                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
-                                "https://github.com/andmiro256-cyber/racenav-android/releases/download/$latest/racenav-$latest.apk"
-                            )))
+                    Snackbar.make(binding.root, "Доступна версия $latest", Snackbar.LENGTH_INDEFINITE)
+                        .setAction("Установить") {
+                            UpdateManager.downloadAndInstall(requireContext(), latest)
                         }.show()
                 }
             } catch (e: Exception) {

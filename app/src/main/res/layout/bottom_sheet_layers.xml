@@ -15,20 +15,51 @@
         android:layout_marginBottom="8dp"
         android:background="#555555" />
 
+    <!-- Base map section -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Источник карты"
-        android:textColor="#FFFFFF"
-        android:textSize="18sp"
-        android:textStyle="bold"
+        android:text="ПОДЛОЖКА"
+        android:textColor="#888888"
+        android:textSize="11sp"
+        android:letterSpacing="0.1"
         android:paddingStart="24dp"
         android:paddingEnd="24dp"
         android:paddingTop="8dp"
-        android:paddingBottom="16dp" />
+        android:paddingBottom="8dp" />
 
     <RadioGroup
         android:id="@+id/layerRadioGroup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp" />
+
+    <!-- Divider -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#333333"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="4dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp" />
+
+    <!-- Overlay section -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="ОВЕРЛЕЙ"
+        android:textColor="#888888"
+        android:textSize="11sp"
+        android:letterSpacing="0.1"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="8dp" />
+
+    <RadioGroup
+        android:id="@+id/overlayRadioGroup"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:paddingStart="16dp"
