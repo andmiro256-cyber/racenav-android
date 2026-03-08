@@ -159,7 +159,6 @@ class MapFragment : Fragment() {
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
             .elevation(0f)
-            .pulsingEnabled(false)
             .build()
 
         val lc = mapboxMap?.locationComponent ?: return
