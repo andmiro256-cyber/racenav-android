@@ -271,11 +271,8 @@ class MapFragment : Fragment() {
             .foregroundTintColor(Color.TRANSPARENT)
             .backgroundTintColor(Color.TRANSPARENT)
             .bearingTintColor(Color.TRANSPARENT)
-            .foregroundStaleTintColor(Color.TRANSPARENT)
-            .backgroundStaleTintColor(Color.TRANSPARENT)
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
-            .pulsingEnabled(false)
             .elevation(0f)
             .build()
         val lc = mapboxMap?.locationComponent ?: return
