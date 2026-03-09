@@ -77,6 +77,7 @@ class SettingsFragment : Fragment() {
 
         // Marker color swatches
         val colorMap = mapOf(
+            R.id.colorGold   to "#FFD600",
             R.id.colorRed    to "#FF2200",
             R.id.colorOrange to "#FF6F00",
             R.id.colorBlue   to "#1565C0",

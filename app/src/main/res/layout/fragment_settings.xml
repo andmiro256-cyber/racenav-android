@@ -127,6 +127,7 @@
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
                     android:gravity="center_vertical">
+                    <View android:id="@+id/colorGold"   android:layout_width="28dp" android:layout_height="28dp" android:background="#FFD600" android:layout_marginStart="6dp" />
                     <View android:id="@+id/colorRed"    android:layout_width="28dp" android:layout_height="28dp" android:background="#FF2200" android:layout_marginStart="6dp" />
                     <View android:id="@+id/colorOrange" android:layout_width="28dp" android:layout_height="28dp" android:background="#FF6F00" android:layout_marginStart="6dp" />
                     <View android:id="@+id/colorBlue"   android:layout_width="28dp" android:layout_height="28dp" android:background="#1565C0" android:layout_marginStart="6dp" />

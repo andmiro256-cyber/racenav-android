@@ -93,8 +93,10 @@ class MapFragment : Fragment() {
         const val PREF_FULLSCREEN = "fullscreen_enabled"
         const val PREF_MARKER_COLOR = "marker_color"
         const val PREF_MARKER_SIZE = "marker_size"
-        const val DEFAULT_MARKER_COLOR = "#FF2200"
+        const val DEFAULT_MARKER_COLOR = "#FFD600"
         const val DEFAULT_MARKER_SIZE = 56
+        const val PREF_TILE_KEY = "tile_key"
+        const val PREF_OVERLAY_KEY = "overlay_key"
         const val PREF_WIDGET_SPEED = "widget_speed"
         const val PREF_WIDGET_BEARING = "widget_bearing"
         const val PREF_WIDGET_TRACKLEN = "widget_tracklen"
@@ -199,9 +201,11 @@ class MapFragment : Fragment() {
                 .show()
         }
 
-        // Fix top bar overlap with system status bar
+        // Adjust top bar padding for status bar (only when NOT in fullscreen)
         ViewCompat.setOnApplyWindowInsetsListener(binding.topBar) { v, insets ->
-            val statusBarHeight = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val fs = prefs?.getBoolean(PREF_FULLSCREEN, false) ?: false
+            val statusBarHeight = if (fs) 0 else insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             v.setPadding(v.paddingLeft, statusBarHeight, v.paddingRight, v.paddingBottom)
             insets
         }
@@ -216,7 +220,10 @@ class MapFragment : Fragment() {
             map.uiSettings.isCompassEnabled = false
             map.uiSettings.isAttributionEnabled = false
             map.uiSettings.isLogoEnabled = false
-            loadTileStyle("osm", "none")
+            val tilePrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val savedTile = tilePrefs?.getString(PREF_TILE_KEY, "osm") ?: "osm"
+            val savedOverlay = tilePrefs?.getString(PREF_OVERLAY_KEY, "none") ?: "none"
+            loadTileStyle(savedTile, savedOverlay)
             setupButtons(map)
             // Long press on map toggles UI bars
             map.addOnMapLongClickListener {
@@ -244,10 +251,7 @@ class MapFragment : Fragment() {
                 window.decorView.systemUiVisibility = (
                     View.SYSTEM_UI_FLAG_FULLSCREEN
                     or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
             }
         } else {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -312,6 +316,11 @@ class MapFragment : Fragment() {
     private fun loadTileStyle(baseKey: String, overlayKey: String) {
         currentTileKey = baseKey
         currentOverlayKey = overlayKey
+        // Save selection so it survives rotation/restart
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_TILE_KEY, baseKey)
+            ?.putString(PREF_OVERLAY_KEY, overlayKey)
+            ?.apply()
         val json = buildStyleJson(baseKey, overlayKey)
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
             enableLocation(style)
