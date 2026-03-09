@@ -86,6 +86,7 @@ class SettingsFragment : Fragment() {
                 prefs.edit().putString(PREF_MARKER_COLOR, hex).apply()
                 colorMap.forEach { (id, _) -> view.findViewById<View>(id).alpha = 0.4f }
                 swatch.alpha = 1f
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsArrow()
                 Toast.makeText(context, "Цвет сохранён", Toast.LENGTH_SHORT).show()
             }
         }
@@ -103,6 +104,7 @@ class SettingsFragment : Fragment() {
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {
                 prefs.edit().putInt(PREF_MARKER_SIZE, sb.progress).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsArrow()
             }
         })
 

@@ -268,8 +268,14 @@ class MapFragment : Fragment() {
         val options = LocationComponentOptions.builder(ctx)
             .foregroundDrawable(R.drawable.ic_transparent)
             .backgroundDrawable(R.drawable.ic_transparent)
+            .foregroundTintColor(Color.TRANSPARENT)
+            .backgroundTintColor(Color.TRANSPARENT)
+            .bearingTintColor(Color.TRANSPARENT)
+            .foregroundStaleTintColor(Color.TRANSPARENT)
+            .backgroundStaleTintColor(Color.TRANSPARENT)
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
+            .pulsingEnabled(false)
             .elevation(0f)
             .build()
         val lc = mapboxMap?.locationComponent ?: return
@@ -591,26 +597,49 @@ class MapFragment : Fragment() {
         dialog.show()
     }
 
-    /** Generate arrow triangle bitmap for nav marker and waypoints */
+    /** Generate Yandex Navigator-style arrow bitmap */
     private fun makeArrowBitmap(sizeDp: Int, color: Int): Bitmap {
         val density = resources.displayMetrics.density
         val size = (sizeDp * density).toInt().coerceAtLeast(24)
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
-        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.85f
-        // Triangle pointing up: top center, bottom-left, bottom-right
+        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.88f
+        // Yandex Navigator arrow: pointed tip at top, wide shoulders, V-notch at tail
         val path = Path().apply {
-            moveTo(cx, cy - r)
-            lineTo(cx - r * 0.75f, cy + r * 0.8f)
-            lineTo(cx + r * 0.75f, cy + r * 0.8f)
+            moveTo(cx, cy - r)                      // tip (top)
+            lineTo(cx + r * 0.72f, cy + r * 0.20f) // right shoulder
+            lineTo(cx + r * 0.42f, cy + r * 0.90f) // right tail corner
+            lineTo(cx, cy + r * 0.45f)              // V-notch center
+            lineTo(cx - r * 0.42f, cy + r * 0.90f) // left tail corner
+            lineTo(cx - r * 0.72f, cy + r * 0.20f) // left shoulder
             close()
         }
-        canvas.drawPath(path, paint)
-        // White center dot
-        paint.color = Color.WHITE
-        canvas.drawCircle(cx, cy + r * 0.1f, r * 0.18f, paint)
+        // White border stroke
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = r * 0.14f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawPath(path, strokePaint)
+        // Fill with arrow color
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            style = Paint.Style.FILL
+        }
+        canvas.drawPath(path, fillPaint)
         return bmp
+    }
+
+    /** Re-draw GPS arrow with current color/size from prefs (call from SettingsFragment) */
+    fun refreshGpsArrow() {
+        val style = mapboxMap?.style ?: return
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val color = Color.parseColor(prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR)
+        val size = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
+        style.addImage(GPS_ARROW_ICON, makeArrowBitmap(size, color))
     }
 
     private fun distanceM(a: LatLng, b: LatLng): Double {

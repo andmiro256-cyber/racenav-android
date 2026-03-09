@@ -20,7 +20,7 @@
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="0dp"
-        android:layout_height="52dp"
+        android:layout_height="44dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
         android:paddingStart="4dp"
@@ -33,11 +33,11 @@
         <!-- Compass -->
         <ImageView
             android:id="@+id/compassView"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_compass"
             android:contentDescription="Compass"
-            android:padding="6dp" />
+            android:padding="4dp" />
 
         <!-- Push buttons to right -->
         <View
@@ -48,81 +48,81 @@
         <!-- Zoom In -->
         <ImageButton
             android:id="@+id/btnZoomIn"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_add"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Zoom in"
             android:tint="#FFFFFF"
-            android:padding="8dp" />
+            android:padding="5dp" />
 
         <!-- Zoom Out -->
         <ImageButton
             android:id="@+id/btnZoomOut"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_remove"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Zoom out"
             android:tint="#FFFFFF"
-            android:padding="8dp" />
+            android:padding="5dp" />
 
         <View
             android:layout_width="1dp"
-            android:layout_height="28dp"
+            android:layout_height="24dp"
             android:background="#444444"
-            android:layout_marginStart="2dp"
-            android:layout_marginEnd="2dp" />
+            android:layout_marginStart="1dp"
+            android:layout_marginEnd="1dp" />
 
         <!-- Layers -->
         <ImageButton
             android:id="@+id/btnLayers"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_layers"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Layers"
             android:tint="#FFFFFF"
-            android:padding="8dp" />
+            android:padding="5dp" />
 
         <!-- GPS / Follow mode -->
         <ImageButton
             android:id="@+id/btnGps"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_my_location"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="My location"
             android:tint="#FFFFFF"
-            android:padding="8dp" />
+            android:padding="5dp" />
 
         <!-- REC -->
         <ImageButton
             android:id="@+id/btnRec"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_rec_start"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Record track"
-            android:padding="7dp" />
+            android:padding="5dp" />
 
         <View
             android:layout_width="1dp"
-            android:layout_height="28dp"
+            android:layout_height="24dp"
             android:background="#444444"
-            android:layout_marginStart="2dp"
-            android:layout_marginEnd="2dp" />
+            android:layout_marginStart="1dp"
+            android:layout_marginEnd="1dp" />
 
         <!-- Settings -->
         <ImageButton
             android:id="@+id/btnSettings"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:src="@drawable/ic_settings"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Settings"
             android:tint="#FFFFFF"
-            android:padding="8dp" />
+            android:padding="5dp" />
 
     </LinearLayout>
 
