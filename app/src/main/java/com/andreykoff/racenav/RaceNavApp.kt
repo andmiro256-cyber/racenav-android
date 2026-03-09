@@ -26,13 +26,13 @@ class RaceNavApp : Application() {
             defaultHandler?.uncaughtException(thread, throwable)
         }
 
-        // If previous crash exists — send to Telegram before continuing
+        // If previous crash exists — send to Telegram in background thread, wait up to 5s
         val lastCrash = prefs.getString("last_crash", null)
         if (lastCrash != null) {
             prefs.edit().remove("last_crash").apply()
-            try {
-                sendToTelegram(lastCrash)
-            } catch (_: Exception) {}
+            val t = Thread { try { sendToTelegram(lastCrash) } catch (_: Exception) {} }
+            t.start()
+            t.join(5000)
         }
 
         Mapbox.getInstance(this)
