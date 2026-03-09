@@ -693,38 +693,62 @@ class MapFragment : Fragment() {
         dialog.show()
     }
 
-    /** Generate Yandex Navigator-style arrow bitmap */
+    /** Yandex Navigator-style 3D arrow: two faces (bright + shadow) with ridge */
     private fun makeArrowBitmap(sizeDp: Int, color: Int): Bitmap {
         val density = resources.displayMetrics.density
         val size = (sizeDp * density).toInt().coerceAtLeast(24)
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        val cx = size / 2f; val cy = size / 2f; val r = size / 2f * 0.88f
-        // Yandex Navigator arrow: pointed tip at top, wide shoulders, V-notch at tail
-        val path = Path().apply {
-            moveTo(cx, cy - r)                      // tip (top)
-            lineTo(cx + r * 0.72f, cy + r * 0.20f) // right shoulder
-            lineTo(cx + r * 0.42f, cy + r * 0.90f) // right tail corner
-            lineTo(cx, cy + r * 0.45f)              // V-notch center
-            lineTo(cx - r * 0.42f, cy + r * 0.90f) // left tail corner
-            lineTo(cx - r * 0.72f, cy + r * 0.20f) // left shoulder
-            close()
+        val cx = size / 2f
+        val cy = size / 2f
+        val rad = size / 2f * 0.90f
+
+        // Key points (arrow points UP = bearing 0, rotated by map)
+        val tipX = cx;              val tipY = cy - rad           // sharp tip (top)
+        val rShX = cx + rad*0.82f;  val rShY = cy + rad*0.10f    // right shoulder
+        val rTlX = cx + rad*0.40f;  val rTlY = cy + rad*0.90f    // right tail corner
+        val notX = cx + rad*0.04f;  val notY = cy + rad*0.42f    // ridge end / v-notch
+        val lTlX = cx - rad*0.40f;  val lTlY = cy + rad*0.90f    // left tail corner
+        val lShX = cx - rad*0.58f;  val lShY = cy + rad*0.05f    // left shoulder (shorter)
+
+        // Bright face (right side — top plane facing viewer)
+        val brightPath = Path().apply {
+            moveTo(tipX, tipY); lineTo(rShX, rShY); lineTo(rTlX, rTlY); lineTo(notX, notY); close()
         }
-        // White border stroke
-        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = Color.WHITE
-            style = Paint.Style.STROKE
-            strokeWidth = r * 0.14f
-            strokeJoin = Paint.Join.ROUND
-            strokeCap = Paint.Cap.ROUND
+        // Shadow face (left side — underside plane)
+        val shadowPath = Path().apply {
+            moveTo(tipX, tipY); lineTo(notX, notY); lineTo(lTlX, lTlY); lineTo(lShX, lShY); close()
         }
-        canvas.drawPath(path, strokePaint)
-        // Fill with arrow color
-        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = color
-            style = Paint.Style.FILL
+        // Full outline for white border
+        val outlinePath = Path().apply {
+            moveTo(tipX, tipY); lineTo(rShX, rShY); lineTo(rTlX, rTlY)
+            lineTo(notX, notY); lineTo(lTlX, lTlY); lineTo(lShX, lShY); close()
         }
-        canvas.drawPath(path, fillPaint)
+
+        val shadowColor = Color.rgb(
+            (Color.red(color)   * 0.60f).toInt(),
+            (Color.green(color) * 0.60f).toInt(),
+            (Color.blue(color)  * 0.60f).toInt()
+        )
+
+        // 1. White border
+        canvas.drawPath(outlinePath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = Color.WHITE; style = Paint.Style.STROKE
+            strokeWidth = rad * 0.13f; strokeJoin = Paint.Join.ROUND; strokeCap = Paint.Cap.ROUND
+        })
+        // 2. Bright face
+        canvas.drawPath(brightPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color; style = Paint.Style.FILL
+        })
+        // 3. Shadow face
+        canvas.drawPath(shadowPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = shadowColor; style = Paint.Style.FILL
+        })
+        // 4. Ridge line between faces
+        canvas.drawLine(tipX, tipY, notX, notY, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = Color.argb(90, 0, 0, 0); style = Paint.Style.STROKE
+            strokeWidth = rad * 0.07f; strokeCap = Paint.Cap.ROUND
+        })
         return bmp
     }
 
