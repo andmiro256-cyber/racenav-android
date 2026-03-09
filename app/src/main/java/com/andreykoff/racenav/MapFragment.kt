@@ -79,6 +79,9 @@ class MapFragment : Fragment() {
         const val WP_SOURCE_ID = "wp-source"
         const val WP_LAYER_ID = "wp-layer"
         const val WP_LABEL_LAYER_ID = "wp-label-layer"
+        const val GPS_ARROW_SOURCE_ID = "gps-arrow-source"
+        const val GPS_ARROW_LAYER_ID = "gps-arrow-layer"
+        const val GPS_ARROW_ICON = "gps-arrow-icon"
         const val ARROW_DISTANCE_M = 80.0
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
@@ -251,14 +254,11 @@ class MapFragment : Fragment() {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 100)
             return
         }
-        // Get marker settings from prefs
-        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val markerColor = prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
 
+        // LocationComponent fully invisible — only for camera tracking & GPS engine
         val options = LocationComponentOptions.builder(ctx)
-            .foregroundDrawable(R.drawable.ic_nav_arrow)
+            .foregroundDrawable(R.drawable.ic_transparent)
             .backgroundDrawable(R.drawable.ic_transparent)
-            .bearingTintColor(Color.parseColor(markerColor))
             .accuracyAlpha(0f)
             .accuracyAnimationEnabled(false)
             .elevation(0f)
@@ -268,8 +268,41 @@ class MapFragment : Fragment() {
             .locationComponentOptions(options).build())
         lc.isLocationComponentEnabled = true
         applyFollowMode()
+
+        // Setup custom GPS arrow SymbolLayer
+        setupGpsArrowLayer(style)
+
         // Start location tracking AFTER component is activated
         mapboxMap?.let { setupLocationTracking(it) }
+    }
+
+    private fun setupGpsArrowLayer(style: Style) {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val markerColor = Color.parseColor(prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR)
+        val markerSize = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
+        style.addImage(GPS_ARROW_ICON, makeArrowBitmap(markerSize, markerColor))
+        style.addSource(GeoJsonSource(GPS_ARROW_SOURCE_ID))
+        style.addLayer(SymbolLayer(GPS_ARROW_LAYER_ID, GPS_ARROW_SOURCE_ID).withProperties(
+            PropertyFactory.iconImage(GPS_ARROW_ICON),
+            PropertyFactory.iconRotationAlignment("map"),
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true),
+            PropertyFactory.iconRotate(com.mapbox.mapboxsdk.style.expressions.Expression.get("bearing")),
+            PropertyFactory.iconSize(1.0f)
+        ))
+    }
+
+    private fun updateGpsArrow(lat: Double, lon: Double, bearing: Float) {
+        val style = mapboxMap?.style ?: return
+        style.getSourceAs<GeoJsonSource>(GPS_ARROW_SOURCE_ID)?.setGeoJson(
+            JSONObject()
+                .put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "Point")
+                    .put("coordinates", JSONArray().put(lon).put(lat)))
+                .put("properties", JSONObject().put("bearing", bearing))
+                .toString()
+        )
     }
 
     private fun setupTrackLayers(style: Style) {
@@ -404,6 +437,9 @@ class MapFragment : Fragment() {
                     val loc = result.lastLocation ?: return
                     val newPoint = LatLng(loc.latitude, loc.longitude)
                     val b = _binding ?: return
+
+                    // Update custom GPS arrow
+                    updateGpsArrow(loc.latitude, loc.longitude, loc.bearing)
 
                     // Update widgets
                     val speedKmh = (loc.speed * 3.6).toInt()
