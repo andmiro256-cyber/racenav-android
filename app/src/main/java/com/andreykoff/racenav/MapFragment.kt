@@ -66,6 +66,8 @@ class MapFragment : Fragment() {
     private val arrowPoints = mutableListOf<Pair<LatLng, Float>>()
     private var trackLengthM = 0.0
 
+    private var initialZoomDone = false
+
     // Waypoints (КП) from GPX/WPT
     private val waypoints = mutableListOf<Waypoint>()
     private var activeWpIndex = 0  // current target CP index
@@ -448,6 +450,14 @@ class MapFragment : Fragment() {
                     val loc = result.lastLocation ?: return
                     val newPoint = LatLng(loc.latitude, loc.longitude)
                     val b = _binding ?: return
+
+                    // Первый GPS-фикс — прыгаем на зум 12
+                    if (!initialZoomDone) {
+                        initialZoomDone = true
+                        mapboxMap?.animateCamera(
+                            CameraUpdateFactory.newLatLngZoom(newPoint, 12.0), 1000
+                        )
+                    }
 
                     // Update custom GPS arrow
                     updateGpsArrow(loc.latitude, loc.longitude, loc.bearing)
