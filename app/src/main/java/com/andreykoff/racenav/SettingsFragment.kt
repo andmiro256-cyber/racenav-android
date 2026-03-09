@@ -118,6 +118,35 @@ class SettingsFragment : Fragment() {
             val v = requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName
             view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v"
         } catch (e: Exception) { }
+
+        // Check for updates button
+        val btnCheck = view.findViewById<android.widget.Button>(R.id.btnCheckUpdates)
+        val txtStatus = view.findViewById<TextView>(R.id.txtUpdateStatus)
+        btnCheck.setOnClickListener {
+            txtStatus.text = "Проверяю..."
+            txtStatus.setTextColor(0xFF888888.toInt())
+            btnCheck.isEnabled = false
+            val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mapFrag != null) {
+                mapFrag.checkForUpdates { latest, current, hasUpdate ->
+                    btnCheck.isEnabled = true
+                    if (latest == null) {
+                        txtStatus.text = "Нет связи"
+                        txtStatus.setTextColor(0xFFFF6F00.toInt())
+                    } else if (hasUpdate) {
+                        txtStatus.text = "Доступна $latest"
+                        txtStatus.setTextColor(0xFF22C55E.toInt())
+                        UpdateManager.downloadAndInstall(requireContext(), latest)
+                    } else {
+                        txtStatus.text = "✓ Актуальная версия"
+                        txtStatus.setTextColor(0xFF22C55E.toInt())
+                    }
+                }
+            } else {
+                btnCheck.isEnabled = true
+                txtStatus.text = "Откройте карту и попробуйте снова"
+            }
+        }
     }
 
     private fun loadFile(uri: Uri) {

@@ -204,7 +204,6 @@ class MapFragment : Fragment() {
                 true
             }
         }
-        checkForUpdates()
     }
 
     fun applyFullscreenPref() {
@@ -654,21 +653,17 @@ class MapFragment : Fragment() {
         return (Math.toDegrees(atan2(sin(dLon)*cos(lat2), cos(lat1)*sin(lat2)-sin(lat1)*cos(lat2)*cos(dLon))) + 360) % 360
     }
 
-    private fun checkForUpdates() {
+    fun checkForUpdates(onResult: (latest: String?, current: String, hasUpdate: Boolean) -> Unit) {
+        val current = "v${requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName}"
         lifecycleScope.launch {
             try {
                 val latest = withContext(Dispatchers.IO) {
                     JSONObject(URL("https://api.github.com/repos/andmiro256-cyber/racenav-android/releases/latest").readText()).getString("tag_name")
                 }
-                val current = "v${requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName}"
-                if (latest != current) {
-                    Snackbar.make(binding.root, "Доступна версия $latest", Snackbar.LENGTH_INDEFINITE)
-                        .setAction("Установить") {
-                            UpdateManager.downloadAndInstall(requireContext(), latest)
-                        }.show()
-                }
+                onResult(latest, current, latest != current)
             } catch (e: Exception) {
                 Log.d("RaceNav", "Update check: ${e.message}")
+                onResult(null, current, false)
             }
         }
     }
