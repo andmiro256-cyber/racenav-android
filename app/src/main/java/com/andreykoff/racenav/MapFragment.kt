@@ -712,13 +712,14 @@ class MapFragment : Fragment() {
         val cy = size / 2f
         val rad = size / 2f * 0.90f
 
-        // Key points (arrow points UP = bearing 0, rotated by map)
+        // Key points — narrow Yandex-style arrow pointing UP
+        // Bright face = right 2/3, shadow face = left 1/3 (side perspective)
         val tipX = cx;              val tipY = cy - rad           // sharp tip (top)
-        val rShX = cx + rad*0.82f;  val rShY = cy + rad*0.10f    // right shoulder
-        val rTlX = cx + rad*0.40f;  val rTlY = cy + rad*0.90f    // right tail corner
-        val notX = cx + rad*0.04f;  val notY = cy + rad*0.42f    // ridge end / v-notch
-        val lTlX = cx - rad*0.40f;  val lTlY = cy + rad*0.90f    // left tail corner
-        val lShX = cx - rad*0.58f;  val lShY = cy + rad*0.05f    // left shoulder (shorter)
+        val rShX = cx + rad*0.60f;  val rShY = cy + rad*0.18f    // right shoulder (narrower!)
+        val rTlX = cx + rad*0.32f;  val rTlY = cy + rad*0.95f    // right tail
+        val notX = cx - rad*0.08f;  val notY = cy + rad*0.48f    // ridge/notch (left of center)
+        val lTlX = cx - rad*0.32f;  val lTlY = cy + rad*0.95f    // left tail
+        val lShX = cx - rad*0.42f;  val lShY = cy + rad*0.12f    // left shoulder (shadow, narrow)
 
         // Bright face (right side — top plane facing viewer)
         val brightPath = Path().apply {
