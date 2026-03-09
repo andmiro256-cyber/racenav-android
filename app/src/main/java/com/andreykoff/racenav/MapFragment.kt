@@ -161,6 +161,18 @@ class MapFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // Show previous crash report if any
+        val crashPrefs = context?.getSharedPreferences("crash_report", android.content.Context.MODE_PRIVATE)
+        val lastCrash = crashPrefs?.getString("last_crash", null)
+        if (lastCrash != null) {
+            crashPrefs.edit().remove("last_crash").apply()
+            android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Crash (отправь мне)")
+                .setMessage(lastCrash)
+                .setPositiveButton("OK", null)
+                .show()
+        }
+
         // Fix top bar overlap with system status bar
         ViewCompat.setOnApplyWindowInsetsListener(binding.topBar) { v, insets ->
             val statusBarHeight = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
