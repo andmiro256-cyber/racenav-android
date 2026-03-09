@@ -194,6 +194,15 @@ class MapFragment : Fragment() {
             map.uiSettings.isLogoEnabled = false
             loadTileStyle("osm", "none")
             setupButtons(map)
+            // Long press on map toggles UI bars (useful in fullscreen mode)
+            map.addOnMapLongClickListener {
+                val prefs = context?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE) ?: return@addOnMapLongClickListener false
+                val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
+                _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                if (!topVisible) Toast.makeText(context, "Долгое нажатие — скрыть панели", Toast.LENGTH_SHORT).show()
+                true
+            }
         }
         checkForUpdates()
     }
