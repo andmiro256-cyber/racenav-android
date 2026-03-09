@@ -65,6 +65,9 @@ class MapFragment : Fragment() {
     private var lastArrowLon = 0.0
     private val arrowPoints = mutableListOf<Pair<LatLng, Float>>()
     private var trackLengthM = 0.0
+    private var recordingStartMs = 0L
+    private var chronoRunnable: Runnable? = null
+    private val chronoHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private var initialZoomDone = false
 
@@ -92,6 +95,12 @@ class MapFragment : Fragment() {
         const val PREF_MARKER_SIZE = "marker_size"
         const val DEFAULT_MARKER_COLOR = "#FF2200"
         const val DEFAULT_MARKER_SIZE = 56
+        const val PREF_WIDGET_SPEED = "widget_speed"
+        const val PREF_WIDGET_BEARING = "widget_bearing"
+        const val PREF_WIDGET_TRACKLEN = "widget_tracklen"
+        const val PREF_WIDGET_NEXTCP = "widget_nextcp"
+        const val PREF_WIDGET_ALTITUDE = "widget_altitude"
+        const val PREF_WIDGET_CHRONO = "widget_chrono"
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -120,7 +129,19 @@ class MapFragment : Fragment() {
         "ggc500"       to TileSource("ГосГисЦентр 500м", listOf(
             "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
-            "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"), tms = true)
+            "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"), tms = true),
+        "ggc1000"      to TileSource("ГосГисЦентр 1км", listOf(
+            "https://a.tiles.nakarte.me/ggc1000/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/ggc1000/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/ggc1000/{z}/{x}/{y}"), tms = true),
+        "topo250"      to TileSource("Топо 250м", listOf(
+            "https://a.tiles.nakarte.me/topo250/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/topo250/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/topo250/{z}/{x}/{y}"), tms = true),
+        "topo500"      to TileSource("Топо 500м", listOf(
+            "https://a.tiles.nakarte.me/topo500/{z}/{x}/{y}",
+            "https://b.tiles.nakarte.me/topo500/{z}/{x}/{y}",
+            "https://c.tiles.nakarte.me/topo500/{z}/{x}/{y}"), tms = true)
     )
 
     // Overlay sources (transparent, shown on top of base)
@@ -187,6 +208,7 @@ class MapFragment : Fragment() {
 
         // Apply fullscreen mode from prefs
         applyFullscreenPref()
+        applyWidgetPrefs()
 
         binding.mapView.onCreate(savedInstanceState)
         binding.mapView.getMapAsync { map ->
@@ -196,13 +218,11 @@ class MapFragment : Fragment() {
             map.uiSettings.isLogoEnabled = false
             loadTileStyle("osm", "none")
             setupButtons(map)
-            // Long press on map toggles UI bars (useful in fullscreen mode)
+            // Long press on map toggles UI bars
             map.addOnMapLongClickListener {
-                val prefs = context?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE) ?: return@addOnMapLongClickListener false
                 val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
                 _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
                 _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
-                if (!topVisible) Toast.makeText(context, "Долгое нажатие — скрыть панели", Toast.LENGTH_SHORT).show()
                 true
             }
         }
@@ -211,8 +231,53 @@ class MapFragment : Fragment() {
     fun applyFullscreenPref() {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         val fs = prefs.getBoolean(PREF_FULLSCREEN, false)
-        _binding?.topBar?.visibility = if (fs) View.GONE else View.VISIBLE
-        _binding?.bottomBar?.visibility = if (fs) View.GONE else View.VISIBLE
+        val window = activity?.window ?: return
+        if (fs) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                window.insetsController?.hide(
+                    android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars()
+                )
+                window.insetsController?.systemBarsBehavior =
+                    android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+            }
+        } else {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                window.insetsController?.show(
+                    android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars()
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
+        // App bars stay visible; use long press on map to temporarily hide them
+        _binding?.topBar?.visibility = View.VISIBLE
+        _binding?.bottomBar?.visibility = View.VISIBLE
+    }
+
+    fun applyWidgetPrefs() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val b = _binding ?: return
+        fun setSlot(container: android.view.View, divider: android.view.View, on: Boolean) {
+            container.visibility = if (on) View.VISIBLE else View.GONE
+            divider.visibility = if (on) View.VISIBLE else View.GONE
+        }
+        setSlot(b.widgetSpeedContainer, b.divider1, prefs.getBoolean(PREF_WIDGET_SPEED, true))
+        setSlot(b.widgetBearingContainer, b.divider2, prefs.getBoolean(PREF_WIDGET_BEARING, true))
+        setSlot(b.widgetTrackLenContainer, b.divider3, prefs.getBoolean(PREF_WIDGET_TRACKLEN, true))
+        setSlot(b.widgetNextCpContainer, b.divider4, prefs.getBoolean(PREF_WIDGET_NEXTCP, true))
+        setSlot(b.widgetAltitudeContainer, b.divider5, prefs.getBoolean(PREF_WIDGET_ALTITUDE, true))
+        val chronoOn = prefs.getBoolean(PREF_WIDGET_CHRONO, false)
+        b.widgetChronoContainer.visibility = if (chronoOn) View.VISIBLE else View.GONE
     }
 
     fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
@@ -506,13 +571,38 @@ class MapFragment : Fragment() {
         if (isRecording) {
             trackPoints.clear(); arrowPoints.clear()
             trackLengthM = 0.0; lastArrowLat = 0.0; lastArrowLon = 0.0
+            recordingStartMs = System.currentTimeMillis()
             binding.btnRec.setImageResource(R.drawable.ic_rec)
             binding.widgetTrackLen.text = "0.0"
+            binding.widgetChrono.text = "0:00"
+            startChronoTicker()
             Toast.makeText(context, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
         } else {
+            stopChronoTicker()
             binding.btnRec.setImageResource(R.drawable.ic_rec_start)
             Toast.makeText(context, "⏹ ${trackPoints.size} точек, ${String.format("%.1f", trackLengthM / 1000)} км", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun startChronoTicker() {
+        chronoRunnable?.let { chronoHandler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                if (!isRecording) return
+                val elapsed = (System.currentTimeMillis() - recordingStartMs) / 1000L
+                val h = elapsed / 3600; val m = (elapsed % 3600) / 60; val s = elapsed % 60
+                _binding?.widgetChrono?.text = if (h > 0) String.format("%d:%02d:%02d", h, m, s)
+                                               else String.format("%d:%02d", m, s)
+                chronoHandler.postDelayed(this, 1000)
+            }
+        }
+        chronoRunnable = r
+        chronoHandler.post(r)
+    }
+
+    private fun stopChronoTicker() {
+        chronoRunnable?.let { chronoHandler.removeCallbacks(it) }
+        chronoRunnable = null
     }
 
     private fun updateTrackOnMap() {
@@ -686,10 +776,10 @@ class MapFragment : Fragment() {
     }
 
     override fun onStart() { super.onStart(); _binding?.mapView?.onStart() }
-    override fun onResume() { super.onResume(); _binding?.mapView?.onResume(); applyFullscreenPref() }
+    override fun onResume() { super.onResume(); _binding?.mapView?.onResume(); applyFullscreenPref(); applyWidgetPrefs() }
     override fun onPause() { super.onPause(); _binding?.mapView?.onPause() }
     override fun onStop() { super.onStop(); _binding?.mapView?.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); _binding?.mapView?.onSaveInstanceState(outState) }
     override fun onLowMemory() { super.onLowMemory(); _binding?.mapView?.onLowMemory() }
-    override fun onDestroyView() { super.onDestroyView(); _binding?.mapView?.onDestroy(); _binding = null }
+    override fun onDestroyView() { super.onDestroyView(); stopChronoTicker(); _binding?.mapView?.onDestroy(); _binding = null }
 }

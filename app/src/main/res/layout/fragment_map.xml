@@ -139,6 +139,7 @@
 
         <!-- Speed -->
         <LinearLayout
+            android:id="@+id/widgetSpeedContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -160,10 +161,11 @@
                 android:textSize="10sp" />
         </LinearLayout>
 
-        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+        <View android:id="@+id/divider1" android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
 
         <!-- Direction arrow -->
         <LinearLayout
+            android:id="@+id/widgetBearingContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -184,10 +186,11 @@
                 android:textSize="10sp" />
         </LinearLayout>
 
-        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+        <View android:id="@+id/divider2" android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
 
         <!-- Track length -->
         <LinearLayout
+            android:id="@+id/widgetTrackLenContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -209,10 +212,11 @@
                 android:textSize="10sp" />
         </LinearLayout>
 
-        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+        <View android:id="@+id/divider3" android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
 
         <!-- Next CP -->
         <LinearLayout
+            android:id="@+id/widgetNextCpContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -234,10 +238,11 @@
                 android:textSize="10sp" />
         </LinearLayout>
 
-        <View android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+        <View android:id="@+id/divider4" android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
 
         <!-- Altitude -->
         <LinearLayout
+            android:id="@+id/widgetAltitudeContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -255,6 +260,33 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="м высота"
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <View android:id="@+id/divider5" android:layout_width="1dp" android:layout_height="40dp" android:background="#333333" />
+
+        <!-- Chronometer -->
+        <LinearLayout
+            android:id="@+id/widgetChronoContainer"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone">
+            <TextView
+                android:id="@+id/widgetChrono"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="--:--"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="время"
                 android:textColor="#888888"
                 android:textSize="10sp" />
         </LinearLayout>

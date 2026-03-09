@@ -21,6 +21,12 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_MARKER_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.PREF_MARKER_SIZE
 import com.andreykoff.racenav.MapFragment.Companion.PREFS_NAME
 import com.andreykoff.racenav.MapFragment.Companion.PREF_VOLUME_ZOOM
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_SPEED
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_BEARING
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TRACKLEN
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ALTITUDE
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_CHRONO
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -107,6 +113,23 @@ class SettingsFragment : Fragment() {
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsArrow()
             }
         })
+
+        // Widgets
+        val mapFragForWidgets = { parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() }
+        fun bindWidgetSwitch(switchId: Int, prefKey: String, defaultOn: Boolean) {
+            val sw = view.findViewById<SwitchCompat>(switchId)
+            sw.isChecked = prefs.getBoolean(prefKey, defaultOn)
+            sw.setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean(prefKey, checked).apply()
+                mapFragForWidgets()?.applyWidgetPrefs()
+            }
+        }
+        bindWidgetSwitch(R.id.switchWidgetSpeed,    PREF_WIDGET_SPEED,    true)
+        bindWidgetSwitch(R.id.switchWidgetBearing,  PREF_WIDGET_BEARING,  true)
+        bindWidgetSwitch(R.id.switchWidgetTrackLen, PREF_WIDGET_TRACKLEN, true)
+        bindWidgetSwitch(R.id.switchWidgetNextCp,   PREF_WIDGET_NEXTCP,   true)
+        bindWidgetSwitch(R.id.switchWidgetAltitude, PREF_WIDGET_ALTITUDE, true)
+        bindWidgetSwitch(R.id.switchWidgetChrono,   PREF_WIDGET_CHRONO,   false)
 
         // File loader
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
