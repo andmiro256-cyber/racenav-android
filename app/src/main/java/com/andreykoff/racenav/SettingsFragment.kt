@@ -27,6 +27,7 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TRACKLEN
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ALTITUDE
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_CHRONO
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TIME
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -131,6 +132,7 @@ class SettingsFragment : Fragment() {
         bindWidgetSwitch(R.id.switchWidgetNextCp,   PREF_WIDGET_NEXTCP,   true)
         bindWidgetSwitch(R.id.switchWidgetAltitude, PREF_WIDGET_ALTITUDE, true)
         bindWidgetSwitch(R.id.switchWidgetChrono,   PREF_WIDGET_CHRONO,   false)
+        bindWidgetSwitch(R.id.switchWidgetTime,     PREF_WIDGET_TIME,     false)
 
         // File loader
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
@@ -177,28 +179,49 @@ class SettingsFragment : Fragment() {
         val name = getFileName(uri)
         val ext = name.substringAfterLast('.', "").lowercase()
         val txtLoaded = view?.findViewById<TextView>(R.id.txtLoadedFile) ?: return
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val waypoints = requireContext().contentResolver.openInputStream(uri)?.use { stream ->
-                    when (ext) {
-                        "gpx", "rte" -> GpxParser.parseGpx(stream)
-                        "wpt"        -> GpxParser.parseWpt(stream)
-                        "plt"        -> GpxParser.parsePlt(stream)
-                        else         -> null
+                val bytes = requireContext().contentResolver.openInputStream(uri)?.readBytes()
+                    ?: throw Exception("Не удалось открыть файл")
+
+                when (ext) {
+                    "gpx", "rte" -> {
+                        val result = GpxParser.parseGpxFull(bytes.inputStream())
+                        withContext(Dispatchers.Main) {
+                            when {
+                                result.waypoints.isNotEmpty() -> {
+                                    txtLoaded.text = "КП: $name (${result.waypoints.size} точек)"
+                                    mapFrag?.loadWaypoints(result.waypoints)
+                                    parentFragmentManager.popBackStack()
+                                }
+                                result.trackPoints.isNotEmpty() -> {
+                                    txtLoaded.text = "Трек: $name (${result.trackPoints.size} точек)"
+                                    mapFrag?.loadTrack(result.trackPoints)
+                                    parentFragmentManager.popBackStack()
+                                }
+                                else -> txtLoaded.text = "Файл: $name — точек не найдено"
+                            }
+                        }
                     }
-                }
-                withContext(Dispatchers.Main) {
-                    if (waypoints == null) {
+                    "wpt" -> {
+                        val wpts = GpxParser.parseWpt(bytes.inputStream())
+                        withContext(Dispatchers.Main) {
+                            txtLoaded.text = "КП: $name (${wpts.size} точек)"
+                            if (wpts.isNotEmpty()) { mapFrag?.loadWaypoints(wpts); parentFragmentManager.popBackStack() }
+                            else txtLoaded.text = "Файл: $name — точек не найдено"
+                        }
+                    }
+                    "plt" -> {
+                        val pts = GpxParser.parsePltTrack(bytes.inputStream())
+                        withContext(Dispatchers.Main) {
+                            if (pts.isNotEmpty()) { mapFrag?.loadTrack(pts); parentFragmentManager.popBackStack() }
+                            else txtLoaded.text = "Файл: $name — точек не найдено"
+                        }
+                    }
+                    else -> withContext(Dispatchers.Main) {
                         Toast.makeText(context, "Формат не поддерживается: .$ext", Toast.LENGTH_SHORT).show()
-                        return@withContext
-                    }
-                    txtLoaded.text = if (waypoints.isEmpty()) "Файл: $name — точек не найдено"
-                                     else "Файл: $name (${waypoints.size} точек)"
-                    if (waypoints.isNotEmpty()) {
-                        parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-                            ?.loadWaypoints(waypoints)
-                        parentFragmentManager.popBackStack()
                     }
                 }
             } catch (e: Exception) {

@@ -68,6 +68,10 @@ class MapFragment : Fragment() {
     private var recordingStartMs = 0L
     private var chronoRunnable: Runnable? = null
     private val chronoHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var timeTickRunnable: Runnable? = null
+    private val timeHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var isScreenLocked = false
+    private val loadedTrackPoints = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
 
     private var initialZoomDone = false
 
@@ -103,6 +107,9 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_NEXTCP = "widget_nextcp"
         const val PREF_WIDGET_ALTITUDE = "widget_altitude"
         const val PREF_WIDGET_CHRONO = "widget_chrono"
+        const val PREF_WIDGET_TIME = "widget_time"
+        const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
+        const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -282,6 +289,29 @@ class MapFragment : Fragment() {
         setSlot(b.widgetAltitudeContainer, b.divider5, prefs.getBoolean(PREF_WIDGET_ALTITUDE, true))
         val chronoOn = prefs.getBoolean(PREF_WIDGET_CHRONO, false)
         b.widgetChronoContainer.visibility = if (chronoOn) View.VISIBLE else View.GONE
+        val timeOn = prefs.getBoolean(PREF_WIDGET_TIME, false)
+        val timeVis = if (timeOn) View.VISIBLE else View.GONE
+        b.widgetTimeContainer.visibility = timeVis
+        b.divider6.visibility = timeVis
+        if (timeOn) startTimeTicker() else stopTimeTicker()
+    }
+
+    private fun startTimeTicker() {
+        timeTickRunnable?.let { timeHandler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                val cal = java.util.Calendar.getInstance()
+                _binding?.widgetTime?.text = String.format("%d:%02d", cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE))
+                timeHandler.postDelayed(this, 10000)
+            }
+        }
+        timeTickRunnable = r
+        timeHandler.post(r)
+    }
+
+    private fun stopTimeTicker() {
+        timeTickRunnable?.let { timeHandler.removeCallbacks(it) }
+        timeTickRunnable = null
     }
 
     fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
@@ -413,7 +443,17 @@ class MapFragment : Fragment() {
             PropertyFactory.iconRotate(com.mapbox.mapboxsdk.style.expressions.Expression.get("bearing")),
             PropertyFactory.iconSize(0.8f)
         ))
+        // Loaded track layer (blue, for file-loaded tracks)
+        style.addSource(GeoJsonSource(LOADED_TRACK_SOURCE_ID))
+        style.addLayer(LineLayer(LOADED_TRACK_LAYER_ID, LOADED_TRACK_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#2196F3"),
+            PropertyFactory.lineWidth(3f),
+            PropertyFactory.lineCap("round"),
+            PropertyFactory.lineJoin("round"),
+            PropertyFactory.lineOpacity(0.85f)
+        ))
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
+        if (loadedTrackPoints.isNotEmpty()) updateLoadedTrackOnMap()
     }
 
     private fun setupWaypointLayers(style: Style) {
@@ -491,6 +531,10 @@ class MapFragment : Fragment() {
 
         binding.btnRec.setOnClickListener { toggleRecording() }
 
+        binding.btnLock.setOnClickListener { lockScreen() }
+
+        binding.lockOverlay.setOnClickListener { unlockScreen() }
+
         binding.btnSettings.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .replace(R.id.container, SettingsFragment())
@@ -503,6 +547,48 @@ class MapFragment : Fragment() {
 
         map.addOnCameraMoveListener { updateCompass() }
         map.addOnCameraIdleListener { updateCompass() }
+    }
+
+    private fun lockScreen() {
+        isScreenLocked = true
+        _binding?.lockOverlay?.visibility = View.VISIBLE
+        ImageViewCompat.setImageTintList(
+            _binding!!.btnLock,
+            android.content.res.ColorStateList.valueOf(Color.parseColor("#FFD600"))
+        )
+    }
+
+    private fun unlockScreen() {
+        isScreenLocked = false
+        _binding?.lockOverlay?.visibility = View.GONE
+        ImageViewCompat.setImageTintList(
+            _binding!!.btnLock,
+            android.content.res.ColorStateList.valueOf(Color.WHITE)
+        )
+    }
+
+    fun loadTrack(points: List<Pair<Double, Double>>) {
+        loadedTrackPoints.clear()
+        loadedTrackPoints.addAll(points.map { LatLng(it.first, it.second) })
+        updateLoadedTrackOnMap()
+        if (points.isNotEmpty()) {
+            mapboxMap?.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(loadedTrackPoints.first(), 12.0), 1000
+            )
+            Toast.makeText(context, "Трек загружен: ${points.size} точек", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updateLoadedTrackOnMap() {
+        val style = mapboxMap?.style ?: return
+        if (loadedTrackPoints.size < 2) return
+        val coords = JSONArray()
+        loadedTrackPoints.forEach { coords.put(JSONArray().put(it.longitude).put(it.latitude)) }
+        style.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)?.setGeoJson(
+            JSONObject().put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+                .put("properties", JSONObject()).toString()
+        )
     }
 
     private fun advanceWaypoint() {
@@ -712,14 +798,14 @@ class MapFragment : Fragment() {
         val cy = size / 2f
         val rad = size / 2f * 0.90f
 
-        // Key points — narrow Yandex-style arrow pointing UP
-        // Bright face = right 2/3, shadow face = left 1/3 (side perspective)
-        val tipX = cx;              val tipY = cy - rad           // sharp tip (top)
-        val rShX = cx + rad*0.60f;  val rShY = cy + rad*0.18f    // right shoulder (narrower!)
-        val rTlX = cx + rad*0.32f;  val rTlY = cy + rad*0.95f    // right tail
-        val notX = cx - rad*0.08f;  val notY = cy + rad*0.48f    // ridge/notch (left of center)
-        val lTlX = cx - rad*0.32f;  val lTlY = cy + rad*0.95f    // left tail
-        val lShX = cx - rad*0.42f;  val lShY = cy + rad*0.12f    // left shoulder (shadow, narrow)
+        // Symmetric arrowhead shape, split into bright right face and shadow left face
+        // Overall width ~60% of height — clean navigation arrow like Yandex
+        val tipX = cx;              val tipY = cy - rad           // tip (top center)
+        val rShX = cx + rad*0.58f;  val rShY = cy + rad*0.25f    // right shoulder
+        val rTlX = cx + rad*0.28f;  val rTlY = cy + rad*0.95f    // right tail
+        val notX = cx;              val notY = cy + rad*0.50f     // V-notch center (symmetric)
+        val lTlX = cx - rad*0.28f;  val lTlY = cy + rad*0.95f    // left tail
+        val lShX = cx - rad*0.58f;  val lShY = cy + rad*0.25f    // left shoulder
 
         // Bright face (right side — top plane facing viewer)
         val brightPath = Path().apply {
@@ -815,5 +901,5 @@ class MapFragment : Fragment() {
     override fun onStop() { super.onStop(); _binding?.mapView?.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); _binding?.mapView?.onSaveInstanceState(outState) }
     override fun onLowMemory() { super.onLowMemory(); _binding?.mapView?.onLowMemory() }
-    override fun onDestroyView() { super.onDestroyView(); stopChronoTicker(); _binding?.mapView?.onDestroy(); _binding = null }
+    override fun onDestroyView() { super.onDestroyView(); stopChronoTicker(); stopTimeTicker(); _binding?.mapView?.onDestroy(); _binding = null }
 }

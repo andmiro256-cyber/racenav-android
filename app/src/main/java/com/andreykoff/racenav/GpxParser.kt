@@ -11,7 +11,67 @@ data class Waypoint(
     val description: String = ""
 )
 
+data class GpxResult(
+    val waypoints: List<Waypoint> = emptyList(),
+    val trackPoints: List<Pair<Double, Double>> = emptyList()
+)
+
 object GpxParser {
+
+    /** Parse GPX file — returns both waypoints (wpt/rtept) and track points (trkpt) */
+    fun parseGpxFull(inputStream: InputStream): GpxResult {
+        val waypoints = mutableListOf<Waypoint>()
+        val trackPoints = mutableListOf<Pair<Double, Double>>()
+        val parser = Xml.newPullParser()
+        parser.setInput(inputStream, null)
+
+        var eventType = parser.eventType
+        var inWpt = false; var inTrkpt = false
+        var lat = 0.0; var lon = 0.0
+        var name = ""; var desc = ""
+
+        while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            when (eventType) {
+                org.xmlpull.v1.XmlPullParser.START_TAG -> {
+                    when (parser.name) {
+                        "wpt", "rtept" -> {
+                            inWpt = true
+                            lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
+                            lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
+                            name = ""; desc = ""
+                        }
+                        "trkpt" -> {
+                            inTrkpt = true
+                            lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
+                            lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
+                        }
+                        "name" -> if (inWpt) name = parser.nextText()
+                        "desc", "cmt" -> if (inWpt && desc.isEmpty()) desc = parser.nextText()
+                    }
+                }
+                org.xmlpull.v1.XmlPullParser.END_TAG -> {
+                    when (parser.name) {
+                        "wpt", "rtept" -> {
+                            if (lat != 0.0 || lon != 0.0) {
+                                waypoints.add(Waypoint(
+                                    name = name.ifBlank { "КП ${waypoints.size + 1}" },
+                                    lat = lat, lon = lon,
+                                    index = waypoints.size + 1, description = desc
+                                ))
+                            }
+                            inWpt = false
+                        }
+                        "trkpt" -> {
+                            if (lat != 0.0 || lon != 0.0) trackPoints.add(Pair(lat, lon))
+                            inTrkpt = false
+                        }
+                    }
+                }
+            }
+            eventType = parser.next()
+        }
+        return GpxResult(waypoints, trackPoints)
+    }
 
     /** Parse GPX file — returns list of waypoints (wpt elements) */
     fun parseGpx(inputStream: InputStream): List<Waypoint> {
@@ -86,15 +146,34 @@ object GpxParser {
         return waypoints
     }
 
-    /** Parse OziExplorer PLT track file */
-    fun parsePlt(inputStream: InputStream): List<Waypoint> {
-        val points = mutableListOf<Waypoint>()
+    /** Parse OziExplorer PLT track file — returns track points */
+    fun parsePltTrack(inputStream: InputStream): List<Pair<Double, Double>> {
+        val points = mutableListOf<Pair<Double, Double>>()
         val lines = inputStream.bufferedReader().readLines()
-        var headerDone = false
         var lineNum = 0
         for (line in lines) {
             lineNum++
             if (lineNum <= 6) continue  // skip OziExplorer PLT header
+            val parts = line.split(",")
+            if (parts.size < 2) continue
+            try {
+                val lat = parts[0].trim().toDoubleOrNull() ?: continue
+                val lon = parts[1].trim().toDoubleOrNull() ?: continue
+                if (lat == 0.0 && lon == 0.0) continue
+                points.add(Pair(lat, lon))
+            } catch (e: Exception) { continue }
+        }
+        return points
+    }
+
+    /** Parse OziExplorer PLT track file (legacy — returns as waypoints) */
+    fun parsePlt(inputStream: InputStream): List<Waypoint> {
+        val points = mutableListOf<Waypoint>()
+        val lines = inputStream.bufferedReader().readLines()
+        var lineNum = 0
+        for (line in lines) {
+            lineNum++
+            if (lineNum <= 6) continue
             val parts = line.split(",")
             if (parts.size < 2) continue
             try {
