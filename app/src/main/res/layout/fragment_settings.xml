@@ -210,6 +210,280 @@
                     android:checked="true" />
             </LinearLayout>
 
+            <!-- Keep screen on -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Экран всегда включён"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchKeepScreen"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <!-- Track recording interval -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Интервал записи трека (сек)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnIntervalMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtTrackInterval"
+                    android:layout_width="32dp"
+                    android:layout_height="wrap_content"
+                    android:text="1"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnIntervalPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Recording track color -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Цвет трека записи"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <View android:id="@+id/trackRecColorRed"    android:layout_width="26dp" android:layout_height="26dp" android:background="#FF2200" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/trackRecColorOrange" android:layout_width="26dp" android:layout_height="26dp" android:background="#FF6F00" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/trackRecColorYellow" android:layout_width="26dp" android:layout_height="26dp" android:background="#FFD600" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/trackRecColorGreen"  android:layout_width="26dp" android:layout_height="26dp" android:background="#2E7D32" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/trackRecColorBlue"   android:layout_width="26dp" android:layout_height="26dp" android:background="#1565C0" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/trackRecColorWhite"  android:layout_width="26dp" android:layout_height="26dp" android:background="#FFFFFF" android:layout_marginStart="5dp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Recording track width -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="1dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Толщина трека записи"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnTrackWidthMinus"
+                    android:layout_width="36dp" android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtTrackWidth"
+                    android:layout_width="32dp" android:layout_height="wrap_content"
+                    android:text="4"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnTrackWidthPlus"
+                    android:layout_width="36dp" android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Follow mode -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Режим следования"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:layout_marginBottom="8dp" />
+                <RadioGroup
+                    android:id="@+id/rgFollowMode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <RadioButton android:id="@+id/rbFollowFree"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Свободный" android:textColor="#CCCCCC" android:textSize="14sp" />
+                    <RadioButton android:id="@+id/rbFollowNorth"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Следить — север вверху" android:textColor="#CCCCCC" android:textSize="14sp" />
+                    <RadioButton android:id="@+id/rbFollowCourse"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Следить — курс вверху" android:textColor="#CCCCCC" android:textSize="14sp" />
+                </RadioGroup>
+            </LinearLayout>
+
+            <!-- Cursor vertical offset -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Курсор ниже центра"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnCursorOffsetMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtCursorOffset"
+                    android:layout_width="32dp"
+                    android:layout_height="wrap_content"
+                    android:text="1"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnCursorOffsetPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Автовозврат к позиции"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchAutoRecenter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <!-- Auto-recenter delay -->
+            <LinearLayout
+                android:id="@+id/rowRecenterDelay"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="32dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="1dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Задержка (сек)"
+                    android:textColor="#AAAAAA"
+                    android:textSize="14sp" />
+                <ImageButton
+                    android:id="@+id/btnRecenterDelayMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtRecenterDelay"
+                    android:layout_width="32dp"
+                    android:layout_height="wrap_content"
+                    android:text="3"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnRecenterDelayPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
             <!-- Section: Widgets -->
             <TextView
                 android:layout_width="wrap_content"
@@ -392,7 +666,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="ФАЙЛЫ ТРЕКОВ"
+                android:text="ФАЙЛЫ КАРТЫ"
                 android:textColor="#888888"
                 android:textSize="11sp"
                 android:letterSpacing="0.1"
@@ -403,20 +677,218 @@
                 android:id="@+id/btnLoadFile"
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
-                android:text="Загрузить трек (GPX, WPT, RTE, PLT)"
+                android:text="Загрузить файл (GPX, WPT, RTE, PLT)"
                 android:textColor="#FFFFFF"
                 android:backgroundTint="#2A2A2A"
                 android:textSize="14sp" />
 
+            <!-- Loaded track row -->
+            <LinearLayout
+                android:id="@+id/rowLoadedTrack"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone"
+                android:layout_marginTop="4dp">
+                <TextView
+                    android:id="@+id/txtLoadedTrack"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="#888888"
+                    android:textSize="13sp"
+                    android:paddingStart="4dp" />
+                <ImageButton
+                    android:id="@+id/btnToggleTrack"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_eye"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Loaded track style (color + width), shown when track is loaded -->
+            <LinearLayout
+                android:id="@+id/rowLoadedTrackStyle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:background="#171717"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="4dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Цвет трека"
+                        android:textColor="#666666"
+                        android:textSize="13sp"
+                        android:paddingStart="4dp" />
+                    <View android:id="@+id/loadedTrackColorBlue"   android:layout_width="26dp" android:layout_height="26dp" android:background="#2196F3" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/loadedTrackColorRed"    android:layout_width="26dp" android:layout_height="26dp" android:background="#FF2200" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/loadedTrackColorOrange" android:layout_width="26dp" android:layout_height="26dp" android:background="#FF6F00" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/loadedTrackColorGreen"  android:layout_width="26dp" android:layout_height="26dp" android:background="#2E7D32" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/loadedTrackColorYellow" android:layout_width="26dp" android:layout_height="26dp" android:background="#FFD600" android:layout_marginStart="5dp" />
+                    <View android:id="@+id/loadedTrackColorWhite"  android:layout_width="26dp" android:layout_height="26dp" android:background="#FFFFFF" android:layout_marginStart="5dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Толщина"
+                        android:textColor="#666666"
+                        android:textSize="13sp"
+                        android:paddingStart="4dp" />
+                    <ImageButton
+                        android:id="@+id/btnLoadedTrackWidthMinus"
+                        android:layout_width="36dp" android:layout_height="36dp"
+                        android:src="@drawable/ic_remove"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:tint="#AAAAAA" />
+                    <TextView
+                        android:id="@+id/txtLoadedTrackWidth"
+                        android:layout_width="32dp" android:layout_height="wrap_content"
+                        android:text="3"
+                        android:textColor="#AAAAAA"
+                        android:textSize="15sp"
+                        android:gravity="center" />
+                    <ImageButton
+                        android:id="@+id/btnLoadedTrackWidthPlus"
+                        android:layout_width="36dp" android:layout_height="36dp"
+                        android:src="@drawable/ic_add"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:tint="#AAAAAA" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Loaded waypoints row -->
+            <LinearLayout
+                android:id="@+id/rowLoadedWp"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone">
+                <TextView
+                    android:id="@+id/txtLoadedWp"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textColor="#888888"
+                    android:textSize="13sp"
+                    android:paddingStart="4dp" />
+                <ImageButton
+                    android:id="@+id/btnToggleWp"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_eye"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- keep old id for compat -->
             <TextView
                 android:id="@+id/txtLoadedFile"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text=""
+                android:textColor="#FF6B6B"
+                android:textSize="12sp"
+                android:paddingStart="4dp"
+                android:visibility="gone" />
+
+            <!-- Section: Offline maps -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="ОФФЛАЙН КАРТЫ"
                 android:textColor="#888888"
-                android:textSize="13sp"
-                android:layout_marginTop="8dp"
-                android:paddingStart="4dp" />
+                android:textSize="11sp"
+                android:letterSpacing="0.1"
+                android:layout_marginBottom="8dp"
+                android:layout_marginTop="24dp" />
+
+            <Button
+                android:id="@+id/btnLoadOfflineMap"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="Загрузить карту (RMaps, MBTiles)"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#2A2A2A"
+                android:textSize="14sp" />
+
+            <!-- Dynamic list of offline maps -->
+            <LinearLayout
+                android:id="@+id/containerOfflineMaps"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginTop="4dp" />
+
+            <!-- Section: Cache -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="КЭШ КАРТ"
+                android:textColor="#888888"
+                android:textSize="11sp"
+                android:letterSpacing="0.1"
+                android:layout_marginBottom="8dp"
+                android:layout_marginTop="24dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Размер кэша (МБ)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnCacheMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtCacheMb"
+                    android:layout_width="56dp"
+                    android:layout_height="wrap_content"
+                    android:text="200"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnCachePlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
 
             <!-- Section: About -->
             <TextView

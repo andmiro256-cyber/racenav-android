@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -28,6 +29,23 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ALTITUDE
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_CHRONO
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TIME
+import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_RECENTER
+import com.andreykoff.racenav.MapFragment.Companion.PREF_RECENTER_DELAY
+import com.andreykoff.racenav.MapFragment.Companion.PREF_FOLLOW_MODE
+import com.andreykoff.racenav.MapFragment.Companion.PREF_KEEP_SCREEN
+import com.andreykoff.racenav.MapFragment.Companion.PREF_TRACK_INTERVAL
+import com.andreykoff.racenav.MapFragment.Companion.PREF_TRACK_COLOR
+import com.andreykoff.racenav.MapFragment.Companion.PREF_TRACK_WIDTH
+import com.andreykoff.racenav.MapFragment.Companion.PREF_LOADED_TRACK_COLOR
+import com.andreykoff.racenav.MapFragment.Companion.PREF_LOADED_TRACK_WIDTH
+import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_TRACK_COLOR
+import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_TRACK_WIDTH
+import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_COLOR
+import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
+import android.widget.RadioGroup
+import android.widget.ImageButton
+import android.widget.ProgressBar
+import androidx.appcompat.app.AlertDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -38,6 +56,10 @@ class SettingsFragment : Fragment() {
     private val filePicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> if (uri != null) loadFile(uri) }
+
+    private val offlineMapPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? -> if (uri != null) loadOfflineMap(uri) }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         return inflater.inflate(R.layout.fragment_settings, container, false)
@@ -74,6 +96,153 @@ class SettingsFragment : Fragment() {
         switchVol.isChecked = prefs.getBoolean(PREF_VOLUME_ZOOM, true)
         switchVol.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_VOLUME_ZOOM, checked).apply()
+        }
+
+        // Auto-recenter
+        val switchRecenter = view.findViewById<SwitchCompat>(R.id.switchAutoRecenter)
+        val rowDelay = view.findViewById<View>(R.id.rowRecenterDelay)
+        switchRecenter.isChecked = prefs.getBoolean(PREF_AUTO_RECENTER, false)
+        rowDelay.visibility = if (switchRecenter.isChecked) View.VISIBLE else View.GONE
+        switchRecenter.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_AUTO_RECENTER, checked).apply()
+            rowDelay.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+
+        val txtDelay = view.findViewById<TextView>(R.id.txtRecenterDelay)
+        var recenterDelay = prefs.getInt(PREF_RECENTER_DELAY, 3).coerceIn(1, 30)
+        txtDelay.text = recenterDelay.toString()
+        view.findViewById<ImageButton>(R.id.btnRecenterDelayMinus).setOnClickListener {
+            if (recenterDelay > 1) {
+                recenterDelay--
+                txtDelay.text = recenterDelay.toString()
+                prefs.edit().putInt(PREF_RECENTER_DELAY, recenterDelay).apply()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnRecenterDelayPlus).setOnClickListener {
+            if (recenterDelay < 30) {
+                recenterDelay++
+                txtDelay.text = recenterDelay.toString()
+                prefs.edit().putInt(PREF_RECENTER_DELAY, recenterDelay).apply()
+            }
+        }
+
+        // Keep screen on
+        val switchKeep = view.findViewById<SwitchCompat>(R.id.switchKeepScreen)
+        switchKeep.isChecked = prefs.getBoolean(PREF_KEEP_SCREEN, true)
+        switchKeep.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_KEEP_SCREEN, checked).apply()
+            (activity as? MainActivity)?.applyKeepScreen()
+        }
+
+        // Track recording interval
+        val txtInterval = view.findViewById<TextView>(R.id.txtTrackInterval)
+        var currentInterval = prefs.getInt(PREF_TRACK_INTERVAL, 1).coerceIn(1, 60)
+        txtInterval.text = currentInterval.toString()
+        view.findViewById<ImageButton>(R.id.btnIntervalMinus).setOnClickListener {
+            if (currentInterval > 1) {
+                currentInterval--
+                txtInterval.text = currentInterval.toString()
+                prefs.edit().putInt(PREF_TRACK_INTERVAL, currentInterval).apply()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnIntervalPlus).setOnClickListener {
+            if (currentInterval < 60) {
+                currentInterval++
+                txtInterval.text = currentInterval.toString()
+                prefs.edit().putInt(PREF_TRACK_INTERVAL, currentInterval).apply()
+            }
+        }
+
+        // Recording track color swatches
+        val mapFragRef = { parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() }
+        val trackRecColors = mapOf(
+            R.id.trackRecColorRed    to "#FF2200",
+            R.id.trackRecColorOrange to "#FF6F00",
+            R.id.trackRecColorYellow to "#FFD600",
+            R.id.trackRecColorGreen  to "#2E7D32",
+            R.id.trackRecColorBlue   to "#1565C0",
+            R.id.trackRecColorWhite  to "#FFFFFF"
+        )
+        var currentTrackColor = prefs.getString(PREF_TRACK_COLOR, DEFAULT_TRACK_COLOR) ?: DEFAULT_TRACK_COLOR
+        trackRecColors.forEach { (id, hex) ->
+            val sw = view.findViewById<View>(id)
+            sw.alpha = if (hex == currentTrackColor) 1f else 0.35f
+            sw.setOnClickListener {
+                currentTrackColor = hex
+                prefs.edit().putString(PREF_TRACK_COLOR, hex).apply()
+                trackRecColors.forEach { (i, _) -> view.findViewById<View>(i).alpha = 0.35f }
+                sw.alpha = 1f
+                mapFragRef()?.applyTrackStyle()
+            }
+        }
+
+        // Recording track width
+        val txtTrackWidth = view.findViewById<TextView>(R.id.txtTrackWidth)
+        var currentTrackWidth = prefs.getFloat(PREF_TRACK_WIDTH, DEFAULT_TRACK_WIDTH).toInt().coerceIn(1, 20)
+        txtTrackWidth.text = currentTrackWidth.toString()
+        view.findViewById<ImageButton>(R.id.btnTrackWidthMinus).setOnClickListener {
+            if (currentTrackWidth > 1) {
+                currentTrackWidth--
+                txtTrackWidth.text = currentTrackWidth.toString()
+                prefs.edit().putFloat(PREF_TRACK_WIDTH, currentTrackWidth.toFloat()).apply()
+                mapFragRef()?.applyTrackStyle()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnTrackWidthPlus).setOnClickListener {
+            if (currentTrackWidth < 20) {
+                currentTrackWidth++
+                txtTrackWidth.text = currentTrackWidth.toString()
+                prefs.edit().putFloat(PREF_TRACK_WIDTH, currentTrackWidth.toFloat()).apply()
+                mapFragRef()?.applyTrackStyle()
+            }
+        }
+
+        // Cursor vertical offset
+        val txtCursorOffset = view.findViewById<TextView>(R.id.txtCursorOffset)
+        var cursorOffset = prefs.getInt(MapFragment.PREF_CURSOR_OFFSET, 1).coerceIn(1, 10)
+        txtCursorOffset.text = cursorOffset.toString()
+        view.findViewById<ImageButton>(R.id.btnCursorOffsetMinus).setOnClickListener {
+            if (cursorOffset > 1) {
+                cursorOffset--
+                txtCursorOffset.text = cursorOffset.toString()
+                prefs.edit().putInt(MapFragment.PREF_CURSOR_OFFSET, cursorOffset).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyCursorOffset()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnCursorOffsetPlus).setOnClickListener {
+            if (cursorOffset < 10) {
+                cursorOffset++
+                txtCursorOffset.text = cursorOffset.toString()
+                prefs.edit().putInt(MapFragment.PREF_CURSOR_OFFSET, cursorOffset).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyCursorOffset()
+            }
+        }
+
+        // Follow mode
+        val rgFollow = view.findViewById<RadioGroup>(R.id.rgFollowMode)
+        val savedMode = prefs.getString(PREF_FOLLOW_MODE, "free") ?: "free"
+        rgFollow.check(when (savedMode) {
+            "north" -> R.id.rbFollowNorth
+            "course" -> R.id.rbFollowCourse
+            else -> R.id.rbFollowFree
+        })
+        rgFollow.setOnCheckedChangeListener { _, id ->
+            val mode = when (id) {
+                R.id.rbFollowNorth -> "north"
+                R.id.rbFollowCourse -> "course"
+                else -> "free"
+            }
+            prefs.edit().putString(PREF_FOLLOW_MODE, mode).apply()
+            // Apply immediately to MapFragment if it exists in backstack
+            val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mapFrag != null) {
+                mapFrag.followMode = when (mode) {
+                    "north" -> MapFragment.FollowMode.FOLLOW_NORTH
+                    "course" -> MapFragment.FollowMode.FOLLOW_COURSE
+                    else -> MapFragment.FollowMode.FREE
+                }
+                mapFrag.applyFollowMode()
+            }
         }
 
         // Marker color swatches
@@ -136,7 +305,114 @@ class SettingsFragment : Fragment() {
 
         // File loader
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
-            filePicker.launch(arrayOf("*/*"))
+            filePicker.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
+        }
+
+        // Eye toggles for loaded track/waypoints
+        val rowTrack = view.findViewById<View>(R.id.rowLoadedTrack)
+        val rowWp = view.findViewById<View>(R.id.rowLoadedWp)
+        val btnToggleTrack = view.findViewById<ImageButton>(R.id.btnToggleTrack)
+        val btnToggleWp = view.findViewById<ImageButton>(R.id.btnToggleWp)
+        val txtTrackRow = view.findViewById<TextView>(R.id.txtLoadedTrack)
+        val txtWpRow = view.findViewById<TextView>(R.id.txtLoadedWp)
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+
+        // Restore track row from prefs (only if track is actually in memory)
+        var trackVisible = prefs.getBoolean(MapFragment.PREF_LOADED_TRACK_VISIBLE, true)
+        var wpVisible = prefs.getBoolean(MapFragment.PREF_LOADED_WP_VISIBLE, true)
+        val rowLoadedTrackStyle = view.findViewById<View>(R.id.rowLoadedTrackStyle)
+        val trackActuallyLoaded = mapFrag?.hasLoadedTrack() == true
+        if (trackActuallyLoaded) {
+            prefs.getString(MapFragment.PREF_LOADED_TRACK_NAME, null)?.let { name ->
+                txtTrackRow?.text = name; rowTrack?.visibility = View.VISIBLE
+                rowLoadedTrackStyle?.visibility = View.VISIBLE
+                btnToggleTrack.setImageResource(if (trackVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+            }
+        }
+        prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null)?.let { name ->
+            txtWpRow?.text = name; rowWp?.visibility = View.VISIBLE
+            btnToggleWp.setImageResource(if (wpVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+        }
+
+        btnToggleTrack.setOnClickListener {
+            trackVisible = !trackVisible
+            btnToggleTrack.setImageResource(if (trackVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+            mapFrag?.setLoadedTrackVisible(trackVisible)
+        }
+        btnToggleWp.setOnClickListener {
+            wpVisible = !wpVisible
+            btnToggleWp.setImageResource(if (wpVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+            mapFrag?.setLoadedWpVisible(wpVisible)
+        }
+
+        // Loaded track color swatches
+        val loadedTrackColors = mapOf(
+            R.id.loadedTrackColorBlue   to "#2196F3",
+            R.id.loadedTrackColorRed    to "#FF2200",
+            R.id.loadedTrackColorOrange to "#FF6F00",
+            R.id.loadedTrackColorGreen  to "#2E7D32",
+            R.id.loadedTrackColorYellow to "#FFD600",
+            R.id.loadedTrackColorWhite  to "#FFFFFF"
+        )
+        var currentLoadedColor = prefs.getString(PREF_LOADED_TRACK_COLOR, DEFAULT_LOADED_TRACK_COLOR) ?: DEFAULT_LOADED_TRACK_COLOR
+        loadedTrackColors.forEach { (id, hex) ->
+            val sw = view.findViewById<View>(id)
+            sw.alpha = if (hex == currentLoadedColor) 1f else 0.35f
+            sw.setOnClickListener {
+                currentLoadedColor = hex
+                prefs.edit().putString(PREF_LOADED_TRACK_COLOR, hex).apply()
+                loadedTrackColors.forEach { (i, _) -> view.findViewById<View>(i).alpha = 0.35f }
+                sw.alpha = 1f
+                mapFrag?.applyLoadedTrackStyle()
+            }
+        }
+
+        // Loaded track width
+        val txtLoadedWidth = view.findViewById<TextView>(R.id.txtLoadedTrackWidth)
+        var currentLoadedWidth = prefs.getFloat(PREF_LOADED_TRACK_WIDTH, DEFAULT_LOADED_TRACK_WIDTH).toInt().coerceIn(1, 20)
+        txtLoadedWidth.text = currentLoadedWidth.toString()
+        view.findViewById<ImageButton>(R.id.btnLoadedTrackWidthMinus).setOnClickListener {
+            if (currentLoadedWidth > 1) {
+                currentLoadedWidth--
+                txtLoadedWidth.text = currentLoadedWidth.toString()
+                prefs.edit().putFloat(PREF_LOADED_TRACK_WIDTH, currentLoadedWidth.toFloat()).apply()
+                mapFrag?.applyLoadedTrackStyle()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnLoadedTrackWidthPlus).setOnClickListener {
+            if (currentLoadedWidth < 20) {
+                currentLoadedWidth++
+                txtLoadedWidth.text = currentLoadedWidth.toString()
+                prefs.edit().putFloat(PREF_LOADED_TRACK_WIDTH, currentLoadedWidth.toFloat()).apply()
+                mapFrag?.applyLoadedTrackStyle()
+            }
+        }
+
+        // Offline maps — dynamic list
+        refreshOfflineMapsUI(view)
+        view.findViewById<View>(R.id.btnLoadOfflineMap).setOnClickListener {
+            offlineMapPicker.launch(arrayOf("*/*", "application/octet-stream"))
+        }
+
+        // Tile cache size
+        val txtCache = view.findViewById<TextView>(R.id.txtCacheMb)
+        var cacheMb = prefs.getInt(MapFragment.PREF_TILE_CACHE_MB, 200).coerceIn(100, 4000)
+        txtCache.text = cacheMb.toString()
+        view.findViewById<ImageButton>(R.id.btnCacheMinus).setOnClickListener {
+            if (cacheMb > 100) {
+                cacheMb = (cacheMb - 100).coerceAtLeast(100)
+                txtCache.text = cacheMb.toString()
+                prefs.edit().putInt(MapFragment.PREF_TILE_CACHE_MB, cacheMb).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyCacheSize()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnCachePlus).setOnClickListener {
+            if (cacheMb < 4000) {
+                cacheMb = (cacheMb + 100).coerceAtMost(4000)
+                txtCache.text = cacheMb.toString()
+                prefs.edit().putInt(MapFragment.PREF_TILE_CACHE_MB, cacheMb).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyCacheSize()
+            }
         }
 
         // Version
@@ -178,8 +454,13 @@ class SettingsFragment : Fragment() {
     private fun loadFile(uri: Uri) {
         val name = getFileName(uri)
         val ext = name.substringAfterLast('.', "").lowercase()
-        val txtLoaded = view?.findViewById<TextView>(R.id.txtLoadedFile) ?: return
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        val rowTrack = view?.findViewById<View>(R.id.rowLoadedTrack)
+        val rowWp    = view?.findViewById<View>(R.id.rowLoadedWp)
+        val txtTrack = view?.findViewById<TextView>(R.id.txtLoadedTrack)
+        val txtWp    = view?.findViewById<TextView>(R.id.txtLoadedWp)
+        val txtErr   = view?.findViewById<TextView>(R.id.txtLoadedFile)
+        val filePrefs = requireContext().getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -190,34 +471,50 @@ class SettingsFragment : Fragment() {
                     "gpx", "rte" -> {
                         val result = GpxParser.parseGpxFull(bytes.inputStream())
                         withContext(Dispatchers.Main) {
-                            when {
-                                result.waypoints.isNotEmpty() -> {
-                                    txtLoaded.text = "КП: $name (${result.waypoints.size} точек)"
-                                    mapFrag?.loadWaypoints(result.waypoints)
-                                    parentFragmentManager.popBackStack()
-                                }
-                                result.trackPoints.isNotEmpty() -> {
-                                    txtLoaded.text = "Трек: $name (${result.trackPoints.size} точек)"
-                                    mapFrag?.loadTrack(result.trackPoints)
-                                    parentFragmentManager.popBackStack()
-                                }
-                                else -> txtLoaded.text = "Файл: $name — точек не найдено"
+                            if (result.trackPoints.isNotEmpty()) {
+                                mapFrag?.loadTrack(result.trackPoints)
+                                val label = "Трек: $name (${result.trackPoints.size} точек)"
+                                txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
+                                view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
+                                filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                            }
+                            if (result.waypoints.isNotEmpty()) {
+                                mapFrag?.loadWaypoints(result.waypoints)
+                                val label = "КП: $name (${result.waypoints.size} точек)"
+                                txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                            }
+                            if (result.trackPoints.isEmpty() && result.waypoints.isEmpty()) {
+                                txtErr?.text = "Файл пустой: $name"
+                                txtErr?.visibility = View.VISIBLE
                             }
                         }
                     }
                     "wpt" -> {
                         val wpts = GpxParser.parseWpt(bytes.inputStream())
                         withContext(Dispatchers.Main) {
-                            txtLoaded.text = "КП: $name (${wpts.size} точек)"
-                            if (wpts.isNotEmpty()) { mapFrag?.loadWaypoints(wpts); parentFragmentManager.popBackStack() }
-                            else txtLoaded.text = "Файл: $name — точек не найдено"
+                            if (wpts.isNotEmpty()) {
+                                mapFrag?.loadWaypoints(wpts)
+                                val label = "КП: $name (${wpts.size} точек)"
+                                txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                            } else {
+                                txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
+                            }
                         }
                     }
                     "plt" -> {
                         val pts = GpxParser.parsePltTrack(bytes.inputStream())
                         withContext(Dispatchers.Main) {
-                            if (pts.isNotEmpty()) { mapFrag?.loadTrack(pts); parentFragmentManager.popBackStack() }
-                            else txtLoaded.text = "Файл: $name — точек не найдено"
+                            if (pts.isNotEmpty()) {
+                                mapFrag?.loadTrack(pts)
+                                val label = "Трек: $name (${pts.size} точек)"
+                                txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
+                                view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
+                                filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                            } else {
+                                txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
+                            }
                         }
                     }
                     else -> withContext(Dispatchers.Main) {
@@ -228,6 +525,91 @@ class SettingsFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
                 }
+            }
+        }
+    }
+
+    private fun loadOfflineMap(uri: Uri) {
+        val name = getFileName(uri)
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (ext !in listOf("sqlitedb", "mbtiles", "db")) {
+            Toast.makeText(context, "Формат не поддерживается: .$ext\nОжидается .sqlitedb или .mbtiles", Toast.LENGTH_LONG).show()
+            return
+        }
+        // Show progress dialog while copying
+        val progressBar = ProgressBar(requireContext(), null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = false; max = 100; progress = 0
+        }
+        val progressDialog = AlertDialog.Builder(requireContext())
+            .setTitle("Загрузка карты")
+            .setMessage(name)
+            .setView(progressBar)
+            .setCancelable(false)
+            .create()
+        progressDialog.show()
+
+        // Copy to app private storage with progress tracking
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val dest = java.io.File(requireContext().filesDir, "offline_map_${System.currentTimeMillis()}.$ext")
+                val total = requireContext().contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+                var copied = 0L
+                val buffer = ByteArray(65536)
+                requireContext().contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { output ->
+                        var n: Int
+                        while (input.read(buffer).also { n = it } != -1) {
+                            output.write(buffer, 0, n)
+                            copied += n
+                            if (total > 0) {
+                                val pct = (copied * 100 / total).toInt()
+                                withContext(Dispatchers.Main) { progressBar.progress = pct }
+                            }
+                        }
+                    }
+                }
+                val path = dest.absolutePath
+                withContext(Dispatchers.Main) {
+                    progressDialog.dismiss()
+                    val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    val key = mapFrag?.addOfflineMap(path, name)
+                    if (key != null) {
+                        view?.let { refreshOfflineMapsUI(it) }
+                        Toast.makeText(context, "Карта загружена: $name", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Не удалось открыть карту: неизвестный формат", Toast.LENGTH_LONG).show()
+                        dest.delete()
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    progressDialog.dismiss()
+                    Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun refreshOfflineMapsUI(view: View) {
+        val container = view.findViewById<LinearLayout>(R.id.containerOfflineMaps)
+        container.removeAllViews()
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        val maps = mapFrag?.getOfflineMaps() ?: emptyList()
+        if (maps.isEmpty()) {
+            val tv = android.widget.TextView(requireContext()).apply {
+                text = "Нет загруженных карт"; setTextColor(0xFF888888.toInt())
+                textSize = 13f; setPadding(4, 8, 4, 8)
+            }
+            container.addView(tv)
+        } else {
+            maps.forEach { info ->
+                val row = layoutInflater.inflate(R.layout.item_offline_map, container, false)
+                row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).text = info.name
+                row.findViewById<View>(R.id.btnRemoveOfflineMap).setOnClickListener {
+                    mapFrag?.removeOfflineMap(info.key)
+                    refreshOfflineMapsUI(view)
+                }
+                container.addView(row)
             }
         }
     }
