@@ -39,11 +39,31 @@ class MainActivity : AppCompatActivity() {
             super.onBackPressed()
             return
         }
-        AlertDialog.Builder(this)
-            .setMessage("Выйти из приложения?")
-            .setPositiveButton("Выйти") { _, _ -> finish() }
-            .setNegativeButton("Отмена", null)
-            .show()
+        val mapFrag = supportFragmentManager.findFragmentById(R.id.container) as? MapFragment
+        if (TrackingService.isRunning) {
+            // Recording active — offer to save before exit
+            AlertDialog.Builder(this)
+                .setTitle("Идёт запись трека")
+                .setMessage("Трек записывается. Что сделать перед выходом?")
+                .setPositiveButton("Сохранить и выйти") { _, _ ->
+                    val ctx = this
+                    ctx.startService(
+                        android.content.Intent(ctx, TrackingService::class.java)
+                            .apply { action = TrackingService.ACTION_STOP }
+                    )
+                    mapFrag?.saveTrackToFile()
+                    finish()
+                }
+                .setNeutralButton("Выйти без сохранения") { _, _ -> finish() }
+                .setNegativeButton("Отмена", null)
+                .show()
+        } else {
+            AlertDialog.Builder(this)
+                .setMessage("Выйти из приложения?")
+                .setPositiveButton("Выйти") { _, _ -> finish() }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {

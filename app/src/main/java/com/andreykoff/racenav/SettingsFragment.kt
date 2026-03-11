@@ -283,6 +283,16 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Save current track to GPX file
+        view.findViewById<android.widget.Button>(R.id.btnSaveTrack).setOnClickListener {
+            val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mapFrag != null) {
+                mapFrag.saveTrackToFile()
+            } else {
+                Toast.makeText(requireContext(), "Нет активного трека", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         // Marker color swatches
         val colorMap = mapOf(
             R.id.colorGold   to "#FFD600",

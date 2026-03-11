@@ -11,8 +11,9 @@ import kotlin.math.*
 class TrackingService : Service() {
 
     companion object {
-        const val ACTION_START = "START"
-        const val ACTION_STOP  = "STOP"
+        const val ACTION_START  = "START"
+        const val ACTION_STOP   = "STOP"
+        const val ACTION_RESUME = "RESUME"  // Resume with existing trackPoints (don't clear)
 
         const val BROADCAST_LOCATION = "com.andreykoff.racenav.LOCATION"
         const val EXTRA_LAT      = "lat"
@@ -45,6 +46,9 @@ class TrackingService : Service() {
                 if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
                 trackPoints.add(newPoint)
                 updateNotification()
+
+                // Auto-save every 10 points to survive app restarts
+                if (trackPoints.size % 10 == 0) autoSaveTrack()
             }
 
             // Широковещание для MapFragment (обновление UI)
@@ -71,17 +75,24 @@ class TrackingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startTracking()
-            ACTION_STOP  -> stopTracking()
+            ACTION_START  -> startTracking(clearPoints = true)
+            ACTION_RESUME -> startTracking(clearPoints = false)
+            ACTION_STOP   -> stopTracking()
         }
         return START_STICKY
     }
 
-    private fun startTracking() {
-        trackPoints.clear()
-        trackLengthM  = 0.0
-        startTimeMs   = System.currentTimeMillis()
-        isRunning     = true
+    private fun startTracking(clearPoints: Boolean) {
+        if (clearPoints) {
+            trackPoints.clear()
+            trackLengthM = 0.0
+        }
+        startTimeMs = System.currentTimeMillis()
+        isRunning   = true
+
+        // Mark recording active in prefs so app knows to offer resume on restart
+        getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, true).apply()
 
         startForeground(NOTIF_ID, buildNotification("Запись трека начата…"))
 
@@ -93,7 +104,7 @@ class TrackingService : Service() {
             locationManager?.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
                 intervalMs,
-                0f,      // min distance m
+                0f,
                 locationListener,
                 Looper.getMainLooper()
             )
@@ -104,9 +115,19 @@ class TrackingService : Service() {
 
     private fun stopTracking() {
         isRunning = false
+        autoSaveTrack()  // Final save before stopping
         locationManager?.removeUpdates(locationListener)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /** Save current track to temp file (survives app restart) */
+    private fun autoSaveTrack() {
+        if (trackPoints.isEmpty()) return
+        try {
+            val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
+            file.writeText(GpxParser.writeGpx(trackPoints, "Текущий трек"))
+        } catch (_: Exception) {}
     }
 
     private fun updateNotification() {

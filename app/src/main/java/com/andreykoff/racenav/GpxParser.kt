@@ -166,6 +166,19 @@ object GpxParser {
         return points
     }
 
+    /** Write track points as GPX string */
+    fun writeGpx(points: List<Pair<Double, Double>>, name: String = "Трек"): String {
+        val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return buildString {
+            appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+            appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("  <trk><name>$safeName</name><trkseg>")
+            for ((lat, lon) in points) appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+            appendLine("  </trkseg></trk>")
+            append("</gpx>")
+        }
+    }
+
     /** Parse OziExplorer PLT track file (legacy — returns as waypoints) */
     fun parsePlt(inputStream: InputStream): List<Waypoint> {
         val points = mutableListOf<Waypoint>()

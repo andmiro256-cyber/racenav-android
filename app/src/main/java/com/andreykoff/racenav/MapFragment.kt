@@ -174,6 +174,8 @@ class MapFragment : Fragment() {
         const val PREF_TILE_CACHE_MB  = "tile_cache_mb"  // MB, default 200
         const val PREF_3D_TILT        = "3d_tilt_enabled"  // bool, default false
         const val PREF_AUTO_ZOOM      = "auto_zoom_level"   // 0=disabled, 1-10
+        const val PREF_WAS_RECORDING  = "was_recording"     // bool: app was closed during recording
+        const val TRACK_TMP_FILENAME  = "current_track_tmp.gpx" // temp file while recording
         const val OFFLINE_TILE_KEY = "offline"
         const val TILE_SERVER_PORT = 18564
 
@@ -332,6 +334,8 @@ class MapFragment : Fragment() {
             autoZoomLevel = tilePrefs?.getInt(PREF_AUTO_ZOOM, 0) ?: 0
 
             setupButtons(map)
+            // Check if app was closed while recording — offer resume/save
+            if (!isRecording) checkForUnfinishedTrack()
             // Long press on map toggles UI bars
             map.addOnMapLongClickListener {
                 val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
@@ -975,17 +979,132 @@ class MapFragment : Fragment() {
             startChronoTicker()
             Toast.makeText(ctx, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
         } else {
-            // Стоп
-            val pts  = TrackingService.trackPoints.size
-            val kmStr = String.format("%.1f", TrackingService.trackLengthM / 1000)
+            // Стоп — останавливаем сервис (он сделает финальный авто-сейв в tmp файл)
             ctx.startService(Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_STOP })
             stopChronoTicker()
             arrowPoints.clear()
             updateTrackOnMap()
             binding.btnRec.setImageResource(R.drawable.ic_rec_start)
-            Toast.makeText(ctx, "⏹ $pts точек, $kmStr км", Toast.LENGTH_SHORT).show()
+            // Показываем диалог сохранения
+            showSaveTrackDialog()
         }
     }
+
+    // ─── Track save / resume ──────────────────────────────────────────────────
+
+    /** Called when user stops recording — offer to save GPX */
+    private fun showSaveTrackDialog() {
+        val ctx = context ?: return
+        val pts = TrackingService.trackPoints.toList()
+        val kmStr = String.format("%.1f", TrackingService.trackLengthM / 1000)
+        if (pts.size < 2) {
+            Toast.makeText(ctx, "⏹ Запись остановлена (нет точек)", Toast.LENGTH_SHORT).show()
+            clearTmpTrack()
+            return
+        }
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Запись остановлена")
+            .setMessage("${pts.size} точек • $kmStr км\n\nСохранить трек в файл?")
+            .setPositiveButton("Сохранить") { _, _ -> saveTrackToFile(pts) }
+            .setNegativeButton("Не сохранять") { _, _ -> clearTmpTrack() }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** Check if app was killed during recording — offer resume / save / discard */
+    private fun checkForUnfinishedTrack() {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(PREF_WAS_RECORDING, false)) return
+        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
+        if (!tmpFile.exists() || tmpFile.length() == 0L) {
+            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+            return
+        }
+        val savedPoints = try {
+            GpxParser.parseGpxFull(tmpFile.inputStream()).trackPoints
+        } catch (_: Exception) {
+            tmpFile.delete()
+            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+            return
+        }
+        if (savedPoints.isEmpty()) {
+            tmpFile.delete()
+            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+            return
+        }
+        val km = calcTrackKm(savedPoints)
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Незаконченная запись")
+            .setMessage("Найден трек: ${savedPoints.size} точек, ${String.format("%.1f", km)} км\n\nЧто сделать?")
+            .setPositiveButton("Продолжить запись") { _, _ ->
+                // Restore points and resume recording
+                TrackingService.trackPoints.clear()
+                TrackingService.trackPoints.addAll(savedPoints)
+                TrackingService.trackLengthM = km * 1000.0
+                val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_RESUME }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+                else ctx.startService(intent)
+                _binding?.btnRec?.setImageResource(R.drawable.ic_rec)
+                _binding?.widgetChrono?.text = "0:00"
+                startChronoTicker()
+                updateTrackOnMap()
+            }
+            .setNeutralButton("Сохранить") { _, _ -> saveTrackToFile(savedPoints) }
+            .setNegativeButton("Удалить") { _, _ -> clearTmpTrack() }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** Save track points to GPX file in app's external tracks folder */
+    fun saveTrackToFile(points: List<Pair<Double, Double>>? = null) {
+        val ctx = context ?: return
+        val pts = points ?: TrackingService.trackPoints.toList()
+        if (pts.isEmpty()) {
+            Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val filename = "racenav_$timestamp.gpx"
+        val gpxContent = GpxParser.writeGpx(pts, "RaceNav $timestamp")
+        try {
+            val dir = ctx.getExternalFilesDir("tracks")
+            dir?.mkdirs()
+            java.io.File(dir, filename).writeText(gpxContent)
+            clearTmpTrack()
+            Toast.makeText(ctx,
+                "✅ Сохранён: Android/data/com.andreykoff.racenav/files/tracks/$filename",
+                Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Delete temp file and clear was_recording flag */
+    private fun clearTmpTrack() {
+        val ctx = context ?: return
+        java.io.File(ctx.filesDir, TRACK_TMP_FILENAME).takeIf { it.exists() }?.delete()
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+    }
+
+    /** Calculate track length in km from list of lat/lon pairs */
+    private fun calcTrackKm(pts: List<Pair<Double, Double>>): Double {
+        if (pts.size < 2) return 0.0
+        var m = 0.0
+        for (i in 1 until pts.size) {
+            val a = pts[i - 1]; val b = pts[i]
+            val R = 6371000.0
+            val lat1 = Math.toRadians(a.first); val lat2 = Math.toRadians(b.first)
+            val dLat = lat2 - lat1; val dLon = Math.toRadians(b.second - a.second)
+            val x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+            m += 2 * R * Math.asin(Math.sqrt(x))
+        }
+        return m / 1000.0
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun startChronoTicker() {
         chronoRunnable?.let { chronoHandler.removeCallbacks(it) }
