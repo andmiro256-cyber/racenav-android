@@ -41,13 +41,7 @@
             android:contentDescription="Compass"
             android:padding="4dp" />
 
-        <!-- Push buttons to right -->
-        <View
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <!-- Zoom In -->
+        <!-- Zoom In — left side, next to compass -->
         <ImageButton
             android:id="@+id/btnZoomIn"
             android:layout_width="36dp"
@@ -58,7 +52,7 @@
             android:tint="#FFFFFF"
             android:padding="5dp" />
 
-        <!-- Zoom Out -->
+        <!-- Zoom Out — left side, next to zoom in -->
         <ImageButton
             android:id="@+id/btnZoomOut"
             android:layout_width="36dp"
@@ -68,6 +62,19 @@
             android:contentDescription="Zoom out"
             android:tint="#FFFFFF"
             android:padding="5dp" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="24dp"
+            android:background="#444444"
+            android:layout_marginStart="1dp"
+            android:layout_marginEnd="1dp" />
+
+        <!-- Push remaining buttons to right -->
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
         <View
             android:layout_width="1dp"

@@ -113,6 +113,7 @@ class MapFragment : Fragment() {
     var autoRecenterEnabled = false
     var tilt3dEnabled = false       // 3D tilt when driving in FOLLOW_COURSE
     var autoZoomLevel = 0           // 0=off, 1-10; controls zoom amplitude with speed
+    private var userBaseZoom = -1.0 // user's preferred zoom; auto-zoom adjusts relative to this
     private var userDragged = false  // true = user moved map manually, pause following
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
     private var tileServer: TileServer? = null
@@ -423,8 +424,16 @@ class MapFragment : Fragment() {
         timeTickRunnable = null
     }
 
-    fun zoomIn() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn()) }
-    fun zoomOut() { mapboxMap?.animateCamera(CameraUpdateFactory.zoomOut()) }
+    fun zoomIn() {
+        val cur = mapboxMap?.cameraPosition?.zoom ?: 14.0
+        userBaseZoom = (if (userBaseZoom > 0) userBaseZoom else cur) + 1.0
+        mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn())
+    }
+    fun zoomOut() {
+        val cur = mapboxMap?.cameraPosition?.zoom ?: 14.0
+        userBaseZoom = ((if (userBaseZoom > 0) userBaseZoom else cur) - 1.0).coerceAtLeast(2.0)
+        mapboxMap?.animateCamera(CameraUpdateFactory.zoomOut())
+    }
 
     private fun buildStyleJson(baseKey: String, overlayKey: String): String {
         val base = tileSources[baseKey] ?: return ""
@@ -678,11 +687,24 @@ class MapFragment : Fragment() {
         binding.widgetNextCp.setOnClickListener { advanceWaypoint() }
 
         map.addOnCameraMoveListener { updateCompass() }
-        map.addOnCameraIdleListener { updateCompass() }
+        map.addOnCameraIdleListener {
+            updateCompass()
+            // When user manually zooms (pinch/double-tap), record their preferred zoom
+            if (autoZoomLevel > 0 &&
+                map.cameraPosition.zoom > 0 &&
+                !userDragged) {
+                // Only update base zoom if not in a follow-mode animation
+                // (follow-mode animations set the target themselves)
+            }
+        }
         map.addOnCameraMoveStartedListener { reason ->
-            if (reason == MapboxMap.OnCameraMoveStartedListener.REASON_API_GESTURE && followMode != FollowMode.FREE) {
-                userDragged = true
-                if (autoRecenterEnabled) scheduleAutoRecenter()
+            if (reason == MapboxMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
+                // User manually moved/zoomed — record their zoom preference
+                userBaseZoom = map.cameraPosition.zoom
+                if (followMode != FollowMode.FREE) {
+                    userDragged = true
+                    if (autoRecenterEnabled) scheduleAutoRecenter()
+                }
             }
         }
     }
@@ -898,12 +920,17 @@ class MapFragment : Fragment() {
                             (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
                         else 0.0
 
-                        // Auto-zoom: level 1–10, zoom shrinks as speed grows
-                        // level 1 = ±0.6 zoom range, level 10 = ±6.0 zoom range
-                        // At 0 km/h → zoom 16, at 120 km/h → zoom 16 - level*0.6
-                        val targetZoom = if (autoZoomLevel > 0)
-                            (16.0 - (speedKmh.coerceIn(0.0, 120.0) / 120.0 * autoZoomLevel * 0.6)).coerceIn(10.0, 18.0)
-                        else null
+                        // Auto-zoom: relative to user's preferred zoom (userBaseZoom)
+                        // At speed 0 → zoom = userBaseZoom (unchanged)
+                        // At 120 km/h, level 10 → zoom = userBaseZoom - 4.0
+                        // At 120 km/h, level 1  → zoom = userBaseZoom - 0.4
+                        val targetZoom = if (autoZoomLevel > 0) {
+                            val base = if (userBaseZoom > 0) userBaseZoom
+                                       else mapboxMap?.cameraPosition?.zoom ?: 14.0
+                            val maxDelta = autoZoomLevel * 0.4  // level 10 = max 4 zoom levels
+                            val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
+                            (base - delta).coerceIn(base - maxDelta, base)
+                        } else null
 
                         when (followMode) {
                             FollowMode.FOLLOW_NORTH -> {
