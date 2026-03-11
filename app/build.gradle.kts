@@ -11,8 +11,8 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.7.5"
+        versionCode = 46
+        versionName = "1.9.9"
     }
 
     signingConfigs {
@@ -66,4 +66,5 @@ dependencies {
     implementation("org.maplibre.gl:android-sdk:10.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }

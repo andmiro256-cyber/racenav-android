@@ -110,7 +110,7 @@ class MapFragment : Fragment() {
     private val loadedTrackPoints = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
 
     private var initialZoomDone = false
-    private var autoRecenterEnabled = false
+    var autoRecenterEnabled = false
     private var userDragged = false  // true = user moved map manually, pause following
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
     private var tileServer: TileServer? = null
@@ -722,6 +722,8 @@ class MapFragment : Fragment() {
         tileSources.remove(key)
         if (currentTileKey == key) loadTileStyle("osm", currentOverlayKey)
         saveOfflineMapsToPrefs()
+        // Delete the actual file to free storage
+        java.io.File(info.path).takeIf { it.exists() }?.delete()
     }
 
     fun getOfflineMaps(): List<OfflineMapInfo> = offlineMaps.toList()

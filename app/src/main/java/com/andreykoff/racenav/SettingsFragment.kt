@@ -106,6 +106,7 @@ class SettingsFragment : Fragment() {
         switchRecenter.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_AUTO_RECENTER, checked).apply()
             rowDelay.visibility = if (checked) View.VISIBLE else View.GONE
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.autoRecenterEnabled = checked
         }
 
         val txtDelay = view.findViewById<TextView>(R.id.txtRecenterDelay)
