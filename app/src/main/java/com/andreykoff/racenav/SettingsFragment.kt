@@ -42,6 +42,8 @@ import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_TRACK_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
+import com.andreykoff.racenav.MapFragment.Companion.PREF_3D_TILT
+import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
 import android.widget.RadioGroup
 import android.widget.ImageButton
 import android.widget.ProgressBar
@@ -243,6 +245,41 @@ class SettingsFragment : Fragment() {
                     else -> MapFragment.FollowMode.FREE
                 }
                 mapFrag.applyFollowMode()
+            }
+        }
+
+        // 3D tilt on speed
+        val switch3d = view.findViewById<SwitchCompat>(R.id.switch3dTilt)
+        switch3d.isChecked = prefs.getBoolean(PREF_3D_TILT, false)
+        switch3d.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_3D_TILT, checked).apply()
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                ?.let { it.tilt3dEnabled = checked }
+        }
+
+        // Auto-zoom by speed (0=off, 1-10)
+        var autoZoom = prefs.getInt(PREF_AUTO_ZOOM, 0).coerceIn(0, 10)
+        val txtAutoZoom = view.findViewById<TextView>(R.id.txtAutoZoom)
+        fun updateAutoZoomText() {
+            txtAutoZoom.text = if (autoZoom == 0) "Выкл" else autoZoom.toString()
+        }
+        updateAutoZoomText()
+        view.findViewById<ImageButton>(R.id.btnAutoZoomMinus).setOnClickListener {
+            if (autoZoom > 0) {
+                autoZoom--
+                updateAutoZoomText()
+                prefs.edit().putInt(PREF_AUTO_ZOOM, autoZoom).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?.let { it.autoZoomLevel = autoZoom }
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnAutoZoomPlus).setOnClickListener {
+            if (autoZoom < 10) {
+                autoZoom++
+                updateAutoZoomText()
+                prefs.edit().putInt(PREF_AUTO_ZOOM, autoZoom).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?.let { it.autoZoomLevel = autoZoom }
             }
         }
 

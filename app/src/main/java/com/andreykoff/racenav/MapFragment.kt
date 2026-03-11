@@ -111,6 +111,8 @@ class MapFragment : Fragment() {
 
     private var initialZoomDone = false
     var autoRecenterEnabled = false
+    var tilt3dEnabled = false       // 3D tilt when driving in FOLLOW_COURSE
+    var autoZoomLevel = 0           // 0=off, 1-10; controls zoom amplitude with speed
     private var userDragged = false  // true = user moved map manually, pause following
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
     private var tileServer: TileServer? = null
@@ -170,6 +172,8 @@ class MapFragment : Fragment() {
         const val PREF_CURSOR_OFFSET = "cursor_offset"   // 1-10, 1=center, 10=near bottom
         const val PREF_RECENTER_DELAY = "recenter_delay" // seconds, default 3
         const val PREF_TILE_CACHE_MB  = "tile_cache_mb"  // MB, default 200
+        const val PREF_3D_TILT        = "3d_tilt_enabled"  // bool, default false
+        const val PREF_AUTO_ZOOM      = "auto_zoom_level"   // 0=disabled, 1-10
         const val OFFLINE_TILE_KEY = "offline"
         const val TILE_SERVER_PORT = 18564
 
@@ -310,6 +314,8 @@ class MapFragment : Fragment() {
             val tilePrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val savedTile = tilePrefs?.getString(PREF_TILE_KEY, "osm") ?: "osm"
             val savedOverlay = tilePrefs?.getString(PREF_OVERLAY_KEY, "none") ?: "none"
+            // Load offline maps BEFORE loadTileStyle so tile sources are ready
+            loadOfflineMapsFromPrefs()
             loadTileStyle(savedTile, savedOverlay)
 
             // Restore camera position if saved
@@ -322,9 +328,8 @@ class MapFragment : Fragment() {
             }
 
             autoRecenterEnabled = tilePrefs?.getBoolean(PREF_AUTO_RECENTER, false) ?: false
-
-            // Load offline maps
-            loadOfflineMapsFromPrefs()
+            tilt3dEnabled = tilePrefs?.getBoolean(PREF_3D_TILT, false) ?: false
+            autoZoomLevel = tilePrefs?.getInt(PREF_AUTO_ZOOM, 0) ?: 0
 
             setupButtons(map)
             // Long press on map toggles UI bars
@@ -883,24 +888,37 @@ class MapFragment : Fragment() {
                     // userDragged = true means user panned map manually; we pause until recenter
                     if (initialZoomDone && !userDragged) {
                         val speedKmh = loc.speed * 3.6
+
+                        // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
+                        val tilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
+                            (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
+                        else 0.0
+
+                        // Auto-zoom: level 1–10, zoom shrinks as speed grows
+                        // level 1 = ±0.6 zoom range, level 10 = ±6.0 zoom range
+                        // At 0 km/h → zoom 16, at 120 km/h → zoom 16 - level*0.6
+                        val targetZoom = if (autoZoomLevel > 0)
+                            (16.0 - (speedKmh.coerceIn(0.0, 120.0) / 120.0 * autoZoomLevel * 0.6)).coerceIn(10.0, 18.0)
+                        else null
+
                         when (followMode) {
-                            FollowMode.FOLLOW_NORTH ->
-                                mapboxMap?.animateCamera(CameraUpdateFactory.newCameraPosition(
-                                    com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-                                        .target(newPoint)
-                                        .bearing(0.0)
-                                        .build()
-                                ), 900)
+                            FollowMode.FOLLOW_NORTH -> {
+                                val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+                                    .target(newPoint)
+                                    .bearing(0.0)
+                                    .tilt(tilt)
+                                if (targetZoom != null) builder.zoom(targetZoom)
+                                mapboxMap?.animateCamera(
+                                    CameraUpdateFactory.newCameraPosition(builder.build()), 900)
+                            }
                             FollowMode.FOLLOW_COURSE -> {
-                                // Tilt: 0° when stopped → 45° at 60+ km/h (navigation feel)
-                                val tilt = (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
-                                mapboxMap?.animateCamera(CameraUpdateFactory.newCameraPosition(
-                                    com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-                                        .target(newPoint)
-                                        .bearing(bearing.toDouble())
-                                        .tilt(tilt)
-                                        .build()
-                                ), 900)
+                                val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+                                    .target(newPoint)
+                                    .bearing(bearing.toDouble())
+                                    .tilt(tilt)
+                                if (targetZoom != null) builder.zoom(targetZoom)
+                                mapboxMap?.animateCamera(
+                                    CameraUpdateFactory.newCameraPosition(builder.build()), 900)
                             }
                             FollowMode.FREE -> { /* user controls camera */ }
                         }
