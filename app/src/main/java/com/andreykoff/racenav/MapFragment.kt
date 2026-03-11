@@ -125,6 +125,7 @@ class MapFragment : Fragment() {
     // Waypoints (КП) from GPX/WPT
     private val waypoints = mutableListOf<Waypoint>()
     private var activeWpIndex = 0  // current target CP index
+    var navActive = false           // waypoint navigation bar visible
 
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
@@ -193,8 +194,14 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_ALTITUDE = "widget_altitude"
         const val PREF_WIDGET_CHRONO = "widget_chrono"
         const val PREF_WIDGET_TIME = "widget_time"
+        const val PREF_WIDGET_REMAIN_KM = "widget_remain_km"
+        const val PREF_WIDGET_NEXTCP_NAME = "widget_nextcp_name"
+        const val PREF_WIDGET_ORDER = "widget_order"
+        const val PREF_NAV_ACTIVE = "nav_active"
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
+
+        val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name")
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -385,24 +392,69 @@ class MapFragment : Fragment() {
         _binding?.bottomBar?.visibility = View.VISIBLE
     }
 
+    private data class WidgetDef(val key: String, val prefKey: String, val defaultOn: Boolean)
+
+    private fun widgetContainer(key: String): android.view.View? {
+        val b = _binding ?: return null
+        return when (key) {
+            "speed"       -> b.widgetSpeedContainer
+            "bearing"     -> b.widgetBearingContainer
+            "tracklen"    -> b.widgetTrackLenContainer
+            "nextcp"      -> b.widgetNextCpContainer
+            "altitude"    -> b.widgetAltitudeContainer
+            "chrono"      -> b.widgetChronoContainer
+            "time"        -> b.widgetTimeContainer
+            "remain_km"   -> b.widgetRemainKmContainer
+            "nextcp_name" -> b.widgetNextCpNameContainer
+            else -> null
+        }
+    }
+
+    private fun makeDivider(): android.view.View {
+        val dp = resources.displayMetrics.density
+        return android.view.View(requireContext()).apply {
+            val lp = android.widget.LinearLayout.LayoutParams((1 * dp + 0.5f).toInt(), (40 * dp + 0.5f).toInt())
+            lp.marginStart = (1 * dp + 0.5f).toInt()
+            lp.marginEnd   = (1 * dp + 0.5f).toInt()
+            layoutParams = lp
+            setBackgroundColor(0xFF333333.toInt())
+        }
+    }
+
     fun applyWidgetPrefs() {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         val b = _binding ?: return
-        fun setSlot(container: android.view.View, divider: android.view.View, on: Boolean) {
-            container.visibility = if (on) View.VISIBLE else View.GONE
-            divider.visibility = if (on) View.VISIBLE else View.GONE
+
+        val widgetDefs = listOf(
+            WidgetDef("speed",       PREF_WIDGET_SPEED,       true),
+            WidgetDef("bearing",     PREF_WIDGET_BEARING,     true),
+            WidgetDef("tracklen",    PREF_WIDGET_TRACKLEN,    true),
+            WidgetDef("nextcp",      PREF_WIDGET_NEXTCP,      true),
+            WidgetDef("altitude",    PREF_WIDGET_ALTITUDE,    true),
+            WidgetDef("chrono",      PREF_WIDGET_CHRONO,      false),
+            WidgetDef("time",        PREF_WIDGET_TIME,        false),
+            WidgetDef("remain_km",   PREF_WIDGET_REMAIN_KM,   false),
+            WidgetDef("nextcp_name", PREF_WIDGET_NEXTCP_NAME, false),
+        )
+
+        val defaultOrder = ALL_WIDGET_KEYS.joinToString(",")
+        val savedOrder = prefs.getString(PREF_WIDGET_ORDER, defaultOrder) ?: defaultOrder
+        val orderedKeys = savedOrder.split(",")
+        val ordered = orderedKeys.mapNotNull { key -> widgetDefs.find { it.key == key } } +
+            widgetDefs.filter { w -> w.key !in orderedKeys }
+
+        val bar = b.bottomBar
+        bar.removeAllViews()
+        var added = 0
+        for (w in ordered) {
+            if (!prefs.getBoolean(w.prefKey, w.defaultOn)) continue
+            val container = widgetContainer(w.key) ?: continue
+            if (added > 0) bar.addView(makeDivider())
+            bar.addView(container)
+            added++
         }
-        setSlot(b.widgetSpeedContainer, b.divider1, prefs.getBoolean(PREF_WIDGET_SPEED, true))
-        setSlot(b.widgetBearingContainer, b.divider2, prefs.getBoolean(PREF_WIDGET_BEARING, true))
-        setSlot(b.widgetTrackLenContainer, b.divider3, prefs.getBoolean(PREF_WIDGET_TRACKLEN, true))
-        setSlot(b.widgetNextCpContainer, b.divider4, prefs.getBoolean(PREF_WIDGET_NEXTCP, true))
-        setSlot(b.widgetAltitudeContainer, b.divider5, prefs.getBoolean(PREF_WIDGET_ALTITUDE, true))
-        val chronoOn = prefs.getBoolean(PREF_WIDGET_CHRONO, false)
-        b.widgetChronoContainer.visibility = if (chronoOn) View.VISIBLE else View.GONE
+
         val timeOn = prefs.getBoolean(PREF_WIDGET_TIME, false)
-        val timeVis = if (timeOn) View.VISIBLE else View.GONE
-        b.widgetTimeContainer.visibility = timeVis
-        b.divider6.visibility = timeVis
         if (timeOn) startTimeTicker() else stopTimeTicker()
     }
 
@@ -686,6 +738,15 @@ class MapFragment : Fragment() {
         // Tap next CP widget to advance to next waypoint
         binding.widgetNextCp.setOnClickListener { advanceWaypoint() }
 
+        // Waypoint navigation bar buttons
+        binding.btnPrevWp.setOnClickListener { prevWaypoint() }
+        binding.btnNextWp.setOnClickListener { advanceWaypoint() }
+
+        // Restore nav active state
+        val prefs2 = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        navActive = prefs2?.getBoolean(PREF_NAV_ACTIVE, false) ?: false
+        updateWaypointNavBar()
+
         map.addOnCameraMoveListener { updateCompass() }
         map.addOnCameraIdleListener {
             updateCompass()
@@ -875,7 +936,63 @@ class MapFragment : Fragment() {
     private fun advanceWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = (activeWpIndex + 1) % waypoints.size
+        updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+    }
+
+    fun prevWaypoint() {
+        if (waypoints.isEmpty()) return
+        activeWpIndex = if (activeWpIndex > 0) activeWpIndex - 1 else waypoints.size - 1
+        updateWaypointNavBar()
+        Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+    }
+
+    fun startNavigation() {
+        navActive = true
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_NAV_ACTIVE, true)?.apply()
+        updateWaypointNavBar()
+    }
+
+    fun stopNavigation() {
+        navActive = false
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_NAV_ACTIVE, false)?.apply()
+        updateWaypointNavBar()
+    }
+
+    fun updateWaypointNavBar() {
+        val b = _binding ?: return
+        val show = navActive && waypoints.isNotEmpty()
+        b.waypointNavBar.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) {
+            val wp = waypoints.getOrNull(activeWpIndex)
+            val name = wp?.name?.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+            b.txtWpNavInfo.text = "КП ${activeWpIndex + 1}/${waypoints.size}: $name"
+        }
+    }
+
+    private fun calcRemainingKm(currentPos: LatLng): Double {
+        if (waypoints.isEmpty() || activeWpIndex >= waypoints.size) return 0.0
+        var totalM = 0.0
+        val curLoc = android.location.Location("").apply {
+            latitude = currentPos.latitude; longitude = currentPos.longitude
+        }
+        val firstWp = waypoints[activeWpIndex]
+        val firstLoc = android.location.Location("").apply {
+            latitude = firstWp.lat; longitude = firstWp.lon
+        }
+        totalM += curLoc.distanceTo(firstLoc)
+        for (i in activeWpIndex until waypoints.size - 1) {
+            val a = android.location.Location("").apply {
+                latitude = waypoints[i].lat; longitude = waypoints[i].lon
+            }
+            val bLoc = android.location.Location("").apply {
+                latitude = waypoints[i + 1].lat; longitude = waypoints[i + 1].lon
+            }
+            totalM += a.distanceTo(bLoc)
+        }
+        return totalM / 1000.0
     }
 
     @SuppressLint("MissingPermission")
@@ -962,11 +1079,17 @@ class MapFragment : Fragment() {
                     b.widgetDirectionArrow.rotation = bearing
                     if (loc.hasAltitude()) b.widgetAltitude.text = loc.altitude.toInt().toString()
 
-                    // Next CP distance
+                    // Next CP distance + name + remaining km
                     if (waypoints.isNotEmpty() && activeWpIndex < waypoints.size) {
                         val wp = waypoints[activeWpIndex]
                         val distM = distanceM(newPoint, LatLng(wp.lat, wp.lon))
                         b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1f", distM / 1000)
+                        b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+                        val remKm = calcRemainingKm(newPoint)
+                        b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
+                    } else {
+                        b.widgetNextCpName.text = "--"
+                        b.widgetRemainKm.text = "--"
                     }
 
                     // Запись трека — выполняется в TrackingService (фоновая служба)
@@ -1390,7 +1513,10 @@ class MapFragment : Fragment() {
             binding.btnRec.setImageResource(R.drawable.ic_rec)
             startChronoTicker()
             updateTrackOnMap()
+            val lenKm = TrackingService.trackLengthM / 1000.0
+            _binding?.widgetTrackLen?.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
         }
+        updateWaypointNavBar()
     }
 
     override fun onPause() {

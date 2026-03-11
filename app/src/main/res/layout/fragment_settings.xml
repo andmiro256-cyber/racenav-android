@@ -587,172 +587,20 @@
                 android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp" />
 
-            <!-- Speed -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Скорость"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetSpeed"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true" />
-            </LinearLayout>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Переключатель — вкл/выкл. Стрелки — порядок отображения."
+                android:textColor="#666666"
+                android:textSize="11sp"
+                android:layout_marginBottom="6dp" />
 
-            <!-- Bearing -->
+            <!-- Dynamic widget order list (built in code) -->
             <LinearLayout
+                android:id="@+id/widgetOrderContainer"
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Курс / стрелка"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetBearing"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true" />
-            </LinearLayout>
-
-            <!-- Track length -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Длина трека"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetTrackLen"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true" />
-            </LinearLayout>
-
-            <!-- Next CP -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="До след. КП"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetNextCp"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true" />
-            </LinearLayout>
-
-            <!-- Altitude -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Высота"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetAltitude"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="true" />
-            </LinearLayout>
-
-            <!-- Chronometer -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Хронометр"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetChrono"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="false" />
-            </LinearLayout>
-
-            <!-- Time -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:background="#1E1E1E"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:layout_marginTop="1dp">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Текущее время"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switchWidgetTime"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:checked="false" />
-            </LinearLayout>
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
 
             <!-- Section: Files -->
             <TextView
@@ -872,25 +720,61 @@
             <LinearLayout
                 android:id="@+id/rowLoadedWp"
                 android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
                 android:visibility="gone">
-                <TextView
-                    android:id="@+id/txtLoadedWp"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:textColor="#888888"
-                    android:textSize="13sp"
-                    android:paddingStart="4dp" />
-                <ImageButton
-                    android:id="@+id/btnToggleWp"
-                    android:layout_width="36dp"
-                    android:layout_height="36dp"
-                    android:src="@drawable/ic_eye"
-                    android:background="?attr/selectableItemBackgroundBorderless"
-                    android:tint="#FFFFFF" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:id="@+id/txtLoadedWp"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:textColor="#888888"
+                        android:textSize="13sp"
+                        android:paddingStart="4dp" />
+                    <ImageButton
+                        android:id="@+id/btnToggleWp"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
+                        android:src="@drawable/ic_eye"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:tint="#FFFFFF" />
+                </LinearLayout>
+
+                <!-- Navigation start/stop buttons -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="4dp">
+                    <Button
+                        android:id="@+id/btnNavStart"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="▶ Навигация"
+                        android:textSize="12sp"
+                        android:textColor="#FFFFFF"
+                        android:backgroundTint="#1B5E20"
+                        android:layout_marginEnd="4dp" />
+                    <Button
+                        android:id="@+id/btnNavStop"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="■ Стоп"
+                        android:textSize="12sp"
+                        android:textColor="#FFFFFF"
+                        android:backgroundTint="#B71C1C"
+                        android:layout_marginStart="4dp" />
+                </LinearLayout>
+
             </LinearLayout>
 
             <!-- keep old id for compat -->

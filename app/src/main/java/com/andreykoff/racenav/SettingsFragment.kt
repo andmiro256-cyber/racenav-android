@@ -29,6 +29,10 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ALTITUDE
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_CHRONO
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TIME
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_REMAIN_KM
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP_NAME
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ORDER
+import com.andreykoff.racenav.MapFragment.Companion.ALL_WIDGET_KEYS
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_RECENTER
 import com.andreykoff.racenav.MapFragment.Companion.PREF_RECENTER_DELAY
 import com.andreykoff.racenav.MapFragment.Companion.PREF_FOLLOW_MODE
@@ -333,23 +337,8 @@ class SettingsFragment : Fragment() {
             }
         })
 
-        // Widgets
-        val mapFragForWidgets = { parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() }
-        fun bindWidgetSwitch(switchId: Int, prefKey: String, defaultOn: Boolean) {
-            val sw = view.findViewById<SwitchCompat>(switchId)
-            sw.isChecked = prefs.getBoolean(prefKey, defaultOn)
-            sw.setOnCheckedChangeListener { _, checked ->
-                prefs.edit().putBoolean(prefKey, checked).apply()
-                mapFragForWidgets()?.applyWidgetPrefs()
-            }
-        }
-        bindWidgetSwitch(R.id.switchWidgetSpeed,    PREF_WIDGET_SPEED,    true)
-        bindWidgetSwitch(R.id.switchWidgetBearing,  PREF_WIDGET_BEARING,  true)
-        bindWidgetSwitch(R.id.switchWidgetTrackLen, PREF_WIDGET_TRACKLEN, true)
-        bindWidgetSwitch(R.id.switchWidgetNextCp,   PREF_WIDGET_NEXTCP,   true)
-        bindWidgetSwitch(R.id.switchWidgetAltitude, PREF_WIDGET_ALTITUDE, true)
-        bindWidgetSwitch(R.id.switchWidgetChrono,   PREF_WIDGET_CHRONO,   false)
-        bindWidgetSwitch(R.id.switchWidgetTime,     PREF_WIDGET_TIME,     false)
+        // Widgets — dynamic ordered list with enable toggles and up/down reorder buttons
+        buildWidgetOrderUI(view, prefs)
 
         // File loader
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
@@ -391,6 +380,16 @@ class SettingsFragment : Fragment() {
             wpVisible = !wpVisible
             btnToggleWp.setImageResource(if (wpVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
             mapFrag?.setLoadedWpVisible(wpVisible)
+        }
+
+        // Navigation start/stop
+        view.findViewById<android.widget.Button>(R.id.btnNavStart).setOnClickListener {
+            mapFrag?.startNavigation()
+            Toast.makeText(requireContext(), "Навигация запущена", Toast.LENGTH_SHORT).show()
+        }
+        view.findViewById<android.widget.Button>(R.id.btnNavStop).setOnClickListener {
+            mapFrag?.stopNavigation()
+            Toast.makeText(requireContext(), "Навигация остановлена", Toast.LENGTH_SHORT).show()
         }
 
         // Loaded track color swatches
@@ -497,6 +496,113 @@ class SettingsFragment : Fragment() {
                 txtStatus.text = "Откройте карту и попробуйте снова"
             }
         }
+    }
+
+    private fun buildWidgetOrderUI(
+        view: View,
+        prefs: android.content.SharedPreferences
+    ) {
+        data class WInfo(val key: String, val label: String, val prefKey: String, val defaultOn: Boolean)
+        val allWidgets = listOf(
+            WInfo("speed",       "Скорость",       PREF_WIDGET_SPEED,       true),
+            WInfo("bearing",     "Курс / стрелка", PREF_WIDGET_BEARING,     true),
+            WInfo("tracklen",    "Длина трека",     PREF_WIDGET_TRACKLEN,    true),
+            WInfo("nextcp",      "До след. КП",     PREF_WIDGET_NEXTCP,      true),
+            WInfo("altitude",    "Высота",          PREF_WIDGET_ALTITUDE,    true),
+            WInfo("chrono",      "Хронометр",       PREF_WIDGET_CHRONO,      false),
+            WInfo("time",        "Текущее время",   PREF_WIDGET_TIME,        false),
+            WInfo("remain_km",   "Остаток км",      PREF_WIDGET_REMAIN_KM,   false),
+            WInfo("nextcp_name", "Имя след. КП",    PREF_WIDGET_NEXTCP_NAME, false),
+        )
+
+        val savedOrder = prefs.getString(PREF_WIDGET_ORDER, ALL_WIDGET_KEYS.joinToString(",")) ?: ALL_WIDGET_KEYS.joinToString(",")
+        val orderedKeys = savedOrder.split(",").toMutableList()
+        // Append any new keys not yet in saved order
+        ALL_WIDGET_KEYS.forEach { k -> if (k !in orderedKeys) orderedKeys.add(k) }
+
+        val container = view.findViewById<LinearLayout>(R.id.widgetOrderContainer)
+
+        fun rebuildRows() {
+            container.removeAllViews()
+            orderedKeys.forEachIndexed { idx, key ->
+                val info = allWidgets.find { it.key == key } ?: return@forEachIndexed
+                val row = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        (52 * resources.displayMetrics.density + 0.5f).toInt()
+                    ).apply { topMargin = (1 * resources.displayMetrics.density + 0.5f).toInt() }
+                    setPadding(
+                        (16 * resources.displayMetrics.density + 0.5f).toInt(), 0,
+                        (8 * resources.displayMetrics.density + 0.5f).toInt(), 0
+                    )
+                }
+
+                val sw = SwitchCompat(requireContext()).apply {
+                    isChecked = prefs.getBoolean(info.prefKey, info.defaultOn)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                    setOnCheckedChangeListener { _, checked ->
+                        prefs.edit().putBoolean(info.prefKey, checked).apply()
+                        parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
+                    }
+                }
+
+                val label = TextView(requireContext()).apply {
+                    text = info.label
+                    setTextColor(0xFFFFFFFF.toInt())
+                    textSize = 15f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+
+                val dp = resources.displayMetrics.density
+                val btnSize = (32 * dp + 0.5f).toInt()
+
+                val btnUp = ImageButton(requireContext()).apply {
+                    setImageResource(R.drawable.ic_remove) // reuse minus icon as "up"
+                    setImageResource(android.R.drawable.arrow_up_float)
+                    background = null
+                    layoutParams = LinearLayout.LayoutParams(btnSize, btnSize)
+                    isEnabled = idx > 0
+                    alpha = if (idx > 0) 1f else 0.3f
+                    setOnClickListener {
+                        if (idx > 0) {
+                            orderedKeys.removeAt(idx); orderedKeys.add(idx - 1, key)
+                            prefs.edit().putString(PREF_WIDGET_ORDER, orderedKeys.joinToString(",")).apply()
+                            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
+                            rebuildRows()
+                        }
+                    }
+                }
+
+                val btnDown = ImageButton(requireContext()).apply {
+                    setImageResource(android.R.drawable.arrow_down_float)
+                    background = null
+                    layoutParams = LinearLayout.LayoutParams(btnSize, btnSize)
+                    isEnabled = idx < orderedKeys.size - 1
+                    alpha = if (idx < orderedKeys.size - 1) 1f else 0.3f
+                    setOnClickListener {
+                        if (idx < orderedKeys.size - 1) {
+                            orderedKeys.removeAt(idx); orderedKeys.add(idx + 1, key)
+                            prefs.edit().putString(PREF_WIDGET_ORDER, orderedKeys.joinToString(",")).apply()
+                            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
+                            rebuildRows()
+                        }
+                    }
+                }
+
+                row.addView(sw)
+                row.addView(label)
+                row.addView(btnUp)
+                row.addView(btnDown)
+                container.addView(row)
+            }
+        }
+        rebuildRows()
     }
 
     private fun loadFile(uri: Uri) {
