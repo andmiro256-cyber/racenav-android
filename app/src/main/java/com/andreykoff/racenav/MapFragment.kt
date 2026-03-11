@@ -456,6 +456,7 @@ class MapFragment : Fragment() {
             enableLocation(style)
             setupTrackLayers(style)
             setupWaypointLayers(style)
+            setupGpsArrowLayer(style)  // LAST — always on top of all layers
         }
     }
 
@@ -486,9 +487,6 @@ class MapFragment : Fragment() {
         lc.isLocationComponentEnabled = true
         applyFollowMode()
         applyCursorOffset()
-
-        // Setup custom GPS arrow SymbolLayer
-        setupGpsArrowLayer(style)
 
         // Start location tracking AFTER component is activated
         mapboxMap?.let { setupLocationTracking(it) }
@@ -1203,7 +1201,10 @@ class MapFragment : Fragment() {
     @Deprecated("Deprecated in Java")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         if (requestCode == 100 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            mapboxMap?.style?.let { enableLocation(it) }
+            mapboxMap?.style?.let { style ->
+                enableLocation(style)
+                setupGpsArrowLayer(style)
+            }
         }
     }
 

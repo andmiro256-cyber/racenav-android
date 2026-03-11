@@ -1,0 +1,175 @@
+package com.andreykoff.racenav
+
+import android.database.sqlite.SQLiteDatabase
+import fi.iki.elonen.NanoHTTPD
+import java.io.ByteArrayInputStream
+
+class TileServer(port: Int) : NanoHTTPD(port) {
+
+    enum class DbFormat { UNKNOWN, RMAPS, MBTILES }
+
+    /** Cached working combination of z/y formulas per db index: Pair(invertZ, invertY) */
+    private data class DbEntry(
+        val db: SQLiteDatabase,
+        val format: DbFormat,
+        var workingFormula: Pair<Boolean, Boolean>? = null
+    )
+
+    private val databases = mutableMapOf<Int, DbEntry>()
+
+    /** Open SQLite file at given index. Returns true on success. */
+    fun openDatabase(index: Int, path: String): Boolean {
+        return try {
+            databases[index]?.db?.close()
+            val opened = SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY)
+
+            // Find all tables in db
+            val tables = mutableSetOf<String>()
+            opened.rawQuery("SELECT name FROM sqlite_master WHERE type='table'", null).use { c ->
+                while (c.moveToNext()) tables.add(c.getString(0).lowercase())
+            }
+
+            if ("tiles" !in tables) {
+                opened.close()
+                return false
+            }
+
+            // Detect column names in tiles table
+            val cols = mutableSetOf<String>()
+            opened.rawQuery("PRAGMA table_info(tiles)", null).use { c ->
+                val nameIdx = c.getColumnIndex("name")
+                while (c.moveToNext()) cols.add(c.getString(nameIdx).lowercase())
+            }
+
+            val format = when {
+                "tile_data" in cols -> DbFormat.MBTILES
+                "image" in cols     -> DbFormat.RMAPS
+                else                -> DbFormat.UNKNOWN
+            }
+
+            if (format == DbFormat.UNKNOWN) {
+                opened.close()
+                return false
+            }
+            databases[index] = DbEntry(opened, format)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun closeDatabase(index: Int) {
+        databases.remove(index)?.db?.close()
+    }
+
+    override fun serve(session: IHTTPSession): Response {
+        // Expect URI: /{mapIndex}/{z}/{x}/{y}.png
+        val parts = session.uri.trim('/').split("/")
+        if (parts.size < 4) return notFound()
+        val idx = parts[0].toIntOrNull() ?: return notFound()
+        val z   = parts[1].toIntOrNull() ?: return notFound()
+        val x   = parts[2].toIntOrNull() ?: return notFound()
+        val y   = parts[3].removeSuffix(".png").toIntOrNull() ?: return notFound()
+
+        val data = queryTile(idx, z, x, y) ?: return notFound()
+        return newFixedLengthResponse(
+            Response.Status.OK, "image/png",
+            ByteArrayInputStream(data), data.size.toLong()
+        )
+    }
+
+    private fun queryTile(idx: Int, z: Int, x: Int, y: Int): ByteArray? {
+        val entry = databases[idx] ?: return null
+        val db = entry.db
+        return when (entry.format) {
+            DbFormat.RMAPS -> queryRMaps(entry, db, z, x, y)
+            DbFormat.MBTILES -> queryMBTiles(entry, db, z, x, y)
+            DbFormat.UNKNOWN -> null
+        }
+    }
+
+    /**
+     * RMaps/Locus SQLite: tries all 4 combinations of z/y formulas.
+     * Caches the working combination after first successful hit.
+     *
+     * z formulas: invertZ=true → z=17-zoom (Locus classic), invertZ=false → z=zoom (direct)
+     * y formulas: invertY=false → y as-is (slippy), invertY=true → y=TMS-flipped
+     */
+    private fun queryRMaps(entry: DbEntry, db: SQLiteDatabase, z: Int, x: Int, y: Int): ByteArray? {
+        // If we already know the working formula — use it directly
+        entry.workingFormula?.let { (invertZ, invertY) ->
+            return queryRMapsWithFormula(db, z, x, y, invertZ, invertY)
+        }
+
+        // Try all 4 combinations; cache the first one that returns data
+        val combinations = listOf(
+            Pair(true, false),   // invertZ + slippy Y  (classic Locus)
+            Pair(false, false),  // direct Z + slippy Y
+            Pair(true, true),    // invertZ + TMS Y
+            Pair(false, true),   // direct Z + TMS Y
+        )
+        for ((invertZ, invertY) in combinations) {
+            val data = queryRMapsWithFormula(db, z, x, y, invertZ, invertY)
+            if (data != null) {
+                entry.workingFormula = Pair(invertZ, invertY)
+                return data
+            }
+        }
+        return null
+    }
+
+    private fun queryRMapsWithFormula(
+        db: SQLiteDatabase, z: Int, x: Int, y: Int, invertZ: Boolean, invertY: Boolean
+    ): ByteArray? {
+        val rz = if (invertZ) 17 - z else z
+        val ry = if (invertY) (1 shl z) - 1 - y else y
+        return db.rawQuery(
+            "SELECT image FROM tiles WHERE x=? AND y=? AND z=?",
+            arrayOf(x.toString(), ry.toString(), rz.toString())
+        ).use { if (it.moveToFirst()) it.getBlob(0) else null }
+    }
+
+    /**
+     * MBTiles: standard TMS Y-flip.
+     * Falls back to non-flipped Y if nothing found (some exports use slippy map Y).
+     */
+    private fun queryMBTiles(entry: DbEntry, db: SQLiteDatabase, z: Int, x: Int, y: Int): ByteArray? {
+        entry.workingFormula?.let { (_, invertY) ->
+            val ry = if (invertY) (1 shl z) - 1 - y else y
+            return db.rawQuery(
+                "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                arrayOf(z.toString(), x.toString(), ry.toString())
+            ).use { if (it.moveToFirst()) it.getBlob(0) else null }
+        }
+
+        // TMS Y-flip (standard MBTiles)
+        val tmsY = (1 shl z) - 1 - y
+        db.rawQuery(
+            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            arrayOf(z.toString(), x.toString(), tmsY.toString())
+        ).use { if (it.moveToFirst()) {
+            entry.workingFormula = Pair(false, true)
+            return it.getBlob(0)
+        }}
+
+        // Fallback: slippy map Y (no flip)
+        db.rawQuery(
+            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            arrayOf(z.toString(), x.toString(), y.toString())
+        ).use { if (it.moveToFirst()) {
+            entry.workingFormula = Pair(false, false)
+            return it.getBlob(0)
+        }}
+
+        return null
+    }
+
+    fun cleanup() {
+        try { stop() } catch (_: Exception) {}
+        databases.values.forEach { try { it.db.close() } catch (_: Exception) {} }
+        databases.clear()
+    }
+
+    private fun notFound() =
+        newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "tile not found")
+}
