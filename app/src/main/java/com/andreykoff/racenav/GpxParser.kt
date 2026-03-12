@@ -198,4 +198,28 @@ object GpxParser {
         }
         return points
     }
+
+    /** Parse OziExplorer RTE file — returns list of waypoints */
+    fun parseRteOzi(inputStream: InputStream): List<Waypoint> {
+        val waypoints = mutableListOf<Waypoint>()
+        val lines = inputStream.bufferedReader().readLines()
+        for (line in lines) {
+            if (!line.startsWith("W,") && !line.startsWith("W ,")) continue
+            val parts = line.split(",")
+            if (parts.size < 5) continue
+            try {
+                val lat = parts[3].trim().toDoubleOrNull() ?: continue
+                val lon = parts[4].trim().toDoubleOrNull() ?: continue
+                if (lat == 0.0 && lon == 0.0) continue
+                // Name is usually at index 10 or 8, try both
+                val name = (parts.getOrNull(10) ?: parts.getOrNull(8) ?: "").trim()
+                    .ifBlank { "КП ${waypoints.size + 1}" }
+                waypoints.add(Waypoint(
+                    name = name, lat = lat, lon = lon,
+                    index = waypoints.size + 1
+                ))
+            } catch (e: Exception) { continue }
+        }
+        return waypoints
+    }
 }

@@ -838,6 +838,96 @@
                     android:tint="#FFFFFF" />
             </LinearLayout>
 
+            <!-- Nav line color -->
+            <LinearLayout
+                android:id="@+id/rowNavLineColor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Цвет линии к КП"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnNavLineColorPrev"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_arrow_back"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtNavLineColor"
+                    android:layout_width="80dp"
+                    android:layout_height="wrap_content"
+                    android:text="Оранжевый"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnNavLineColorNext"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_arrow_right"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Nav line width -->
+            <LinearLayout
+                android:id="@+id/rowNavLineWidth"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Толщина линии к КП"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnNavLineWidthMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtNavLineWidth"
+                    android:layout_width="44dp"
+                    android:layout_height="wrap_content"
+                    android:text="3"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnNavLineWidthPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
             <!-- keep old id for compat -->
             <TextView
                 android:id="@+id/txtLoadedFile"

@@ -51,6 +51,8 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
 import com.andreykoff.racenav.MapFragment.Companion.PREF_SYNC_API_KEY
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_APPROACH_RADIUS
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_WP_APPROACH_RADIUS
+import com.andreykoff.racenav.MapFragment.Companion.PREF_NAV_LINE_COLOR
+import com.andreykoff.racenav.MapFragment.Companion.PREF_NAV_LINE_WIDTH
 import android.widget.EditText
 import android.widget.RadioGroup
 import android.widget.ImageButton
@@ -405,6 +407,49 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Nav line color
+        val navLineColorOptions = listOf("#FF6F00" to "Оранжевый", "#FFFF00" to "Жёлтый",
+            "#FFFFFF" to "Белый", "#00FF00" to "Зелёный", "#FF4444" to "Красный", "#00BFFF" to "Голубой")
+        var navLineColorIdx = run {
+            val saved = prefs.getString(PREF_NAV_LINE_COLOR, "#FF6F00") ?: "#FF6F00"
+            navLineColorOptions.indexOfFirst { it.first == saved }.coerceAtLeast(0)
+        }
+        val txtNavLineColor = view.findViewById<TextView>(R.id.txtNavLineColor)
+        txtNavLineColor.text = navLineColorOptions[navLineColorIdx].second
+        view.findViewById<ImageButton>(R.id.btnNavLineColorPrev).setOnClickListener {
+            navLineColorIdx = (navLineColorIdx - 1 + navLineColorOptions.size) % navLineColorOptions.size
+            txtNavLineColor.text = navLineColorOptions[navLineColorIdx].second
+            prefs.edit().putString(PREF_NAV_LINE_COLOR, navLineColorOptions[navLineColorIdx].first).apply()
+            mapFragRef()?.applyNavLineStyle()
+        }
+        view.findViewById<ImageButton>(R.id.btnNavLineColorNext).setOnClickListener {
+            navLineColorIdx = (navLineColorIdx + 1) % navLineColorOptions.size
+            txtNavLineColor.text = navLineColorOptions[navLineColorIdx].second
+            prefs.edit().putString(PREF_NAV_LINE_COLOR, navLineColorOptions[navLineColorIdx].first).apply()
+            mapFragRef()?.applyNavLineStyle()
+        }
+
+        // Nav line width
+        val txtNavLineWidth = view.findViewById<TextView>(R.id.txtNavLineWidth)
+        var navLineWidth = prefs.getInt(PREF_NAV_LINE_WIDTH, 3).coerceIn(1, 8)
+        txtNavLineWidth.text = navLineWidth.toString()
+        view.findViewById<ImageButton>(R.id.btnNavLineWidthMinus).setOnClickListener {
+            if (navLineWidth > 1) {
+                navLineWidth--
+                txtNavLineWidth.text = navLineWidth.toString()
+                prefs.edit().putInt(PREF_NAV_LINE_WIDTH, navLineWidth).apply()
+                mapFragRef()?.applyNavLineStyle()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnNavLineWidthPlus).setOnClickListener {
+            if (navLineWidth < 8) {
+                navLineWidth++
+                txtNavLineWidth.text = navLineWidth.toString()
+                prefs.edit().putInt(PREF_NAV_LINE_WIDTH, navLineWidth).apply()
+                mapFragRef()?.applyNavLineStyle()
+            }
+        }
+
         // Navigation start/stop
         view.findViewById<android.widget.Button>(R.id.btnNavStart).setOnClickListener {
             mapFrag?.startNavigation()
@@ -688,7 +733,7 @@ class SettingsFragment : Fragment() {
                     ?: throw Exception("Не удалось открыть файл")
 
                 when (ext) {
-                    "gpx", "rte" -> {
+                    "gpx" -> {
                         val result = GpxParser.parseGpxFull(bytes.inputStream())
                         withContext(Dispatchers.Main) {
                             if (result.trackPoints.isNotEmpty()) {
@@ -707,6 +752,44 @@ class SettingsFragment : Fragment() {
                             if (result.trackPoints.isEmpty() && result.waypoints.isEmpty()) {
                                 txtErr?.text = "Файл пустой: $name"
                                 txtErr?.visibility = View.VISIBLE
+                            }
+                        }
+                    }
+                    "rte" -> {
+                        // Try GPX XML first, fallback to OziExplorer RTE format
+                        val result = try { GpxParser.parseGpxFull(bytes.inputStream()) } catch (e: Exception) { null }
+                        val wpts = if (result != null && (result.waypoints.isNotEmpty() || result.trackPoints.isNotEmpty())) {
+                            // GPX-format RTE
+                            withContext(Dispatchers.Main) {
+                                if (result.trackPoints.isNotEmpty()) {
+                                    mapFrag?.loadTrack(result.trackPoints)
+                                    val label = "Трек: $name (${result.trackPoints.size} точек)"
+                                    txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
+                                    view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
+                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                                }
+                                if (result.waypoints.isNotEmpty()) {
+                                    mapFrag?.loadWaypoints(result.waypoints)
+                                    val label = "КП: $name (${result.waypoints.size} точек)"
+                                    txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                }
+                            }
+                            null
+                        } else {
+                            // Try OziExplorer format
+                            GpxParser.parseRteOzi(bytes.inputStream())
+                        }
+                        if (wpts != null) {
+                            withContext(Dispatchers.Main) {
+                                if (wpts.isNotEmpty()) {
+                                    mapFrag?.loadWaypoints(wpts)
+                                    val label = "КП: $name (${wpts.size} точек)"
+                                    txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                } else {
+                                    txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
+                                }
                             }
                         }
                     }

@@ -38,6 +38,7 @@ import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
 import com.mapbox.mapboxsdk.style.layers.CircleLayer
+import com.mapbox.mapboxsdk.style.layers.FillLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
@@ -207,6 +208,13 @@ class MapFragment : Fragment() {
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
 
         val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name")
+
+        const val NAV_LINE_SOURCE_ID = "nav-line-source"
+        const val NAV_LINE_LAYER_ID = "nav-line-layer"
+        const val WP_RADIUS_SOURCE_ID = "wp-radius-source"
+        const val WP_RADIUS_LAYER_ID = "wp-radius-layer"
+        const val PREF_NAV_LINE_COLOR = "nav_line_color"    // hex, default "#FF6F00"
+        const val PREF_NAV_LINE_WIDTH = "nav_line_width"    // dp, default 3
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -283,6 +291,8 @@ class MapFragment : Fragment() {
         waypoints.addAll(wps)
         activeWpIndex = 0
         updateWaypointsOnMap()
+        updateNavLine()
+        updateRadiusCircles()
         updateNextCpWidget()
         if (wps.isNotEmpty()) {
             Toast.makeText(context, "Загружено ${wps.size} точек", Toast.LENGTH_SHORT).show()
@@ -671,6 +681,25 @@ class MapFragment : Fragment() {
     }
 
     private fun setupWaypointLayers(style: Style) {
+        // Approach radius circles (behind waypoint dots)
+        style.addSource(GeoJsonSource(WP_RADIUS_SOURCE_ID))
+        style.addLayer(FillLayer(WP_RADIUS_LAYER_ID, WP_RADIUS_SOURCE_ID).withProperties(
+            PropertyFactory.fillColor("#FF6F00"),
+            PropertyFactory.fillOpacity(0.15f),
+            PropertyFactory.fillOutlineColor("#FF6F00")
+        ))
+        // Navigation line: GPS → active waypoint
+        style.addSource(GeoJsonSource(NAV_LINE_SOURCE_ID))
+        val navLineColor = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getString(PREF_NAV_LINE_COLOR, "#FF6F00") ?: "#FF6F00"
+        val navLineWidth = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getInt(PREF_NAV_LINE_WIDTH, 3)?.toFloat() ?: 3f
+        style.addLayer(LineLayer(NAV_LINE_LAYER_ID, NAV_LINE_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor(navLineColor),
+            PropertyFactory.lineWidth(navLineWidth),
+            PropertyFactory.lineDasharray(arrayOf(4f, 4f))
+        ))
+
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
         style.addLayer(CircleLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.circleRadius(10f),
@@ -687,6 +716,8 @@ class MapFragment : Fragment() {
             PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
         ))
         if (waypoints.isNotEmpty()) updateWaypointsOnMap()
+        updateNavLine()
+        updateRadiusCircles()
     }
 
     private fun updateWaypointsOnMap() {
@@ -704,6 +735,67 @@ class MapFragment : Fragment() {
             features.put(feature)
         }
         source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+    }
+
+    fun updateNavLine() {
+        val style = mapboxMap?.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(NAV_LINE_SOURCE_ID) ?: return
+        val gps = lastKnownGpsPoint
+        if (gps == null || waypoints.isEmpty() || activeWpIndex >= waypoints.size) {
+            source.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+            return
+        }
+        val wp = waypoints[activeWpIndex]
+        val coords = JSONArray()
+            .put(JSONArray().put(gps.longitude).put(gps.latitude))
+            .put(JSONArray().put(wp.lon).put(wp.lat))
+        val geojson = JSONObject()
+            .put("type", "Feature")
+            .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+            .put("properties", JSONObject())
+        source.setGeoJson(geojson.toString())
+    }
+
+    fun updateRadiusCircles() {
+        val style = mapboxMap?.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(WP_RADIUS_SOURCE_ID) ?: return
+        val radiusM = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
+            ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
+        val features = JSONArray()
+        waypoints.forEach { wp ->
+            val poly = buildCirclePolygon(wp.lat, wp.lon, radiusM)
+            features.put(poly)
+        }
+        source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+    }
+
+    private fun buildCirclePolygon(lat: Double, lon: Double, radiusM: Double): JSONObject {
+        val n = 36
+        val latR = Math.toRadians(lat)
+        val coords = JSONArray()
+        for (i in 0..n) {
+            val angle = 2 * Math.PI * i / n
+            val dLat = radiusM * Math.cos(angle) / 111320.0
+            val dLon = radiusM * Math.sin(angle) / (111320.0 * Math.cos(latR))
+            coords.put(JSONArray().put(lon + dLon).put(lat + dLat))
+        }
+        val ring = JSONArray().put(coords)
+        return JSONObject()
+            .put("type", "Feature")
+            .put("geometry", JSONObject().put("type", "Polygon").put("coordinates", ring))
+            .put("properties", JSONObject())
+    }
+
+    fun applyNavLineStyle() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val color = prefs.getString(PREF_NAV_LINE_COLOR, "#FF6F00") ?: "#FF6F00"
+        val width = prefs.getInt(PREF_NAV_LINE_WIDTH, 3).toFloat()
+        val style = mapboxMap?.style ?: return
+        style.getLayerAs<LineLayer>(NAV_LINE_LAYER_ID)?.setProperties(
+            PropertyFactory.lineColor(color),
+            PropertyFactory.lineWidth(width)
+        )
     }
 
     private fun updateNextCpWidget() {
@@ -952,6 +1044,7 @@ class MapFragment : Fragment() {
     private fun advanceWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = (activeWpIndex + 1) % waypoints.size
+        updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
     }
@@ -1149,6 +1242,8 @@ class MapFragment : Fragment() {
                         b.widgetNextCpName.text = "--"
                         b.widgetRemainKm.text = "--"
                     }
+
+                    updateNavLine()
 
                     // Запись трека — выполняется в TrackingService (фоновая служба)
                     // Здесь синхронно обновляем трек и стрелки направления на карте
