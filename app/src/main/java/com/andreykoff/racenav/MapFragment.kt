@@ -689,7 +689,8 @@ class MapFragment : Fragment() {
         style.addLayer(LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
             PropertyFactory.lineColor("#FF6F00"),
             PropertyFactory.lineWidth(2f),
-            PropertyFactory.lineOpacity(0.6f)
+            PropertyFactory.lineOpacity(0.6f),
+            PropertyFactory.lineDasharray(arrayOf(6f, 4f))
         ))
 
         // Approach radius circles (behind waypoint dots)
