@@ -250,6 +250,10 @@ class MapFragment : Fragment() {
 
     private val overlaySources = linkedMapOf(
         "none"     to OverlaySource("Нет", emptyList()),
+        "osm_gps"  to OverlaySource("OSM GPS треки", listOf(
+            "https://gps-a.tile.openstreetmap.org/lines/{z}/{x}/{y}.png",
+            "https://gps-b.tile.openstreetmap.org/lines/{z}/{x}/{y}.png",
+            "https://gps-c.tile.openstreetmap.org/lines/{z}/{x}/{y}.png"), opacity = 0.7f),
         "hiking"   to OverlaySource("Пешие маршруты", listOf(
             "https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png")),
         "cycling"  to OverlaySource("Велотреки", listOf(
