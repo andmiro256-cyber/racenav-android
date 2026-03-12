@@ -1706,15 +1706,19 @@ class MapFragment : Fragment() {
     }
 
     private fun playWaypointTakenSound() {
-        try {
-            val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 100)
-            // Two beeps: short + longer
-            tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 150)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 400)
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ tg.release() }, 500)
-            }, 250)
-        } catch (e: Exception) { /* ignore if audio unavailable */ }
+        // 4 loud rapid beeps on ALARM stream (bypasses silent mode, max volume)
+        val beepMs = 180L
+        val pauseMs = 120L
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        for (i in 0 until 4) {
+            handler.postDelayed({
+                try {
+                    val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_ALARM, 100)
+                    tg.startTone(android.media.ToneGenerator.TONE_CDMA_HIGH_PBX_SS, beepMs.toInt())
+                    handler.postDelayed({ tg.release() }, beepMs + 50)
+                } catch (e: Exception) { }
+            }, i * (beepMs + pauseMs))
+        }
     }
 
     fun applyCacheSize() {
