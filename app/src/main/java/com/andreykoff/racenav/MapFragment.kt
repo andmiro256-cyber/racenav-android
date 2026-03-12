@@ -453,8 +453,14 @@ class MapFragment : Fragment() {
         for (w in ordered) {
             if (!prefs.getBoolean(w.prefKey, w.defaultOn)) continue
             val container = widgetContainer(w.key) ?: continue
+            // Containers from XML may have visibility=GONE (chrono/time/etc.) — force visible
+            container.visibility = View.VISIBLE
             if (added > 0) bar.addView(makeDivider())
-            bar.addView(container)
+            // Explicit LayoutParams: width=0dp, height=match_parent, weight=1
+            // (ensures equal distribution even after detach/re-attach cycle)
+            bar.addView(container, android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1f
+            ))
             added++
         }
 
