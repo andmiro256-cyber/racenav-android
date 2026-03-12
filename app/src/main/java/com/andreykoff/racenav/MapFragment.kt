@@ -1539,6 +1539,35 @@ class MapFragment : Fragment() {
                         }
                     }
                 }
+                // Routes — if no tracks, use routes as track polyline + extract labeled points as waypoints
+                var syncRoutesCount = 0
+                val routesArray = json.optJSONArray("routes")
+                if (routesArray != null && routesArray.length() > 0) {
+                    syncRoutesCount = routesArray.length()
+                    for (i in 0 until routesArray.length()) {
+                        val r = routesArray.getJSONObject(i)
+                        val pts = r.optJSONArray("points") ?: continue
+                        val labels = r.optJSONArray("labels")
+                        for (j in 0 until pts.length()) {
+                            val p = pts.getJSONObject(j)
+                            if (syncTrackPts.isEmpty() || i > 0) {
+                                // Only add to track if no tracks already, or appending subsequent routes
+                                syncTrackPts.add(Pair(p.getDouble("lat"), p.getDouble("lng")))
+                            }
+                            // If waypoints not loaded from waypoints[], use labeled route points
+                            val label = labels?.optString(j, "")?.takeIf { it.isNotBlank() }
+                            if (label != null && syncWaypoints.isEmpty()) {
+                                syncWaypoints.add(Waypoint(
+                                    lat = p.getDouble("lat"),
+                                    lon = p.getDouble("lng"),
+                                    name = label,
+                                    index = syncWaypoints.size,
+                                    description = r.optString("name", "")
+                                ))
+                            }
+                        }
+                    }
+                }
                 withContext(Dispatchers.Main) {
                     val ctx = context ?: return@withContext
                     val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -1554,6 +1583,7 @@ class MapFragment : Fragment() {
                         if (syncWaypoints.isNotEmpty()) append("${syncWaypoints.size} КП")
                         if (syncWaypoints.isNotEmpty() && syncTrackPts.isNotEmpty()) append(", ")
                         if (syncTrackPts.isNotEmpty()) append("трек (${syncTrackPts.size} точек)")
+                        if (syncRoutesCount > 0 && syncWaypoints.isEmpty() && syncTrackPts.isEmpty()) append("$syncRoutesCount маршрутов")
                         if (isEmpty()) append("нет данных")
                     }
                     onResult(true, "Получено: $msg")
