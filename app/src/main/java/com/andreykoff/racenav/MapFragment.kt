@@ -216,6 +216,11 @@ class MapFragment : Fragment() {
         const val WP_RADIUS_LAYER_ID = "wp-radius-layer"
         const val PREF_NAV_LINE_COLOR = "nav_line_color"    // hex, default "#FF6F00"
         const val PREF_NAV_LINE_WIDTH = "nav_line_width"    // dp, default 3
+
+        // Persistence of loaded data across restarts
+        const val PREF_SAVED_WAYPOINTS_JSON = "saved_waypoints_json"
+        const val PREF_SAVED_TRACK_JSON = "saved_track_json"
+        const val PREF_ACTIVE_WP_INDEX = "active_wp_index"
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -299,6 +304,7 @@ class MapFragment : Fragment() {
         if (wps.isNotEmpty()) {
             Toast.makeText(context, "Загружено ${wps.size} точек", Toast.LENGTH_SHORT).show()
         }
+        saveWaypointsToPrefs()
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -683,6 +689,11 @@ class MapFragment : Fragment() {
     }
 
     private fun setupWaypointLayers(style: Style) {
+        // Restore persisted data on style (re)load
+        if (waypoints.isEmpty()) restoreWaypointsFromPrefs()
+        val trackWasEmpty = loadedTrackPoints.isEmpty()
+        if (trackWasEmpty) restoreTrackFromPrefs()
+
         // Route polyline: connects all waypoints in order
         style.addSource(GeoJsonSource(ROUTE_LINE_SOURCE_ID))
         style.addLayer(LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
@@ -711,22 +722,13 @@ class MapFragment : Fragment() {
         ))
 
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
-        // Bitmap icon layer: circle with number + optional text name below
+        // Bitmap icon layer: circle with number + name drawn into bitmap (fully offline)
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon_id")),
             PropertyFactory.iconSize(0.6f),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconAnchor("center"),
-            PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("name")),
-            PropertyFactory.textAnchor("top"),
-            PropertyFactory.textOffset(arrayOf(0f, 1.8f)),
-            PropertyFactory.textSize(11f),
-            PropertyFactory.textColor("#FFFFFF"),
-            PropertyFactory.textHaloColor("#000000"),
-            PropertyFactory.textHaloWidth(1.5f),
-            PropertyFactory.textAllowOverlap(true),
-            PropertyFactory.textOptional(true)
+            PropertyFactory.iconAnchor("top")
         ))
         if (waypoints.isNotEmpty()) {
             updateWaypointsOnMap()
@@ -734,6 +736,10 @@ class MapFragment : Fragment() {
             updateRadiusCircles()
         }
         updateNavLine()
+        // If track was just restored from prefs, render it now (setupTrackLayers ran before restore)
+        if (trackWasEmpty && loadedTrackPoints.isNotEmpty()) {
+            updateLoadedTrackOnMap()
+        }
     }
 
     private fun updateWaypointsOnMap() {
@@ -742,7 +748,7 @@ class MapFragment : Fragment() {
 
         // Register bitmap icons for each waypoint (always update — getImage may return non-null for missing images)
         waypoints.forEach { wp ->
-            style.addImage("wp-icon-${wp.index}", createWaypointBitmap(wp.index))
+            style.addImage("wp-icon-${wp.index}", createWaypointBitmap(wp.index, wp.name))
         }
 
         val features = JSONArray()
@@ -759,32 +765,63 @@ class MapFragment : Fragment() {
         source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
     }
 
-    private fun createWaypointBitmap(index: Int): android.graphics.Bitmap {
-        val size = 64
-        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bmp)
+    private fun createWaypointBitmap(index: Int, name: String = ""): android.graphics.Bitmap {
+        val circleR = 28f
+        val circleDiam = (circleR * 2).toInt()
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+        // Measure name text
+        paint.textSize = 24f
+        paint.isFakeBoldText = false
+        val displayName = if (name.length > 14) name.take(14) + "…" else name
+        val nameW = if (name.isNotBlank()) paint.measureText(displayName) else 0f
+        val nameH = if (name.isNotBlank()) (paint.textSize + 8f).toInt() else 0
+
+        val bmpW = maxOf(circleDiam + 8, nameW.toInt() + 8)
+        val bmpH = circleDiam + nameH + 4
+        val bmp = android.graphics.Bitmap.createBitmap(bmpW, bmpH, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        val cx = bmpW / 2f
+        val cy = circleDiam / 2f + 2f
 
         // Orange fill
         paint.style = android.graphics.Paint.Style.FILL
         paint.color = android.graphics.Color.parseColor("#FF6F00")
-        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+        canvas.drawCircle(cx, cy, circleR - 2f, paint)
 
         // White stroke
         paint.style = android.graphics.Paint.Style.STROKE
         paint.color = android.graphics.Color.WHITE
-        paint.strokeWidth = 4f
-        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+        paint.strokeWidth = 3.5f
+        canvas.drawCircle(cx, cy, circleR - 2f, paint)
 
-        // Index number text
+        // Index number
         paint.style = android.graphics.Paint.Style.FILL
         paint.color = android.graphics.Color.WHITE
+        val indexStr = index.toString()
+        paint.textSize = if (indexStr.length > 2) 18f else 24f
         paint.textAlign = android.graphics.Paint.Align.CENTER
         paint.isFakeBoldText = true
-        val text = index.toString()
-        paint.textSize = if (text.length > 2) 20f else 26f
-        val textY = size / 2f - (paint.descent() + paint.ascent()) / 2f
-        canvas.drawText(text, size / 2f, textY, paint)
+        val textY = cy - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(indexStr, cx, textY, paint)
+
+        // Name text below circle
+        if (name.isNotBlank()) {
+            paint.isFakeBoldText = false
+            paint.textSize = 24f
+            paint.textAlign = android.graphics.Paint.Align.CENTER
+            // White halo (shadow) for readability on any map
+            paint.style = android.graphics.Paint.Style.STROKE
+            paint.strokeWidth = 4f
+            paint.color = android.graphics.Color.WHITE
+            val nameY = circleDiam.toFloat() + 6f + paint.textSize * 0.75f
+            canvas.drawText(displayName, cx, nameY, paint)
+            // Black text on top
+            paint.style = android.graphics.Paint.Style.FILL
+            paint.color = android.graphics.Color.BLACK
+            paint.strokeWidth = 0f
+            canvas.drawText(displayName, cx, nameY, paint)
+        }
 
         return bmp
     }
@@ -1093,6 +1130,7 @@ class MapFragment : Fragment() {
             )
             Toast.makeText(context, "Трек загружен: ${points.size} точек", Toast.LENGTH_SHORT).show()
         }
+        saveTrackToPrefs()
     }
 
     private fun updateLoadedTrackOnMap() {
@@ -1110,6 +1148,8 @@ class MapFragment : Fragment() {
     private fun advanceWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = (activeWpIndex + 1) % waypoints.size
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
         updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
@@ -1154,6 +1194,8 @@ class MapFragment : Fragment() {
     fun prevWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = if (activeWpIndex > 0) activeWpIndex - 1 else waypoints.size - 1
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
         updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
@@ -1194,6 +1236,85 @@ class MapFragment : Fragment() {
             val wp = waypoints.getOrNull(activeWpIndex)
             val name = wp?.name?.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
             b.txtWpNavInfo.text = "КП ${activeWpIndex + 1}/${waypoints.size}: $name"
+        }
+    }
+
+    private fun saveWaypointsToPrefs() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        if (waypoints.isEmpty()) {
+            prefs.edit().remove(PREF_SAVED_WAYPOINTS_JSON).apply()
+            return
+        }
+        val arr = org.json.JSONArray()
+        waypoints.forEach { wp ->
+            arr.put(org.json.JSONObject()
+                .put("name", wp.name)
+                .put("lat", wp.lat)
+                .put("lon", wp.lon)
+                .put("index", wp.index)
+                .put("description", wp.description))
+        }
+        prefs.edit()
+            .putString(PREF_SAVED_WAYPOINTS_JSON, arr.toString())
+            .putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)
+            .apply()
+    }
+
+    private fun saveTrackToPrefs() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        if (loadedTrackPoints.isEmpty()) {
+            prefs.edit().remove(PREF_SAVED_TRACK_JSON).apply()
+            return
+        }
+        // Save up to 5000 points to avoid prefs size limits
+        val pts = if (loadedTrackPoints.size > 5000) loadedTrackPoints.take(5000) else loadedTrackPoints
+        val arr = org.json.JSONArray()
+        pts.forEach { arr.put(org.json.JSONArray().put(it.latitude).put(it.longitude)) }
+        prefs.edit().putString(PREF_SAVED_TRACK_JSON, arr.toString()).apply()
+    }
+
+    private fun restoreWaypointsFromPrefs() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val json = prefs.getString(PREF_SAVED_WAYPOINTS_JSON, null) ?: return
+        try {
+            val arr = org.json.JSONArray(json)
+            val restored = mutableListOf<Waypoint>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                restored.add(Waypoint(
+                    name = o.optString("name", ""),
+                    lat = o.getDouble("lat"),
+                    lon = o.getDouble("lon"),
+                    index = o.optInt("index", i + 1),
+                    description = o.optString("description", "")
+                ))
+            }
+            if (restored.isNotEmpty()) {
+                waypoints.clear()
+                waypoints.addAll(restored)
+                activeWpIndex = prefs.getInt(PREF_ACTIVE_WP_INDEX, 0).coerceIn(0, restored.size - 1)
+            }
+        } catch (e: Exception) {
+            Log.w("MapFragment", "Failed to restore waypoints: ${e.message}")
+        }
+    }
+
+    private fun restoreTrackFromPrefs() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val json = prefs.getString(PREF_SAVED_TRACK_JSON, null) ?: return
+        try {
+            val arr = org.json.JSONArray(json)
+            val pts = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
+            for (i in 0 until arr.length()) {
+                val pt = arr.getJSONArray(i)
+                pts.add(com.mapbox.mapboxsdk.geometry.LatLng(pt.getDouble(0), pt.getDouble(1)))
+            }
+            if (pts.isNotEmpty()) {
+                loadedTrackPoints.clear()
+                loadedTrackPoints.addAll(pts)
+            }
+        } catch (e: Exception) {
+            Log.w("MapFragment", "Failed to restore track: ${e.message}")
         }
     }
 

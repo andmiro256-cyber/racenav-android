@@ -63,9 +63,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+data class LoadedDataset(
+    val id: String,
+    val name: String,
+    val waypointCount: Int,
+    val trackPointCount: Int,
+    val loadedAt: String
+)
+
 class SettingsFragment : Fragment() {
 
-    private val filePicker = registerForActivityResult(
+    private companion object {
+        const val PREF_DATASETS_JSON = "loaded_datasets_json"
+        const val MAX_DATASETS = 10
+    }
+
+    private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> if (uri != null) loadFile(uri) }
 
@@ -346,9 +359,9 @@ class SettingsFragment : Fragment() {
         // Widgets — dynamic ordered list with enable toggles and up/down reorder buttons
         buildWidgetOrderUI(view, prefs)
 
-        // File loader
+        // File loader — show dataset library first
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
-            filePicker.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
+            showDatasetLibrary()
         }
 
         // Eye toggles for loaded track/waypoints
@@ -716,6 +729,148 @@ class SettingsFragment : Fragment() {
         rebuildRows()
     }
 
+    private fun openFilePicker() {
+        filePickerLauncher.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
+    }
+
+    private fun loadDatasetList(): List<LoadedDataset> {
+        val json = requireContext().getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_DATASETS_JSON, null) ?: return emptyList()
+        return try {
+            val arr = org.json.JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                LoadedDataset(
+                    id = o.getString("id"),
+                    name = o.getString("name"),
+                    waypointCount = o.optInt("wpCount", 0),
+                    trackPointCount = o.optInt("trackCount", 0),
+                    loadedAt = o.optString("loadedAt", "")
+                )
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    private fun saveDatasetToList(name: String, wpCount: Int, trackCount: Int) {
+        val prefs = requireContext().getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = try {
+            org.json.JSONArray(prefs.getString(PREF_DATASETS_JSON, "[]"))
+        } catch (e: Exception) { org.json.JSONArray() }
+
+        // Remove duplicate by name if exists
+        val filtered = org.json.JSONArray()
+        for (i in 0 until existing.length()) {
+            if (existing.getJSONObject(i).getString("name") != name) {
+                filtered.put(existing.getJSONObject(i))
+            }
+        }
+
+        val newEntry = org.json.JSONObject()
+            .put("id", System.currentTimeMillis().toString())
+            .put("name", name)
+            .put("wpCount", wpCount)
+            .put("trackCount", trackCount)
+            .put("loadedAt", java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.getDefault())
+                .format(java.util.Date()))
+
+        // Insert at beginning, keep MAX_DATASETS
+        val result = org.json.JSONArray()
+        result.put(newEntry)
+        for (i in 0 until minOf(filtered.length(), MAX_DATASETS - 1)) result.put(filtered.getJSONObject(i))
+
+        prefs.edit().putString(PREF_DATASETS_JSON, result.toString()).apply()
+    }
+
+    private fun showDatasetLibrary() {
+        val datasets = loadDatasetList()
+        val ctx = requireContext()
+
+        val layout = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(0, 16, 0, 16)
+        }
+
+        val title = android.widget.TextView(ctx).apply {
+            text = "Загруженные наборы"
+            textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(32, 16, 32, 8)
+        }
+        layout.addView(title)
+
+        if (datasets.isEmpty()) {
+            val empty = android.widget.TextView(ctx).apply {
+                text = "Нет сохранённых наборов"
+                textSize = 14f
+                setTextColor(0xFF888888.toInt())
+                setPadding(32, 8, 32, 8)
+            }
+            layout.addView(empty)
+        } else {
+            datasets.forEach { ds ->
+                val row = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    setPadding(32, 12, 32, 12)
+                    setBackgroundResource(android.R.drawable.list_selector_background)
+                }
+                val info = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    layoutParams = android.widget.LinearLayout.LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                info.addView(android.widget.TextView(ctx).apply {
+                    text = ds.name
+                    textSize = 14f
+                    setTextColor(0xFFFFFFFF.toInt())
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                })
+                val subtitle = buildString {
+                    if (ds.waypointCount > 0) append("КП: ${ds.waypointCount}  ")
+                    if (ds.trackPointCount > 0) append("Трек: ${ds.trackPointCount}т  ")
+                    if (ds.loadedAt.isNotBlank()) append(ds.loadedAt)
+                }
+                info.addView(android.widget.TextView(ctx).apply {
+                    text = subtitle
+                    textSize = 12f
+                    setTextColor(0xFF888888.toInt())
+                })
+                row.addView(info)
+                layout.addView(row)
+            }
+        }
+
+        // Divider
+        layout.addView(android.view.View(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
+                setMargins(0, 8, 0, 8)
+            }
+            setBackgroundColor(0xFF333333.toInt())
+        })
+
+        // Load new file button
+        val btnNew = android.widget.Button(ctx).apply {
+            text = "Загрузить новый файл..."
+            setTextColor(0xFFFF6F00.toInt())
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            textSize = 15f
+        }
+        layout.addView(btnNew)
+
+        val scrollView = android.widget.ScrollView(ctx).apply { addView(layout) }
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(ctx,
+            R.style.BottomSheetTheme)
+        dialog.setContentView(scrollView)
+
+        btnNew.setOnClickListener {
+            dialog.dismiss()
+            openFilePicker()
+        }
+
+        dialog.show()
+    }
+
     private fun loadFile(uri: Uri) {
         val name = getFileName(uri)
         val ext = name.substringAfterLast('.', "").lowercase()
@@ -765,6 +920,11 @@ class SettingsFragment : Fragment() {
                                         txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                         filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                     }
+                                    saveDatasetToList(
+                                        name,
+                                        if (loadWps) result.waypoints.size else 0,
+                                        if (loadTrack) result.trackPoints.size else 0
+                                    )
                                 }
                             )
                         }
@@ -793,6 +953,11 @@ class SettingsFragment : Fragment() {
                                             txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                             filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                         }
+                                        saveDatasetToList(
+                                            name,
+                                            if (loadWps) result.waypoints.size else 0,
+                                            if (loadTrack) result.trackPoints.size else 0
+                                        )
                                     }
                                 )
                             }
@@ -808,6 +973,7 @@ class SettingsFragment : Fragment() {
                                     val label = "КП: $name (${wpts.size} точек)"
                                     txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                     filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                    saveDatasetToList(name, wpts.size, 0)
                                     // Show summary of loaded waypoints
                                     if (wpts.size <= 30) {
                                         val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
@@ -831,6 +997,7 @@ class SettingsFragment : Fragment() {
                                 val label = "КП: $name (${wpts.size} точек)"
                                 txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                 filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                saveDatasetToList(name, wpts.size, 0)
                                 // Show summary of loaded waypoints
                                 if (wpts.size <= 30) {
                                     val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
@@ -854,6 +1021,7 @@ class SettingsFragment : Fragment() {
                                 txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
                                 view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
                                 filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                                saveDatasetToList(name, 0, pts.size)
                             } else {
                                 txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
                             }
