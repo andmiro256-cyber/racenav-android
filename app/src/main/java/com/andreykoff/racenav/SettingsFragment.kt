@@ -463,6 +463,18 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Sound settings
+        val switchApproach = view.findViewById<android.widget.Switch>(R.id.switchSoundApproach)
+        val switchTaken = view.findViewById<android.widget.Switch>(R.id.switchSoundTaken)
+        switchApproach.isChecked = prefs.getBoolean(MapFragment.PREF_SOUND_APPROACH, true)
+        switchTaken.isChecked = prefs.getBoolean(MapFragment.PREF_SOUND_TAKEN, true)
+        switchApproach.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(MapFragment.PREF_SOUND_APPROACH, checked).apply()
+        }
+        switchTaken.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(MapFragment.PREF_SOUND_TAKEN, checked).apply()
+        }
+
         // Navigation start/stop
         view.findViewById<android.widget.Button>(R.id.btnNavStart).setOnClickListener {
             mapFrag?.startNavigation()

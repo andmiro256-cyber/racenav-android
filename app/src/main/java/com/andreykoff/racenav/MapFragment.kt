@@ -127,6 +127,7 @@ class MapFragment : Fragment() {
     private var activeWpIndex = 0  // current target CP index
     var navActive = false           // waypoint navigation bar visible
     private var cameraTopPadding = 0  // px; updated by applyCursorOffset(), applied in every camera move
+    private var wasInApproachRadius = false  // track radius entry to fire sound once
 
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
@@ -221,6 +222,10 @@ class MapFragment : Fragment() {
         const val PREF_SAVED_WAYPOINTS_JSON = "saved_waypoints_json"
         const val PREF_SAVED_TRACK_JSON = "saved_track_json"
         const val PREF_ACTIVE_WP_INDEX = "active_wp_index"
+
+        // Sound notifications
+        const val PREF_SOUND_APPROACH = "sound_approach"   // bool, default true
+        const val PREF_SOUND_TAKEN    = "sound_taken"      // bool, default true
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false)
@@ -1148,8 +1153,11 @@ class MapFragment : Fragment() {
     private fun advanceWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = (activeWpIndex + 1) % waypoints.size
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
+        wasInApproachRadius = false  // reset so approach sound fires for new КП
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.let { prefs ->
+            prefs.edit().putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex).apply()
+            if (prefs.getBoolean(PREF_SOUND_TAKEN, true)) playWaypointTakenSound()
+        }
         updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
@@ -1436,20 +1444,23 @@ class MapFragment : Fragment() {
                         val remKm = calcRemainingKm(newPoint)
                         b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
                         // Auto-advance when within approach radius (only during active navigation)
-                        if (navActive) {
-                            val ctx = context
-                            val approachRadius = ctx?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-                                ?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
-                                ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
-                            if (distM <= approachRadius) {
-                                val nextIndex = activeWpIndex + 1
-                                if (nextIndex < waypoints.size) {
-                                    advanceWaypoint()
-                                } else {
-                                    // Last waypoint reached — stop navigation
-                                    stopNavigation()
-                                    Toast.makeText(ctx, "Маршрут завершён!", Toast.LENGTH_LONG).show()
-                                }
+                        val ctx = context
+                        val prefs = ctx?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                        val approachRadius = prefs?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
+                            ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
+                        val inRadius = distM <= approachRadius
+                        // Sound: entering radius (fire once per waypoint)
+                        if (inRadius && !wasInApproachRadius) {
+                            if (prefs?.getBoolean(PREF_SOUND_APPROACH, true) == true) playApproachSound()
+                        }
+                        wasInApproachRadius = inRadius
+                        if (navActive && inRadius) {
+                            val nextIndex = activeWpIndex + 1
+                            if (nextIndex < waypoints.size) {
+                                advanceWaypoint()
+                            } else {
+                                stopNavigation()
+                                Toast.makeText(ctx, "Маршрут завершён!", Toast.LENGTH_LONG).show()
                             }
                         }
                     } else {
@@ -1684,6 +1695,26 @@ class MapFragment : Fragment() {
         val fraction = (position - 1) / 9f * 0.42f  // up to 42% of screen height as top padding
         cameraTopPadding = (screenHeight * fraction).toInt()
         mapboxMap?.setPadding(0, cameraTopPadding, 0, 0)
+    }
+
+    private fun playApproachSound() {
+        try {
+            val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 90)
+            tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 400)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ tg.release() }, 500)
+        } catch (e: Exception) { /* ignore if audio unavailable */ }
+    }
+
+    private fun playWaypointTakenSound() {
+        try {
+            val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 100)
+            // Two beeps: short + longer
+            tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 150)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 400)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ tg.release() }, 500)
+            }, 250)
+        } catch (e: Exception) { /* ignore if audio unavailable */ }
     }
 
     fun applyCacheSize() {
