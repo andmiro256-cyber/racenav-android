@@ -717,6 +717,7 @@ class MapFragment : Fragment() {
     private fun setupButtons(map: MapboxMap) {
         binding.btnZoomIn.setOnClickListener { map.animateCamera(CameraUpdateFactory.zoomIn()) }
         binding.btnZoomOut.setOnClickListener { map.animateCamera(CameraUpdateFactory.zoomOut()) }
+        binding.btnAddWaypoint.setOnClickListener { addWaypointAtCurrentPosition() }
 
         // Restore follow mode from prefs
         val savedMode = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -952,6 +953,29 @@ class MapFragment : Fragment() {
         activeWpIndex = (activeWpIndex + 1) % waypoints.size
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addWaypointAtCurrentPosition() {
+        val pos = lastKnownGpsPoint
+        if (pos == null) {
+            Toast.makeText(context, "GPS недоступен", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val newIndex = waypoints.size
+        val newWp = Waypoint(
+            lat = pos.latitude,
+            lon = pos.longitude,
+            name = "КП ${newIndex + 1}",
+            index = newIndex,
+            description = ""
+        )
+        waypoints.add(newWp)
+        // Save to prefs so name persists
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putString(PREF_LOADED_WP_NAME, "КП: вручную (${waypoints.size})")?.apply()
+        updateWaypointsOnMap()
+        updateWaypointNavBar()
+        Toast.makeText(context, "Добавлен КП ${newIndex + 1}", Toast.LENGTH_SHORT).show()
     }
 
     fun prevWaypoint() {

@@ -63,6 +63,16 @@
             android:tint="#FFFFFF"
             android:padding="5dp" />
 
+        <!-- Add waypoint at current position -->
+        <ImageButton
+            android:id="@+id/btnAddWaypoint"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:src="@drawable/ic_add_waypoint"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Add waypoint"
+            android:padding="5dp" />
+
         <View
             android:layout_width="1dp"
             android:layout_height="24dp"
