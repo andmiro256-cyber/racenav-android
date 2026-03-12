@@ -237,12 +237,15 @@
             <!-- Track recording interval -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="2dp">
                 <TextView
                     android:layout_width="0dp"
@@ -309,12 +312,15 @@
             <!-- Recording track width -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="1dp">
                 <TextView
                     android:layout_width="0dp"
@@ -347,12 +353,15 @@
             <!-- Save current track button -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="2dp">
                 <TextView
                     android:layout_width="0dp"
@@ -433,12 +442,15 @@
             <!-- Auto-zoom by speed -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="2dp">
                 <TextView
                     android:layout_width="0dp"
@@ -474,12 +486,15 @@
             <!-- Cursor vertical offset -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="2dp">
                 <TextView
                     android:layout_width="0dp"
@@ -616,7 +631,8 @@
             <Button
                 android:id="@+id/btnLoadFile"
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
+                android:layout_height="wrap_content"
+                android:minHeight="52dp"
                 android:text="Загрузить файл (GPX, WPT, RTE, PLT)"
                 android:textColor="#FFFFFF"
                 android:backgroundTint="#2A2A2A"
@@ -781,12 +797,15 @@
             <LinearLayout
                 android:id="@+id/rowApproachRadius"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
                 android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
                 android:layout_marginTop="2dp">
                 <TextView
                     android:layout_width="0dp"
@@ -844,7 +863,8 @@
             <Button
                 android:id="@+id/btnLoadOfflineMap"
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
+                android:layout_height="wrap_content"
+                android:minHeight="52dp"
                 android:text="Загрузить карту (RMaps, MBTiles)"
                 android:textColor="#FFFFFF"
                 android:backgroundTint="#2A2A2A"
@@ -871,12 +891,15 @@
 
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#1E1E1E"
                 android:paddingStart="16dp"
-                android:paddingEnd="16dp">
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp">
                 <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
@@ -958,9 +981,10 @@
                     <Button
                         android:id="@+id/btnSyncPull"
                         android:layout_width="0dp"
-                        android:layout_height="36dp"
+                        android:layout_height="wrap_content"
+                        android:minHeight="36dp"
                         android:layout_weight="1"
-                        android:text="⬇ Получить КП"
+                        android:text="Получить КП"
                         android:textSize="12sp"
                         android:textColor="#FFFFFF"
                         android:backgroundTint="#1565C0"
@@ -969,9 +993,10 @@
                     <Button
                         android:id="@+id/btnSyncPush"
                         android:layout_width="0dp"
-                        android:layout_height="36dp"
+                        android:layout_height="wrap_content"
+                        android:minHeight="36dp"
                         android:layout_weight="1"
-                        android:text="⬆ Отправить трек"
+                        android:text="Отправить трек"
                         android:textSize="12sp"
                         android:textColor="#FFFFFF"
                         android:backgroundTint="#1B5E20"
