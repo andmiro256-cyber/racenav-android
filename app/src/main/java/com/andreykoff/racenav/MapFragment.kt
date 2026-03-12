@@ -198,6 +198,8 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_NEXTCP_NAME = "widget_nextcp_name"
         const val PREF_WIDGET_ORDER = "widget_order"
         const val PREF_NAV_ACTIVE = "nav_active"
+        const val PREF_WP_APPROACH_RADIUS = "wp_approach_radius"  // metres, default 25
+        const val DEFAULT_WP_APPROACH_RADIUS = 25
         const val PREF_SYNC_API_KEY = "sync_api_key"
         const val SYNC_BASE_URL = "http://87.120.84.254:9222"
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
@@ -1091,7 +1093,7 @@ class MapFragment : Fragment() {
                     b.widgetDirectionArrow.rotation = bearing
                     if (loc.hasAltitude()) b.widgetAltitude.text = loc.altitude.toInt().toString()
 
-                    // Next CP distance + name + remaining km
+                    // Next CP distance + name + remaining km + auto-advance
                     if (waypoints.isNotEmpty() && activeWpIndex < waypoints.size) {
                         val wp = waypoints[activeWpIndex]
                         val distM = distanceM(newPoint, LatLng(wp.lat, wp.lon))
@@ -1099,6 +1101,23 @@ class MapFragment : Fragment() {
                         b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
                         val remKm = calcRemainingKm(newPoint)
                         b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
+                        // Auto-advance when within approach radius (only during active navigation)
+                        if (navActive) {
+                            val ctx = context
+                            val approachRadius = ctx?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                                ?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
+                                ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
+                            if (distM <= approachRadius) {
+                                val nextIndex = activeWpIndex + 1
+                                if (nextIndex < waypoints.size) {
+                                    advanceWaypoint()
+                                } else {
+                                    // Last waypoint reached — stop navigation
+                                    stopNavigation()
+                                    Toast.makeText(ctx, "Маршрут завершён!", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
                     } else {
                         b.widgetNextCpName.text = "--"
                         b.widgetRemainKm.text = "--"

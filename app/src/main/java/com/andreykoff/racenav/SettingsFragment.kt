@@ -49,6 +49,8 @@ import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_3D_TILT
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
 import com.andreykoff.racenav.MapFragment.Companion.PREF_SYNC_API_KEY
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_APPROACH_RADIUS
+import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_WP_APPROACH_RADIUS
 import android.widget.EditText
 import android.widget.RadioGroup
 import android.widget.ImageButton
@@ -382,6 +384,25 @@ class SettingsFragment : Fragment() {
             wpVisible = !wpVisible
             btnToggleWp.setImageResource(if (wpVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
             mapFrag?.setLoadedWpVisible(wpVisible)
+        }
+
+        // Approach radius
+        val txtApproachRadius = view.findViewById<TextView>(R.id.txtApproachRadius)
+        var approachRadius = prefs.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS).coerceIn(5, 100)
+        txtApproachRadius.text = approachRadius.toString()
+        view.findViewById<ImageButton>(R.id.btnApproachRadiusMinus).setOnClickListener {
+            if (approachRadius > 5) {
+                approachRadius -= 5
+                txtApproachRadius.text = approachRadius.toString()
+                prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, approachRadius).apply()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnApproachRadiusPlus).setOnClickListener {
+            if (approachRadius < 100) {
+                approachRadius += 5
+                txtApproachRadius.text = approachRadius.toString()
+                prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, approachRadius).apply()
+            }
         }
 
         // Navigation start/stop
