@@ -714,6 +714,7 @@ class MapFragment : Fragment() {
         // Bitmap icon layer: circle with number + optional text name below
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon_id")),
+            PropertyFactory.iconSize(0.6f),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
             PropertyFactory.iconAnchor("center"),
@@ -739,12 +740,9 @@ class MapFragment : Fragment() {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(WP_SOURCE_ID) ?: return
 
-        // Register bitmap icons for each waypoint
+        // Register bitmap icons for each waypoint (always update — getImage may return non-null for missing images)
         waypoints.forEach { wp ->
-            val iconId = "wp-icon-${wp.index}"
-            if (style.getImage(iconId) == null) {
-                style.addImage(iconId, createWaypointBitmap(wp.index))
-            }
+            style.addImage("wp-icon-${wp.index}", createWaypointBitmap(wp.index))
         }
 
         val features = JSONArray()
