@@ -48,6 +48,8 @@ import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_3D_TILT
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
+import com.andreykoff.racenav.MapFragment.Companion.PREF_SYNC_API_KEY
+import android.widget.EditText
 import android.widget.RadioGroup
 import android.widget.ImageButton
 import android.widget.ProgressBar
@@ -459,6 +461,49 @@ class SettingsFragment : Fragment() {
                 txtCache.text = cacheMb.toString()
                 prefs.edit().putInt(MapFragment.PREF_TILE_CACHE_MB, cacheMb).apply()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyCacheSize()
+            }
+        }
+
+        // Sync
+        val editApiKey = view.findViewById<EditText>(R.id.editSyncApiKey)
+        val btnSyncPull = view.findViewById<android.widget.Button>(R.id.btnSyncPull)
+        val btnSyncPush = view.findViewById<android.widget.Button>(R.id.btnSyncPush)
+        val txtSyncStatus = view.findViewById<TextView>(R.id.txtSyncStatus)
+        editApiKey.setText(prefs.getString(PREF_SYNC_API_KEY, ""))
+
+        fun setSyncStatus(ok: Boolean, msg: String) {
+            txtSyncStatus.text = msg
+            txtSyncStatus.setTextColor(if (ok) 0xFF22C55E.toInt() else 0xFFFF6B6B.toInt())
+            txtSyncStatus.visibility = View.VISIBLE
+            btnSyncPull.isEnabled = true
+            btnSyncPush.isEnabled = true
+        }
+
+        btnSyncPull.setOnClickListener {
+            val key = editApiKey.text.toString().trim()
+            if (key.isEmpty()) { Toast.makeText(requireContext(), "Введите ключ активации", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+            prefs.edit().putString(PREF_SYNC_API_KEY, key).apply()
+            btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
+            txtSyncStatus.text = "Получаю данные..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
+            val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mf != null) {
+                mf.syncPull(key) { ok, msg -> setSyncStatus(ok, msg) }
+            } else {
+                setSyncStatus(false, "Откройте карту и попробуйте снова")
+            }
+        }
+
+        btnSyncPush.setOnClickListener {
+            val key = editApiKey.text.toString().trim()
+            if (key.isEmpty()) { Toast.makeText(requireContext(), "Введите ключ активации", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+            prefs.edit().putString(PREF_SYNC_API_KEY, key).apply()
+            btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
+            txtSyncStatus.text = "Отправляю трек..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
+            val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mf != null) {
+                mf.syncPush(key) { ok, msg -> setSyncStatus(ok, msg) }
+            } else {
+                setSyncStatus(false, "Откройте карту и попробуйте снова")
             }
         }
 

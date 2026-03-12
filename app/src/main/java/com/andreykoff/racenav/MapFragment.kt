@@ -198,6 +198,8 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_NEXTCP_NAME = "widget_nextcp_name"
         const val PREF_WIDGET_ORDER = "widget_order"
         const val PREF_NAV_ACTIVE = "nav_active"
+        const val PREF_SYNC_API_KEY = "sync_api_key"
+        const val SYNC_BASE_URL = "http://87.120.84.254:9222"
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
 
@@ -1491,6 +1493,124 @@ class MapFragment : Fragment() {
             } catch (e: Exception) {
                 Log.d("RaceNav", "Update check: ${e.message}")
                 onResult(null, current, false)
+            }
+        }
+    }
+
+    /** Pull waypoints/tracks from TND Sync server and load them into map */
+    fun syncPull(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
+        lifecycleScope.launch {
+            try {
+                val json = withContext(Dispatchers.IO) {
+                    val conn = java.net.URL("$SYNC_BASE_URL/api/state").openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "GET"
+                    conn.setRequestProperty("X-Api-Key", apiKey)
+                    conn.setRequestProperty("X-Client-Id", "android")
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+                    JSONObject(conn.inputStream.bufferedReader().readText())
+                }
+                val syncWaypoints = mutableListOf<Waypoint>()
+                val wptArray = json.optJSONArray("waypoints")
+                if (wptArray != null) {
+                    for (i in 0 until wptArray.length()) {
+                        val w = wptArray.getJSONObject(i)
+                        syncWaypoints.add(Waypoint(
+                            lat = w.getDouble("lat"),
+                            lon = w.getDouble("lng"),
+                            name = w.optString("name", "КП ${i + 1}"),
+                            index = i,
+                            description = w.optString("desc", "")
+                        ))
+                    }
+                }
+                val syncTrackPts = mutableListOf<Pair<Double, Double>>()
+                val tracksArray = json.optJSONArray("tracks")
+                if (tracksArray != null) {
+                    for (i in 0 until tracksArray.length()) {
+                        val t = tracksArray.getJSONObject(i)
+                        val pts = t.optJSONArray("points")
+                        if (pts != null) {
+                            for (j in 0 until pts.length()) {
+                                val p = pts.getJSONObject(j)
+                                syncTrackPts.add(Pair(p.getDouble("lat"), p.getDouble("lng")))
+                            }
+                        }
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    val ctx = context ?: return@withContext
+                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    if (syncWaypoints.isNotEmpty()) {
+                        loadWaypoints(syncWaypoints)
+                        prefs.edit().putString(PREF_LOADED_WP_NAME, "КП: синхронизация (${syncWaypoints.size})").apply()
+                    }
+                    if (syncTrackPts.isNotEmpty()) {
+                        loadTrack(syncTrackPts)
+                        prefs.edit().putString(PREF_LOADED_TRACK_NAME, "Трек: синхронизация (${syncTrackPts.size} точек)").apply()
+                    }
+                    val msg = buildString {
+                        if (syncWaypoints.isNotEmpty()) append("${syncWaypoints.size} КП")
+                        if (syncWaypoints.isNotEmpty() && syncTrackPts.isNotEmpty()) append(", ")
+                        if (syncTrackPts.isNotEmpty()) append("трек (${syncTrackPts.size} точек)")
+                        if (isEmpty()) append("нет данных")
+                    }
+                    onResult(true, "Получено: $msg")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, "Ошибка: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /** Push current recording track to TND Sync server */
+    fun syncPush(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
+        val pts = TrackingService.trackPoints.toList()
+        if (pts.isEmpty()) {
+            onResult(false, "Нет активного трека для отправки")
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val pointsArray = JSONArray()
+                pts.forEach { (lat, lon) ->
+                    pointsArray.put(JSONObject().put("lat", lat).put("lng", lon))
+                }
+                val trackObj = JSONObject()
+                    .put("id", 1).put("name", "Android трек")
+                    .put("color", "#FF2200").put("width", 4)
+                    .put("pointSize", 0).put("points", pointsArray)
+                    .put("pointsData", JSONArray()).put("visible", true)
+                val body = JSONObject()
+                    .put("version", 1)
+                    .put("waypoints", JSONArray())
+                    .put("tracks", JSONArray().put(trackObj))
+                    .put("routes", JSONArray())
+                    .put("waypointSets", JSONArray())
+                    .put("counters", JSONObject())
+                withContext(Dispatchers.IO) {
+                    val conn = java.net.URL("$SYNC_BASE_URL/api/state").openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "PUT"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.setRequestProperty("X-Api-Key", apiKey)
+                    conn.setRequestProperty("X-Client-Id", "android")
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    conn.doOutput = true
+                    val bodyBytes = body.toString().toByteArray(Charsets.UTF_8)
+                    conn.outputStream.write(bodyBytes)
+                    if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+                }
+                withContext(Dispatchers.Main) {
+                    onResult(true, "Отправлено ${pts.size} точек")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, "Ошибка: ${e.message}")
+                }
             }
         }
     }
