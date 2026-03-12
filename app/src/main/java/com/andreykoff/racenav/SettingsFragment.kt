@@ -748,6 +748,15 @@ class SettingsFragment : Fragment() {
                                 val label = "КП: $name (${result.waypoints.size} точек)"
                                 txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                 filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                // Show summary of loaded waypoints
+                                if (result.waypoints.size <= 30) {
+                                    val names = result.waypoints.joinToString("\n") { "${it.index}. ${it.name}" }
+                                    android.app.AlertDialog.Builder(requireContext())
+                                        .setTitle("Загружено КП: ${result.waypoints.size}")
+                                        .setMessage(names)
+                                        .setPositiveButton("OK", null)
+                                        .show()
+                                }
                             }
                             if (result.trackPoints.isEmpty() && result.waypoints.isEmpty()) {
                                 txtErr?.text = "Файл пустой: $name"
@@ -773,6 +782,15 @@ class SettingsFragment : Fragment() {
                                     val label = "КП: $name (${result.waypoints.size} точек)"
                                     txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                     filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                    // Show summary of loaded waypoints
+                                    if (result.waypoints.size <= 30) {
+                                        val names = result.waypoints.joinToString("\n") { "${it.index}. ${it.name}" }
+                                        android.app.AlertDialog.Builder(requireContext())
+                                            .setTitle("Загружено КП: ${result.waypoints.size}")
+                                            .setMessage(names)
+                                            .setPositiveButton("OK", null)
+                                            .show()
+                                    }
                                 }
                             }
                             null
@@ -787,6 +805,15 @@ class SettingsFragment : Fragment() {
                                     val label = "КП: $name (${wpts.size} точек)"
                                     txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                     filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                    // Show summary of loaded waypoints
+                                    if (wpts.size <= 30) {
+                                        val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
+                                        android.app.AlertDialog.Builder(requireContext())
+                                            .setTitle("Загружено КП: ${wpts.size}")
+                                            .setMessage(names)
+                                            .setPositiveButton("OK", null)
+                                            .show()
+                                    }
                                 } else {
                                     txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
                                 }
@@ -801,6 +828,15 @@ class SettingsFragment : Fragment() {
                                 val label = "КП: $name (${wpts.size} точек)"
                                 txtWp?.text = label; rowWp?.visibility = View.VISIBLE
                                 filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                // Show summary of loaded waypoints
+                                if (wpts.size <= 30) {
+                                    val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
+                                    android.app.AlertDialog.Builder(requireContext())
+                                        .setTitle("Загружено КП: ${wpts.size}")
+                                        .setMessage(names)
+                                        .setPositiveButton("OK", null)
+                                        .show()
+                                }
                             } else {
                                 txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
                             }

@@ -211,6 +211,8 @@ class MapFragment : Fragment() {
 
         const val NAV_LINE_SOURCE_ID = "nav-line-source"
         const val NAV_LINE_LAYER_ID = "nav-line-layer"
+        const val ROUTE_LINE_SOURCE_ID = "route-line-source"
+        const val ROUTE_LINE_LAYER_ID  = "route-line-layer"
         const val WP_RADIUS_SOURCE_ID = "wp-radius-source"
         const val WP_RADIUS_LAYER_ID = "wp-radius-layer"
         const val PREF_NAV_LINE_COLOR = "nav_line_color"    // hex, default "#FF6F00"
@@ -291,6 +293,7 @@ class MapFragment : Fragment() {
         waypoints.addAll(wps)
         activeWpIndex = 0
         updateWaypointsOnMap()
+        updateRouteLineOnMap()
         updateNavLine()
         updateRadiusCircles()
         updateNextCpWidget()
@@ -535,7 +538,7 @@ class MapFragment : Fragment() {
             layers.append(",{\"id\":\"ol\",\"type\":\"raster\",\"source\":\"ov\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$op}}")
         }
 
-        return """{"version":8,"sources":{$sources},"layers":[$layers]}"""
+        return """{"version":8,"glyphs":"https://fonts.openmaptiles.org/{fontstack}/{range}.pbf","sources":{$sources},"layers":[$layers]}"""
     }
 
     private fun loadTileStyle(baseKey: String, overlayKey: String) {
@@ -681,6 +684,14 @@ class MapFragment : Fragment() {
     }
 
     private fun setupWaypointLayers(style: Style) {
+        // Route polyline: connects all waypoints in order
+        style.addSource(GeoJsonSource(ROUTE_LINE_SOURCE_ID))
+        style.addLayer(LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#FF6F00"),
+            PropertyFactory.lineWidth(2f),
+            PropertyFactory.lineOpacity(0.6f)
+        ))
+
         // Approach radius circles (behind waypoint dots)
         style.addSource(GeoJsonSource(WP_RADIUS_SOURCE_ID))
         style.addLayer(FillLayer(WP_RADIUS_LAYER_ID, WP_RADIUS_SOURCE_ID).withProperties(
@@ -709,10 +720,13 @@ class MapFragment : Fragment() {
         ))
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
             PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("label")),
-            PropertyFactory.textColor("#FFFFFF"),
-            PropertyFactory.textSize(11f),
+            PropertyFactory.textColor("#000000"),
+            PropertyFactory.textSize(12f),
             PropertyFactory.textAllowOverlap(true),
-            PropertyFactory.textOffset(arrayOf(0f, -2.5f)),
+            PropertyFactory.textOffset(arrayOf(0f, 2.0f)),
+            PropertyFactory.textAnchor("top"),
+            PropertyFactory.textHaloColor("#FFFFFF"),
+            PropertyFactory.textHaloWidth(2f),
             PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
         ))
         if (waypoints.isNotEmpty()) updateWaypointsOnMap()
@@ -730,11 +744,27 @@ class MapFragment : Fragment() {
                 .put("geometry", JSONObject().put("type", "Point")
                     .put("coordinates", JSONArray().put(wp.lon).put(wp.lat)))
                 .put("properties", JSONObject()
-                    .put("label", wp.index.toString())
+                    .put("label", if (wp.name.isNotBlank()) "${wp.index}. ${wp.name}" else "${wp.index}")
                     .put("name", wp.name))
             features.put(feature)
         }
         source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+    }
+
+    private fun updateRouteLineOnMap() {
+        val style = mapboxMap?.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(ROUTE_LINE_SOURCE_ID) ?: return
+        if (waypoints.size < 2) {
+            source.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+            return
+        }
+        val coords = JSONArray()
+        waypoints.forEach { wp -> coords.put(JSONArray().put(wp.lon).put(wp.lat)) }
+        val geojson = JSONObject()
+            .put("type", "Feature")
+            .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+            .put("properties", JSONObject())
+        source.setGeoJson(geojson.toString())
     }
 
     fun updateNavLine() {
@@ -1047,6 +1077,19 @@ class MapFragment : Fragment() {
         updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+        // Immediately refresh distance widget with new target
+        val b = _binding ?: return
+        val wp = waypoints.getOrNull(activeWpIndex)
+        if (wp != null) {
+            val gps = lastKnownGpsPoint
+            if (gps != null) {
+                val distM = distanceM(gps, LatLng(wp.lat, wp.lon))
+                b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1fкм", distM / 1000)
+            } else {
+                b.widgetNextCp.text = "--"
+            }
+            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+        }
     }
 
     private fun addWaypointAtCurrentPosition() {
@@ -1075,8 +1118,22 @@ class MapFragment : Fragment() {
     fun prevWaypoint() {
         if (waypoints.isEmpty()) return
         activeWpIndex = if (activeWpIndex > 0) activeWpIndex - 1 else waypoints.size - 1
+        updateNavLine()
         updateWaypointNavBar()
         Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+        // Immediately refresh distance widget with new target
+        val b = _binding ?: return
+        val wp = waypoints.getOrNull(activeWpIndex)
+        if (wp != null) {
+            val gps = lastKnownGpsPoint
+            if (gps != null) {
+                val distM = distanceM(gps, LatLng(wp.lat, wp.lon))
+                b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1fкм", distM / 1000)
+            } else {
+                b.widgetNextCp.text = "--"
+            }
+            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+        }
     }
 
     fun startNavigation() {
