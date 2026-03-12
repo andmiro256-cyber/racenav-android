@@ -1,4 +1,5 @@
 name: Build APK
+run-name: "RaceNav ${{ github.event.head_commit.message }}"
 
 on:
   push:
@@ -59,6 +60,17 @@ jobs:
           name: RaceNav-${{ steps.version.outputs.name }}-build${{ github.run_number }}
           path: app/build/outputs/apk/debug/racenav-${{ steps.version.outputs.name }}.apk
           retention-days: 14
+
+      - name: Deploy APK to server (every build)
+        uses: appleboy/scp-action@v0.1.7
+        continue-on-error: true
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          source: app/build/outputs/apk/debug/racenav-${{ steps.version.outputs.name }}.apk
+          target: /opt/server-monitor/public/
+          strip_components: 4
 
       - name: Create GitHub Release (on tag push only)
         if: startsWith(github.ref, 'refs/tags/v')
