@@ -897,7 +897,6 @@
                     android:layout_width="match_parent"
                     android:layout_height="44dp"
                     android:hint="TND-XXXX-XXXX-XXXX"
-                    android:hintTextColor="#555555"
                     android:textColor="#FFFFFF"
                     android:textSize="14sp"
                     android:background="#2A2A2A"
