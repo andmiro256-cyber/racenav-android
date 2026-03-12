@@ -707,8 +707,7 @@ class MapFragment : Fragment() {
             ?.getInt(PREF_NAV_LINE_WIDTH, 3)?.toFloat() ?: 3f
         style.addLayer(LineLayer(NAV_LINE_LAYER_ID, NAV_LINE_SOURCE_ID).withProperties(
             PropertyFactory.lineColor(navLineColor),
-            PropertyFactory.lineWidth(navLineWidth),
-            PropertyFactory.lineDasharray(arrayOf(4f, 4f))
+            PropertyFactory.lineWidth(navLineWidth)
         ))
 
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
@@ -729,9 +728,12 @@ class MapFragment : Fragment() {
             PropertyFactory.textHaloWidth(2f),
             PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
         ))
-        if (waypoints.isNotEmpty()) updateWaypointsOnMap()
+        if (waypoints.isNotEmpty()) {
+            updateWaypointsOnMap()
+            updateRouteLineOnMap()
+            updateRadiusCircles()
+        }
         updateNavLine()
-        updateRadiusCircles()
     }
 
     private fun updateWaypointsOnMap() {
