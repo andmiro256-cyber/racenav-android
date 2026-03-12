@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext HTTP to local tile server -->
+    <!-- Allow cleartext HTTP to local tile server and sync server -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">87.120.84.254</domain>
     </domain-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
