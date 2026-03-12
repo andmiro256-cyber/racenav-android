@@ -126,6 +126,7 @@ class MapFragment : Fragment() {
     private val waypoints = mutableListOf<Waypoint>()
     private var activeWpIndex = 0  // current target CP index
     var navActive = false           // waypoint navigation bar visible
+    private var cameraTopPadding = 0  // px; updated by applyCursorOffset(), applied in every camera move
 
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
@@ -1093,6 +1094,7 @@ class MapFragment : Fragment() {
                                     .target(newPoint)
                                     .bearing(0.0)
                                     .tilt(tilt)
+                                    .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
                                 if (targetZoom != null) builder.zoom(targetZoom)
                                 mapboxMap?.animateCamera(
                                     CameraUpdateFactory.newCameraPosition(builder.build()), 900)
@@ -1102,6 +1104,7 @@ class MapFragment : Fragment() {
                                     .target(newPoint)
                                     .bearing(bearing.toDouble())
                                     .tilt(tilt)
+                                    .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
                                 if (targetZoom != null) builder.zoom(targetZoom)
                                 mapboxMap?.animateCamera(
                                     CameraUpdateFactory.newCameraPosition(builder.build()), 900)
@@ -1364,15 +1367,14 @@ class MapFragment : Fragment() {
     }
 
     fun applyCursorOffset() {
-        val map = mapboxMap ?: return
         val position = context?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
             ?.getInt(PREF_CURSOR_OFFSET, 1) ?: 1  // 1-10
         val screenHeight = resources.displayMetrics.heightPixels
         // position 1 = no offset (cursor at center), position 10 = cursor near bottom
         // top padding shifts the camera center DOWN → cursor appears lower on screen
         val fraction = (position - 1) / 9f * 0.42f  // up to 42% of screen height as top padding
-        val topPadding = (screenHeight * fraction).toInt()
-        map.setPadding(0, topPadding, 0, 0)
+        cameraTopPadding = (screenHeight * fraction).toInt()
+        mapboxMap?.setPadding(0, cameraTopPadding, 0, 0)
     }
 
     fun applyCacheSize() {
