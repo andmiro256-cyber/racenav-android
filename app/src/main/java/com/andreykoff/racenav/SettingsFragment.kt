@@ -735,33 +735,38 @@ class SettingsFragment : Fragment() {
                 when (ext) {
                     "gpx" -> {
                         val result = GpxParser.parseGpxFull(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (result.trackPoints.isNotEmpty()) {
-                                mapFrag?.loadTrack(result.trackPoints)
-                                val label = "Трек: $name (${result.trackPoints.size} точек)"
-                                txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
-                                view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
-                                filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
-                            }
-                            if (result.waypoints.isNotEmpty()) {
-                                mapFrag?.loadWaypoints(result.waypoints)
-                                val label = "КП: $name (${result.waypoints.size} точек)"
-                                txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                // Show summary of loaded waypoints
-                                if (result.waypoints.size <= 30) {
-                                    val names = result.waypoints.joinToString("\n") { "${it.index}. ${it.name}" }
-                                    android.app.AlertDialog.Builder(requireContext())
-                                        .setTitle("Загружено КП: ${result.waypoints.size}")
-                                        .setMessage(names)
-                                        .setPositiveButton("OK", null)
-                                        .show()
-                                }
-                            }
-                            if (result.trackPoints.isEmpty() && result.waypoints.isEmpty()) {
+                        val hasTrack = result.trackPoints.isNotEmpty()
+                        val hasWaypoints = result.waypoints.isNotEmpty()
+
+                        if (!hasTrack && !hasWaypoints) {
+                            withContext(Dispatchers.Main) {
                                 txtErr?.text = "Файл пустой: $name"
                                 txtErr?.visibility = View.VISIBLE
                             }
+                            return@launch
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            showGpxImportDialog(
+                                fileName = name,
+                                trackPointCount = result.trackPoints.size,
+                                waypoints = result.waypoints,
+                                onConfirm = { loadTrack, loadWps ->
+                                    if (loadTrack && result.trackPoints.isNotEmpty()) {
+                                        mapFrag?.loadTrack(result.trackPoints)
+                                        val label = "Трек: $name (${result.trackPoints.size} точек)"
+                                        txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
+                                        view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
+                                        filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                                    }
+                                    if (loadWps && result.waypoints.isNotEmpty()) {
+                                        mapFrag?.loadWaypoints(result.waypoints)
+                                        val label = "КП: $name (${result.waypoints.size} точек)"
+                                        txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                        filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                    }
+                                }
+                            )
                         }
                     }
                     "rte" -> {
@@ -770,28 +775,26 @@ class SettingsFragment : Fragment() {
                         val wpts = if (result != null && (result.waypoints.isNotEmpty() || result.trackPoints.isNotEmpty())) {
                             // GPX-format RTE
                             withContext(Dispatchers.Main) {
-                                if (result.trackPoints.isNotEmpty()) {
-                                    mapFrag?.loadTrack(result.trackPoints)
-                                    val label = "Трек: $name (${result.trackPoints.size} точек)"
-                                    txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
-                                    view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
-                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
-                                }
-                                if (result.waypoints.isNotEmpty()) {
-                                    mapFrag?.loadWaypoints(result.waypoints)
-                                    val label = "КП: $name (${result.waypoints.size} точек)"
-                                    txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                    // Show summary of loaded waypoints
-                                    if (result.waypoints.size <= 30) {
-                                        val names = result.waypoints.joinToString("\n") { "${it.index}. ${it.name}" }
-                                        android.app.AlertDialog.Builder(requireContext())
-                                            .setTitle("Загружено КП: ${result.waypoints.size}")
-                                            .setMessage(names)
-                                            .setPositiveButton("OK", null)
-                                            .show()
+                                showGpxImportDialog(
+                                    fileName = name,
+                                    trackPointCount = result.trackPoints.size,
+                                    waypoints = result.waypoints,
+                                    onConfirm = { loadTrack, loadWps ->
+                                        if (loadTrack && result.trackPoints.isNotEmpty()) {
+                                            mapFrag?.loadTrack(result.trackPoints)
+                                            val label = "Трек: $name (${result.trackPoints.size} точек)"
+                                            txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
+                                            view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
+                                            filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
+                                        }
+                                        if (loadWps && result.waypoints.isNotEmpty()) {
+                                            mapFrag?.loadWaypoints(result.waypoints)
+                                            val label = "КП: $name (${result.waypoints.size} точек)"
+                                            txtWp?.text = label; rowWp?.visibility = View.VISIBLE
+                                            filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
+                                        }
                                     }
-                                }
+                                )
                             }
                             null
                         } else {
@@ -961,5 +964,61 @@ class SettingsFragment : Fragment() {
             }
         }
         return uri.lastPathSegment ?: "unknown"
+    }
+
+    private fun showGpxImportDialog(
+        fileName: String,
+        trackPointCount: Int,
+        waypoints: List<Waypoint>,
+        onConfirm: (loadTrack: Boolean, loadWaypoints: Boolean) -> Unit
+    ) {
+        val hasTrack = trackPointCount > 0
+        val hasWaypoints = waypoints.isNotEmpty()
+
+        // Build message showing what's in the file
+        val sb = StringBuilder()
+        if (hasTrack) sb.appendLine("📍 Трек: $trackPointCount точек")
+        if (hasWaypoints) {
+            sb.appendLine("🚩 КП: ${waypoints.size} точек")
+            waypoints.take(10).forEach { sb.appendLine("  ${it.index}. ${it.name}") }
+            if (waypoints.size > 10) sb.appendLine("  ... и ещё ${waypoints.size - 10}")
+        }
+
+        val dialogView = android.widget.LinearLayout(requireContext()).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 16)
+        }
+
+        val cbTrack = android.widget.CheckBox(requireContext()).apply {
+            text = "Загрузить трек ($trackPointCount точек)"
+            isChecked = hasTrack
+            isEnabled = hasTrack
+        }
+        val cbWaypoints = android.widget.CheckBox(requireContext()).apply {
+            text = "Загрузить КП (${waypoints.size} точек)"
+            isChecked = hasWaypoints
+            isEnabled = hasWaypoints
+        }
+
+        // Info text with КП list
+        val infoText = android.widget.TextView(requireContext()).apply {
+            text = sb.toString().trim()
+            textSize = 12f
+            setPadding(0, 8, 0, 0)
+            setTextColor(0xFF888888.toInt())
+        }
+
+        if (hasTrack) dialogView.addView(cbTrack)
+        if (hasWaypoints) dialogView.addView(cbWaypoints)
+        if (hasWaypoints && waypoints.isNotEmpty()) dialogView.addView(infoText)
+
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle("Что загрузить из $fileName?")
+            .setView(dialogView)
+            .setPositiveButton("Загрузить") { _, _ ->
+                onConfirm(cbTrack.isChecked && hasTrack, cbWaypoints.isChecked && hasWaypoints)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 }

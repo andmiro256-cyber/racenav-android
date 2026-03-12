@@ -37,7 +37,6 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
-import com.mapbox.mapboxsdk.style.layers.CircleLayer
 import com.mapbox.mapboxsdk.style.layers.FillLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
@@ -712,22 +711,21 @@ class MapFragment : Fragment() {
         ))
 
         style.addSource(GeoJsonSource(WP_SOURCE_ID))
-        style.addLayer(CircleLayer(WP_LAYER_ID, WP_SOURCE_ID).withProperties(
-            PropertyFactory.circleRadius(10f),
-            PropertyFactory.circleColor("#FF6F00"),
-            PropertyFactory.circleStrokeWidth(2f),
-            PropertyFactory.circleStrokeColor("#FFFFFF")
-        ))
+        // Bitmap icon layer: circle with number + optional text name below
         style.addLayer(SymbolLayer(WP_LABEL_LAYER_ID, WP_SOURCE_ID).withProperties(
-            PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("label")),
-            PropertyFactory.textColor("#000000"),
-            PropertyFactory.textSize(12f),
-            PropertyFactory.textAllowOverlap(true),
-            PropertyFactory.textOffset(arrayOf(0f, 2.0f)),
+            PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon_id")),
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true),
+            PropertyFactory.iconAnchor("center"),
+            PropertyFactory.textField(com.mapbox.mapboxsdk.style.expressions.Expression.get("name")),
             PropertyFactory.textAnchor("top"),
-            PropertyFactory.textHaloColor("#FFFFFF"),
-            PropertyFactory.textHaloWidth(2f),
-            PropertyFactory.textFont(arrayOf("Open Sans Bold", "Arial Unicode MS Regular"))
+            PropertyFactory.textOffset(arrayOf(0f, 1.8f)),
+            PropertyFactory.textSize(11f),
+            PropertyFactory.textColor("#FFFFFF"),
+            PropertyFactory.textHaloColor("#000000"),
+            PropertyFactory.textHaloWidth(1.5f),
+            PropertyFactory.textAllowOverlap(true),
+            PropertyFactory.textOptional(true)
         ))
         if (waypoints.isNotEmpty()) {
             updateWaypointsOnMap()
@@ -740,6 +738,15 @@ class MapFragment : Fragment() {
     private fun updateWaypointsOnMap() {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(WP_SOURCE_ID) ?: return
+
+        // Register bitmap icons for each waypoint
+        waypoints.forEach { wp ->
+            val iconId = "wp-icon-${wp.index}"
+            if (style.getImage(iconId) == null) {
+                style.addImage(iconId, createWaypointBitmap(wp.index))
+            }
+        }
+
         val features = JSONArray()
         waypoints.forEach { wp ->
             val feature = JSONObject()
@@ -747,11 +754,41 @@ class MapFragment : Fragment() {
                 .put("geometry", JSONObject().put("type", "Point")
                     .put("coordinates", JSONArray().put(wp.lon).put(wp.lat)))
                 .put("properties", JSONObject()
-                    .put("label", if (wp.name.isNotBlank()) "${wp.index}. ${wp.name}" else "${wp.index}")
-                    .put("name", wp.name))
+                    .put("icon_id", "wp-icon-${wp.index}")
+                    .put("name", wp.name.ifBlank { "" }))
             features.put(feature)
         }
         source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+    }
+
+    private fun createWaypointBitmap(index: Int): android.graphics.Bitmap {
+        val size = 64
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+        // Orange fill
+        paint.style = android.graphics.Paint.Style.FILL
+        paint.color = android.graphics.Color.parseColor("#FF6F00")
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+
+        // White stroke
+        paint.style = android.graphics.Paint.Style.STROKE
+        paint.color = android.graphics.Color.WHITE
+        paint.strokeWidth = 4f
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+
+        // Index number text
+        paint.style = android.graphics.Paint.Style.FILL
+        paint.color = android.graphics.Color.WHITE
+        paint.textAlign = android.graphics.Paint.Align.CENTER
+        paint.isFakeBoldText = true
+        val text = index.toString()
+        paint.textSize = if (text.length > 2) 20f else 26f
+        val textY = size / 2f - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(text, size / 2f, textY, paint)
+
+        return bmp
     }
 
     private fun updateRouteLineOnMap() {
@@ -1014,8 +1051,6 @@ class MapFragment : Fragment() {
     }
 
     fun setLoadedWpVisible(visible: Boolean) {
-        mapboxMap?.style?.getLayer(WP_LAYER_ID)
-            ?.setProperties(PropertyFactory.visibility(if (visible) "visible" else "none"))
         mapboxMap?.style?.getLayer(WP_LABEL_LAYER_ID)
             ?.setProperties(PropertyFactory.visibility(if (visible) "visible" else "none"))
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
