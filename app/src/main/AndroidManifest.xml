@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:name=".RaceNavApp"
@@ -28,10 +30,55 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Open GPX files -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.gpx" />
+                <data android:pathPattern=".*\\.GPX" />
+                <data android:pathPattern=".*\\.wpt" />
+                <data android:pathPattern=".*\\.WPT" />
+                <data android:pathPattern=".*\\.rte" />
+                <data android:pathPattern=".*\\.RTE" />
+                <data android:pathPattern=".*\\.plt" />
+                <data android:pathPattern=".*\\.PLT" />
+                <data android:pathPattern=".*\\.sqlitedb" />
+                <data android:pathPattern=".*\\.SQLITEDB" />
+                <data android:pathPattern=".*\\.mbtiles" />
+                <data android:pathPattern=".*\\.MBTILES" />
+            </intent-filter>
+
+            <!-- GPX MIME type -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/gpx+xml" />
+            </intent-filter>
+
+            <!-- Open from file managers (generic octet-stream with extensions) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <service
             android:name=".TrackingService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <service
+            android:name=".TraccarService"
             android:exported="false"
             android:foregroundServiceType="location" />
 

@@ -8,7 +8,8 @@ data class Waypoint(
     val lat: Double,
     val lon: Double,
     val index: Int,
-    val description: String = ""
+    val description: String = "",
+    val proximity: Double = 0.0  // radius in meters, 0 = use global setting
 )
 
 data class GpxResult(
@@ -20,46 +21,66 @@ object GpxParser {
 
     /** Parse GPX file — returns both waypoints (wpt/rtept) and track points (trkpt) */
     fun parseGpxFull(inputStream: InputStream): GpxResult {
-        val waypoints = mutableListOf<Waypoint>()
+        val wptList = mutableListOf<Waypoint>()   // standalone <wpt>
+        val rteptList = mutableListOf<Waypoint>()  // route <rtept>
         val trackPoints = mutableListOf<Pair<Double, Double>>()
         val parser = Xml.newPullParser()
         parser.setInput(inputStream, null)
 
         var eventType = parser.eventType
-        var inWpt = false; var inTrkpt = false
+        var inWpt = false; var inRtept = false; var inTrkpt = false
         var lat = 0.0; var lon = 0.0
-        var name = ""; var desc = ""
+        var name = ""; var desc = ""; var proximity = 0.0
 
         while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
             when (eventType) {
                 org.xmlpull.v1.XmlPullParser.START_TAG -> {
                     when (parser.name) {
-                        "wpt", "rtept" -> {
+                        "wpt" -> {
                             inWpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            name = ""; desc = ""
+                            name = ""; desc = ""; proximity = 0.0
+                        }
+                        "rtept" -> {
+                            inRtept = true
+                            lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
+                            lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
+                            name = ""; desc = ""; proximity = 0.0
                         }
                         "trkpt" -> {
                             inTrkpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                         }
-                        "name" -> if (inWpt) name = parser.nextText()
-                        "desc", "cmt" -> if (inWpt && desc.isEmpty()) desc = parser.nextText()
+                        "name" -> if (inWpt || inRtept) name = parser.nextText()
+                        "desc", "cmt" -> if ((inWpt || inRtept) && desc.isEmpty()) desc = parser.nextText()
+                        "proximity" -> if (inWpt || inRtept) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
                     }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
                     when (parser.name) {
-                        "wpt", "rtept" -> {
+                        "wpt" -> {
                             if (lat != 0.0 || lon != 0.0) {
-                                waypoints.add(Waypoint(
-                                    name = name.ifBlank { "КП ${waypoints.size + 1}" },
+                                wptList.add(Waypoint(
+                                    name = name.ifBlank { "КП ${wptList.size + 1}" },
                                     lat = lat, lon = lon,
-                                    index = waypoints.size + 1, description = desc
+                                    index = wptList.size + 1, description = desc,
+                                    proximity = proximity
                                 ))
                             }
                             inWpt = false
+                        }
+                        "rtept" -> {
+                            if (lat != 0.0 || lon != 0.0) {
+                                rteptList.add(Waypoint(
+                                    name = name.ifBlank { "КП ${rteptList.size + 1}" },
+                                    lat = lat, lon = lon,
+                                    index = rteptList.size + 1, description = desc,
+                                    proximity = proximity
+                                ))
+                            }
+                            inRtept = false
                         }
                         "trkpt" -> {
                             if (lat != 0.0 || lon != 0.0) trackPoints.add(Pair(lat, lon))
@@ -70,6 +91,8 @@ object GpxParser {
             }
             eventType = parser.next()
         }
+        // Prefer rtept (ordered route) over wpt if both exist with same coords
+        val waypoints = if (rteptList.isNotEmpty()) rteptList else wptList
         return GpxResult(waypoints, trackPoints)
     }
 
@@ -82,7 +105,7 @@ object GpxParser {
         var eventType = parser.eventType
         var inWpt = false
         var lat = 0.0; var lon = 0.0
-        var name = ""; var desc = ""
+        var name = ""; var desc = ""; var proximity = 0.0
 
         while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
             when (eventType) {
@@ -92,10 +115,11 @@ object GpxParser {
                             inWpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            name = ""; desc = ""
+                            name = ""; desc = ""; proximity = 0.0
                         }
                         "name" -> if (inWpt) name = parser.nextText()
                         "desc", "cmt" -> if (inWpt && desc.isEmpty()) desc = parser.nextText()
+                        "proximity" -> if (inWpt) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
                     }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
@@ -105,7 +129,8 @@ object GpxParser {
                                 name = name.ifBlank { "КП ${waypoints.size + 1}" },
                                 lat = lat, lon = lon,
                                 index = waypoints.size + 1,
-                                description = desc
+                                description = desc,
+                                proximity = proximity
                             ))
                         }
                         inWpt = false
@@ -136,10 +161,12 @@ object GpxParser {
                 val lat = parts[2].trim().toDoubleOrNull() ?: continue
                 val lon = parts[3].trim().toDoubleOrNull() ?: continue
                 if (lat == 0.0 && lon == 0.0) continue
+                val proximity = parts.getOrNull(14)?.trim()?.toDoubleOrNull() ?: 0.0
                 waypoints.add(Waypoint(
                     name = name.ifBlank { "КП ${waypoints.size + 1}" },
                     lat = lat, lon = lon,
-                    index = waypoints.size + 1
+                    index = waypoints.size + 1,
+                    proximity = proximity
                 ))
             } catch (e: Exception) { continue }
         }
@@ -175,6 +202,17 @@ object GpxParser {
             appendLine("  <trk><name>$safeName</name><trkseg>")
             for ((lat, lon) in points) appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
             appendLine("  </trkseg></trk>")
+            append("</gpx>")
+        }
+    }
+
+    fun writeWaypointsGpx(waypoints: List<Waypoint>, name: String = "Маршрут"): String {
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return buildString {
+            appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+            appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("  <metadata><name>${esc(name)}</name></metadata>")
+            for (wp in waypoints) appendLine("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name></wpt>")
             append("</gpx>")
         }
     }

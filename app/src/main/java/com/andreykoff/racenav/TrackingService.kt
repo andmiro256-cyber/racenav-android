@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.location.*
 import android.os.*
-import androidx.core.app.NotificationCompat
 import kotlin.math.*
 
 class TrackingService : Service() {
@@ -23,9 +22,6 @@ class TrackingService : Service() {
         const val EXTRA_ALTITUDE = "altitude"
         const val EXTRA_HAS_SPEED    = "has_speed"
         const val EXTRA_HAS_ALTITUDE = "has_altitude"
-
-        const val CHANNEL_ID = "tracking_channel"
-        const val NOTIF_ID   = 1001
 
         // Данные трека — читаются из MapFragment
         val trackPoints   = mutableListOf<Pair<Double, Double>>()
@@ -70,7 +66,7 @@ class TrackingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        NotificationHelper.createChannel(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,7 +90,8 @@ class TrackingService : Service() {
         getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, true).apply()
 
-        startForeground(NOTIF_ID, buildNotification("Запись трека начата…"))
+        NotificationHelper.trackingText = "⏺ Запись трека начата…"
+        startForeground(NotificationHelper.NOTIF_ID, NotificationHelper.buildNotification(this))
 
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val intervalSec = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
@@ -115,9 +112,17 @@ class TrackingService : Service() {
 
     private fun stopTracking() {
         isRunning = false
+        NotificationHelper.trackingText = null
         autoSaveTrack()  // Final save before stopping
         locationManager?.removeUpdates(locationListener)
-        stopForeground(STOP_FOREGROUND_REMOVE)
+
+        // If TraccarService is still running, just update notification; otherwise remove
+        if (TraccarService.isRunning) {
+            NotificationHelper.update(this)
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
         stopSelf()
     }
 
@@ -132,44 +137,8 @@ class TrackingService : Service() {
 
     private fun updateNotification() {
         val km   = trackLengthM / 1000.0
-        val text = "Запись: ${String.format("%.1f", km)} км • ${trackPoints.size} точек"
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(NOTIF_ID, buildNotification(text))
-    }
-
-    private fun buildNotification(text: String): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val stopIntent = PendingIntent.getService(
-            this, 1,
-            Intent(this, TrackingService::class.java).apply { action = ACTION_STOP },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("RaceNav — запись трека")
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_rec)
-            .setOngoing(true)
-            .setSilent(true)
-            .setContentIntent(openIntent)
-            .addAction(android.R.drawable.ic_media_pause, "Стоп", stopIntent)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Запись трека",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Статус записи трека в фоне"
-            setShowBadge(false)
-        }
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(channel)
+        NotificationHelper.trackingText = "⏺ ${String.format("%.1f", km)} км • ${trackPoints.size} точек"
+        NotificationHelper.update(this)
     }
 
     private fun distanceM(a: Pair<Double, Double>, b: Pair<Double, Double>): Double {

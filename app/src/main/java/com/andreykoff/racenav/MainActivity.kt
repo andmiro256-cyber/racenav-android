@@ -14,15 +14,302 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Crash logger — saves stacktrace to /sdcard/Download/racenav_crash.txt
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val f = java.io.File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS),
+                    "racenav_crash.txt")
+                f.writeText("${java.util.Date()}\nThread: ${t.name}\n${e.stackTraceToString()}")
+            } catch (_: Exception) {}
+            defaultHandler?.uncaughtException(t, e)
+        }
+
         applyKeepScreen()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // License system
+        LicenseManager.ensureInstallTime(this)
+
+        // Anonymous analytics
         if (savedInstanceState == null) {
-            supportFragmentManager.beginTransaction()
-                .replace(R.id.container, MapFragment())
-                .commit()
+            if (LicenseManager.canUse(this)) {
+                Analytics.sendEvent(this, "launch")
+                supportFragmentManager.beginTransaction()
+                    .replace(R.id.container, MapFragment())
+                    .commit()
+                // Handle file open intent (GPX/WPT/RTE/PLT)
+                handleFileIntent(intent)
+            } else {
+                Analytics.sendEvent(this, "trial_expired")
+                showTrialExpired()
+            }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleFileIntent(intent)
+    }
+
+    private fun handleFileIntent(intent: android.content.Intent?) {
+        val uri = intent?.data ?: return
+        if (intent.action != android.content.Intent.ACTION_VIEW) return
+
+        // Delay slightly to let MapFragment initialize
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                val fileName = uri.lastPathSegment?.lowercase() ?: ""
+                val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?: return@postDelayed
+
+                // Handle offline maps separately — they can be very large
+                if (fileName.endsWith(".sqlitedb") || fileName.endsWith(".mbtiles") || fileName.endsWith(".db")) {
+                    val ext = fileName.substringAfterLast('.', "sqlitedb")
+                    val dest = java.io.File(filesDir, "offline_map_${System.currentTimeMillis()}.$ext")
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    val displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "map.$ext"
+                    val key = mapFrag.addOfflineMap(dest.absolutePath, displayName)
+                    if (key != null) {
+                        android.widget.Toast.makeText(this, "🗺 Карта загружена: $displayName", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        dest.delete()
+                        android.widget.Toast.makeText(this, "Не удалось открыть карту", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                    return@postDelayed
+                }
+
+                // Track/waypoint files — small enough to read into memory
+                val inputStream = contentResolver.openInputStream(uri) ?: return@postDelayed
+                val bytes = inputStream.readBytes()
+                inputStream.close()
+
+                when {
+                    fileName.endsWith(".gpx") || intent.type == "application/gpx+xml" -> {
+                        val result = GpxParser.parseGpxFull(bytes.inputStream())
+                        if (result.waypoints.isNotEmpty()) {
+                            mapFrag.loadWaypoints(result.waypoints)
+                            android.widget.Toast.makeText(this, "📍 Загружено ${result.waypoints.size} точек из GPX", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        if (result.trackPoints.isNotEmpty()) {
+                            mapFrag.loadTrack(result.trackPoints)
+                            android.widget.Toast.makeText(this, "🛤 Загружен трек: ${result.trackPoints.size} точек", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    fileName.endsWith(".wpt") -> {
+                        val wpts = GpxParser.parseWpt(bytes.inputStream())
+                        if (wpts.isNotEmpty()) {
+                            mapFrag.loadWaypoints(wpts)
+                            android.widget.Toast.makeText(this, "📍 Загружено ${wpts.size} точек из WPT", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    fileName.endsWith(".rte") -> {
+                        val wpts = GpxParser.parseRteOzi(bytes.inputStream())
+                        if (wpts.isNotEmpty()) {
+                            mapFrag.loadWaypoints(wpts)
+                            android.widget.Toast.makeText(this, "📍 Загружен маршрут: ${wpts.size} точек из RTE", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    fileName.endsWith(".plt") -> {
+                        val wpts = GpxParser.parsePlt(bytes.inputStream())
+                        if (wpts.isNotEmpty()) {
+                            mapFrag.loadWaypoints(wpts)
+                            android.widget.Toast.makeText(this, "📍 Загружено ${wpts.size} точек из PLT", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    else -> {
+                        // Try GPX as fallback
+                        try {
+                            val result = GpxParser.parseGpxFull(bytes.inputStream())
+                            if (result.waypoints.isNotEmpty()) mapFrag.loadWaypoints(result.waypoints)
+                            if (result.trackPoints.isNotEmpty()) mapFrag.loadTrack(result.trackPoints)
+                        } catch (_: Exception) {}
+                    }
+                }
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(this, "Ошибка открытия файла: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }, 1500)  // wait for MapFragment to fully load
+    }
+
+    private fun showTrialExpired() {
+        val pad = 32
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad * 2, pad * 3, pad * 2, pad * 2)
+            setBackgroundColor(0xFF121212.toInt())
+        }
+
+        root.addView(android.widget.TextView(this).apply {
+            text = "Trophy Navigator"
+            setTextColor(0xFFFF6F00.toInt())
+            textSize = 24f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 16)
+        })
+
+        root.addView(android.widget.TextView(this).apply {
+            text = "Пробный период (${LicenseManager.TRIAL_DAYS} дней) завершён."
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 16f
+            setPadding(0, 0, 0, 24)
+        })
+
+        root.addView(android.widget.TextView(this).apply {
+            text = "Для продолжения работы приобретите лицензию или введите ключ активации."
+            setTextColor(0xFFCCCCCC.toInt())
+            textSize = 14f
+            setPadding(0, 0, 0, 32)
+        })
+
+        // License key input
+        val inputKey = android.widget.EditText(this).apply {
+            hint = "TNAV-XXXX-XXXX-XXXX"
+            setTextColor(0xFFFFFFFF.toInt())
+            setHintTextColor(0xFF666666.toInt())
+            textSize = 16f
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            setBackgroundColor(0xFF1E1E1E.toInt())
+            setPadding(24, 20, 24, 20)
+        }
+        root.addView(inputKey)
+
+        val statusText = android.widget.TextView(this).apply {
+            text = ""
+            setTextColor(0xFFFF4444.toInt())
+            textSize = 13f
+            setPadding(0, 8, 0, 16)
+        }
+        root.addView(statusText)
+
+        // Activate button
+        root.addView(android.widget.Button(this).apply {
+            text = "Активировать"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFFFF6F00.toInt())
+            setPadding(0, 16, 0, 16)
+            setOnClickListener {
+                val key = inputKey.text.toString()
+                if (LicenseManager.activate(this@MainActivity, key)) {
+                    Analytics.sendEvent(this@MainActivity, "activated")
+                    statusText.text = "✓ Активировано!"
+                    statusText.setTextColor(0xFF22C55E.toInt())
+                    // Restart into map
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        supportFragmentManager.beginTransaction()
+                            .replace(R.id.container, MapFragment())
+                            .commit()
+                    }, 800)
+                } else {
+                    statusText.text = "Неверный ключ"
+                    statusText.setTextColor(0xFFFF4444.toInt())
+                }
+            }
+        })
+
+        // Spacer
+        root.addView(android.view.View(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 24)
+        })
+
+        // Device ID display (copyable)
+        val deviceId = LicenseManager.getDeviceIdForUser(this@MainActivity)
+
+        root.addView(android.widget.TextView(this).apply {
+            text = "ID устройства: $deviceId"
+            setTextColor(0xFF999999.toInt())
+            textSize = 13f
+            setPadding(0, 0, 0, 4)
+        })
+
+        root.addView(android.widget.Button(this).apply {
+            text = "📋 Скопировать ID"
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(0xFFCCCCCC.toInt())
+            setBackgroundColor(0xFF2A2A2A.toInt())
+            setPadding(0, 12, 0, 12)
+            setOnClickListener {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Device ID", deviceId))
+                android.widget.Toast.makeText(this@MainActivity,
+                    "ID скопирован: $deviceId", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        })
+
+        // Spacer
+        root.addView(android.view.View(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 16)
+        })
+
+        // Buy via Telegram
+        root.addView(android.widget.Button(this).apply {
+            text = "Написать в Telegram"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF0088CC.toInt())
+            setPadding(0, 16, 0, 16)
+            setOnClickListener {
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(LicenseManager.getContactUrl()))
+                try { startActivity(intent) } catch (_: Exception) {
+                    android.widget.Toast.makeText(this@MainActivity,
+                        "Telegram не установлен", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        // Spacer
+        root.addView(android.view.View(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 8)
+        })
+
+        // Buy via Email
+        root.addView(android.widget.Button(this).apply {
+            text = "Написать на Email"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(0xFFFF6F00.toInt())
+            setBackgroundColor(0xFF1E1E1E.toInt())
+            setPadding(0, 16, 0, 16)
+            setOnClickListener {
+                val emailIntent = android.content.Intent(android.content.Intent.ACTION_SENDTO).apply {
+                    data = android.net.Uri.parse("mailto:${LicenseManager.getContactEmail()}")
+                    putExtra(android.content.Intent.EXTRA_SUBJECT, "RaceNav лицензия")
+                    putExtra(android.content.Intent.EXTRA_TEXT, "ID устройства: $deviceId\n\nХочу приобрести лицензию RaceNav.")
+                }
+                try { startActivity(emailIntent) } catch (_: Exception) {
+                    android.widget.Toast.makeText(this@MainActivity,
+                        "Почтовый клиент не найден", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        // Instructions
+        root.addView(android.widget.TextView(this).apply {
+            text = "Скопируйте ID устройства и отправьте его через Telegram или Email для получения ключа активации."
+            setTextColor(0xFF666666.toInt())
+            textSize = 12f
+            setPadding(0, 16, 0, 0)
+        })
+
+        val scroll = android.widget.ScrollView(this).apply {
+            addView(root)
+            setBackgroundColor(0xFF121212.toInt())
+        }
+        setContentView(scroll)
     }
 
     fun applyKeepScreen() {
@@ -52,17 +339,39 @@ class MainActivity : AppCompatActivity() {
                             .apply { action = TrackingService.ACTION_STOP }
                     )
                     mapFrag?.saveTrackToFile()
+                    stopAllServices()
                     finish()
                 }
-                .setNeutralButton("Выйти без сохранения") { _, _ -> finish() }
+                .setNeutralButton("Выйти без сохранения") { _, _ ->
+                    stopAllServices()
+                    finish()
+                }
                 .setNegativeButton("Отмена", null)
                 .show()
         } else {
             AlertDialog.Builder(this)
                 .setMessage("Выйти из приложения?")
-                .setPositiveButton("Выйти") { _, _ -> finish() }
+                .setPositiveButton("Выйти") { _, _ ->
+                    stopAllServices()
+                    finish()
+                }
                 .setNegativeButton("Отмена", null)
                 .show()
+        }
+    }
+
+    private fun stopAllServices() {
+        if (TrackingService.isRunning) {
+            startService(
+                android.content.Intent(this, TrackingService::class.java)
+                    .apply { action = TrackingService.ACTION_STOP }
+            )
+        }
+        if (TraccarService.isRunning) {
+            startService(
+                android.content.Intent(this, TraccarService::class.java)
+                    .apply { action = TraccarService.ACTION_STOP }
+            )
         }
     }
 
@@ -87,11 +396,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
-        // Volume UP held 2s → unlock screen
+        // Volume UP long press → toggle screen lock (if enabled in settings)
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(MapFragment.PREF_VOLUME_LOCK, true)) return super.onKeyLongPress(keyCode, event)
             val mapFrag = supportFragmentManager.findFragmentById(R.id.container) as? MapFragment
-            if (mapFrag?.isScreenLocked == true) {
-                mapFrag.unlockScreen()
+            if (mapFrag != null) {
+                if (mapFrag.isScreenLocked) {
+                    mapFrag.unlockScreen()
+                } else {
+                    mapFrag.lockScreen()
+                }
                 return true
             }
         }

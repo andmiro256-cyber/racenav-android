@@ -5,6 +5,7 @@
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">87.120.84.254</domain>
+        <domain includeSubdomains="false">217.60.1.225</domain>
     </domain-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>

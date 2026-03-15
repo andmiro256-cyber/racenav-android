@@ -11,22 +11,16 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 63
-        versionName = "2.0.16"
+        versionCode = 153
+        versionName = "2.1.6"
     }
 
     signingConfigs {
         create("release") {
-            val keystoreFile = System.getenv("KEYSTORE_PATH")
-            val keystoreAlias = System.getenv("KEY_ALIAS") ?: "racenav"
-            val keystorePass = System.getenv("STORE_PASSWORD") ?: ""
-            val keyPass = System.getenv("KEY_PASSWORD") ?: ""
-            if (keystoreFile != null) {
-                storeFile = file(keystoreFile)
-                storePassword = keystorePass
-                keyAlias = keystoreAlias
-                keyPassword = keyPass
-            }
+            storeFile = file("${rootProject.projectDir}/racenav.keystore")
+            storePassword = "racenav123"
+            keyAlias = "racenav"
+            keyPassword = "racenav123"
         }
     }
 
@@ -34,12 +28,10 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            val ks = signingConfigs.getByName("release")
-            if (ks.storeFile != null) signingConfig = ks
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
-            val ks = signingConfigs.getByName("release")
-            if (ks.storeFile != null) signingConfig = ks
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -67,4 +59,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
