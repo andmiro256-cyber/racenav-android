@@ -1475,14 +1475,16 @@
                 android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp" />
 
-            <TextView
+            <Button
+                android:id="@+id/btnStartDownload"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="В разработке — скачивание тайлов для офлайн-использования"
-                android:textColor="#555555"
-                android:textSize="13sp"
-                android:background="#1E1E1E"
-                android:padding="16dp" />
+                android:minHeight="52dp"
+                android:text="Выбрать область на карте"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#1565C0"
+                android:textSize="14sp"
+                android:textAllCaps="false" />
 
             <!-- Section: Live Server Monitoring -->
             <TextView

@@ -184,6 +184,12 @@ class MapFragment : Fragment() {
     private var tripmasterDistM = 0.0
     private var tripmasterLastPoint: LatLng? = null
 
+    // Download mode state
+    private var isDownloadSelecting = false
+    private var downloadFirstCorner: LatLng? = null
+    private var downloadBounds: BoundsRect? = null
+    private var downloadRectSource: GeoJsonSource? = null
+
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
         const val TRACK_ARROWS_SOURCE_ID = "track-arrows-source"
@@ -354,6 +360,8 @@ class MapFragment : Fragment() {
         const val USER_MARKER_SOURCE_ID = "user-marker-source"
         const val USER_MARKER_LAYER_ID = "user-marker-layer"
         const val USER_MARKER_ICON = "user-marker-icon"
+
+        data class TileSourceInfo(val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
@@ -620,6 +628,10 @@ class MapFragment : Fragment() {
             if (!isRecording) checkForUnfinishedTrack()
             // Tap on live user marker → show info card
             map.addOnMapClickListener { latLng ->
+                if (isDownloadSelecting) {
+                    handleDownloadTap(latLng)
+                    return@addOnMapClickListener true
+                }
                 handleLiveUserClick(map, latLng)
             }
             // Long press on map toggles UI bars
@@ -1710,6 +1722,7 @@ class MapFragment : Fragment() {
 
         binding.btnLock.setOnClickListener { lockScreen() }
 
+// Download indicator tap — show details dialog        binding.downloadIndicator.setOnClickListener {            showDownloadDetailsDialog()        }
         binding.btnSettings.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .add(R.id.container, SettingsFragment())
@@ -1825,6 +1838,18 @@ class MapFragment : Fragment() {
     fun getOfflineMaps(): List<OfflineMapInfo> = offlineMaps.toList()
 
     fun getTileSources(): Map<String, TileSource> = tileSources
+
+    fun getTileSourceInfoMap(): Map<String, Companion.TileSourceInfo> {
+        val map = mutableMapOf<String, Companion.TileSourceInfo>()
+        tileSources.filter { !it.key.startsWith(OFFLINE_TILE_KEY) && !it.key.startsWith("custom_") }
+            .forEach { (k, v) -> map[k] = Companion.TileSourceInfo(v.urls, v.tms, v.maxZoom) }
+        overlaySources.filter { it.key != "none" }
+            .forEach { (k, v) -> map[k] = Companion.TileSourceInfo(v.urls, v.tms, v.maxZoom) }
+        Log.d("TileDownload", "getTileSourceInfoMap: ${map.size} sources, keys=${map.keys}")
+        return map
+    }
+
+    fun getCurrentZoom(): Double = mapboxMap?.cameraPosition?.zoom ?: 10.0
 
     fun getOverlaySources(): Map<String, OverlaySource> = overlaySources
 
@@ -4448,6 +4473,495 @@ class MapFragment : Fragment() {
             bar.requestLayout()
         }
         applyCrosshairPrefs()
+    }
+
+    // ==================== DOWNLOAD MODE ====================
+
+    fun startDownloadMode() {
+        isDownloadSelecting = true
+        downloadFirstCorner = null
+        downloadBounds = null
+        Toast.makeText(context, "Нажмите на карту — первый угол области", Toast.LENGTH_LONG).show()
+    }
+
+    private fun handleDownloadTap(latLng: LatLng) {
+        if (downloadFirstCorner == null) {
+            downloadFirstCorner = latLng
+            Toast.makeText(context, "Нажмите на карту — второй угол", Toast.LENGTH_SHORT).show()
+        } else {
+            val first = downloadFirstCorner!!
+            val bounds = BoundsRect(
+                north = maxOf(first.latitude, latLng.latitude),
+                south = minOf(first.latitude, latLng.latitude),
+                east = maxOf(first.longitude, latLng.longitude),
+                west = minOf(first.longitude, latLng.longitude)
+            )
+            isDownloadSelecting = false
+            downloadFirstCorner = null
+            downloadBounds = bounds
+            drawDownloadRect(bounds)
+            showDownloadConfirmation(bounds)
+        }
+    }
+
+    private fun showDownloadConfirmation(bounds: BoundsRect) {
+        val view = _binding?.root ?: return
+        val snackbar = com.google.android.material.snackbar.Snackbar.make(
+            view, "Область выбрана", com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
+        )
+        snackbar.setAction("Скачать") {
+            showDownloadDialog(bounds)
+        }
+        // Add "Изменить" button via custom view approach — use second action text
+        val snackView = snackbar.view
+        snackView.setBackgroundColor(0xFF1A1A2E.toInt())
+        // Add a second button for "Изменить"
+        val layout = snackView as? android.widget.FrameLayout
+        val snackTextView = snackView.findViewById<android.widget.TextView>(com.google.android.material.R.id.snackbar_text)
+        snackTextView?.setTextColor(0xFFFFFFFF.toInt())
+        val snackActionView = snackView.findViewById<android.widget.TextView>(com.google.android.material.R.id.snackbar_action)
+        snackActionView?.setTextColor(0xFF4CAF50.toInt())
+
+        // Override dismiss on outside tap — allow re-selection
+        snackbar.addCallback(object : com.google.android.material.snackbar.Snackbar.Callback() {
+            override fun onDismissed(transientBottomBar: com.google.android.material.snackbar.Snackbar?, event: Int) {
+                if (event == DISMISS_EVENT_SWIPE || event == DISMISS_EVENT_MANUAL || event == DISMISS_EVENT_TIMEOUT) {
+                    // User swiped away or timed out — treat as cancel, remove rect
+                    removeDownloadRect()
+                }
+            }
+        })
+        snackbar.show()
+    }
+
+    private fun drawDownloadRect(bounds: BoundsRect) {
+        val map = mapboxMap ?: return
+        val style = map.style ?: return
+        Log.d("TileDownload", "drawDownloadRect: N=${bounds.north} S=${bounds.south} E=${bounds.east} W=${bounds.west}")
+        val geojson = """{
+            "type":"Feature",
+            "geometry":{
+                "type":"Polygon",
+                "coordinates":[[
+                    [${bounds.west},${bounds.north}],
+                    [${bounds.east},${bounds.north}],
+                    [${bounds.east},${bounds.south}],
+                    [${bounds.west},${bounds.south}],
+                    [${bounds.west},${bounds.north}]
+                ]]
+            }
+        }"""
+        val sourceId = "dl-rect-source"
+        try {
+            val existingSource = style.getSourceAs<GeoJsonSource>(sourceId)
+            if (existingSource != null) {
+                existingSource.setGeoJson(geojson)
+            } else {
+                val src = GeoJsonSource(sourceId, geojson)
+                style.addSource(src)
+                style.addLayer(FillLayer("dl-rect-fill", sourceId).withProperties(
+                    PropertyFactory.fillColor(android.graphics.Color.argb(60, 255, 152, 0)),
+                    PropertyFactory.fillOpacity(0.4f)
+                ))
+                style.addLayer(LineLayer("dl-rect-line", sourceId).withProperties(
+                    PropertyFactory.lineColor(0xFFFF9800.toInt()),
+                    PropertyFactory.lineWidth(2.5f)
+                ))
+            }
+            Log.d("TileDownload", "drawDownloadRect: rectangle drawn successfully")
+        } catch (e: Exception) {
+            Log.e("TileDownload", "drawDownloadRect failed: ${e.message}", e)
+        }
+    }
+
+    private fun removeDownloadRect() {
+        val style = mapboxMap?.style ?: return
+        try { style.removeLayer("dl-rect-fill") } catch (_: Exception) {}
+        try { style.removeLayer("dl-rect-line") } catch (_: Exception) {}
+        try { style.removeSource("dl-rect-source") } catch (_: Exception) {}
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun showDownloadDialog(bounds: BoundsRect) {
+        val ctx = context ?: return
+        val dialog = BottomSheetDialog(ctx)
+        val dp = resources.displayMetrics.density
+
+        val scroll = android.widget.ScrollView(ctx).apply {
+            setBackgroundColor(0xFF1A1A2E.toInt())
+            isNestedScrollingEnabled = true
+            isFillViewport = true
+        }
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((16 * dp).toInt(), (16 * dp).toInt(), (16 * dp).toInt(), (16 * dp).toInt())
+        }
+        scroll.addView(root)
+
+        // Title
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Скачать карту оффлайн"
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 18f
+            setPadding(0, 0, 0, (12 * dp).toInt())
+        })
+
+        // Map name
+        val nameEdit = android.widget.EditText(ctx).apply {
+            setText("Карта_${java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())}")
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 14f
+            setHintTextColor(0xFF888888.toInt()); hint = "Название карты"
+            setBackgroundColor(0xFF2A2A3E.toInt())
+            setPadding((12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt())
+        }
+        root.addView(nameEdit)
+
+        // === Section 1: Base map (RadioGroup) ===
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Базовая карта:"
+            setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+            setPadding(0, (16 * dp).toInt(), 0, (8 * dp).toInt())
+        })
+
+        val allSourceMaxZooms = mutableMapOf<String, Int>()
+        val baseRadioGroup = android.widget.RadioGroup(ctx)
+        val baseKeys = mutableListOf<String>() // ordered keys matching radio button indices
+        var selectedBaseKey = currentTileKey
+
+        tileSources.filter { !it.key.startsWith(OFFLINE_TILE_KEY) && !it.key.startsWith("custom_") }.forEach { (key, source) ->
+            allSourceMaxZooms[key] = source.maxZoom
+            val rb = android.widget.RadioButton(ctx).apply {
+                text = source.label
+                setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                buttonTintList = android.content.res.ColorStateList.valueOf(0xFF3b82f6.toInt())
+                id = View.generateViewId()
+            }
+            baseKeys.add(key)
+            baseRadioGroup.addView(rb)
+            if (key == currentTileKey) {
+                rb.isChecked = true
+            }
+        }
+        baseRadioGroup.setOnCheckedChangeListener { group, checkedId ->
+            for (i in 0 until group.childCount) {
+                val rb = group.getChildAt(i) as android.widget.RadioButton
+                if (rb.id == checkedId) {
+                    selectedBaseKey = baseKeys[i]
+                    break
+                }
+            }
+        }
+        root.addView(baseRadioGroup)
+
+        // === Section 2: Overlays (CheckBoxes) ===
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Оверлеи:"
+            setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+            setPadding(0, (12 * dp).toInt(), 0, (4 * dp).toInt())
+        })
+
+        val overlayCheckBoxes = mutableListOf<Pair<String, android.widget.CheckBox>>()
+        overlaySources.filter { it.key != "none" }.forEach { (key, source) ->
+            allSourceMaxZooms[key] = source.maxZoom
+            val cb = android.widget.CheckBox(ctx).apply {
+                text = source.label
+                setTextColor(0xFFDDDDDD.toInt()); textSize = 13f
+                isChecked = currentOverlayKeys.contains(key)
+                buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF9800.toInt())
+            }
+            overlayCheckBoxes.add(key to cb)
+            root.addView(cb)
+        }
+
+        // Zoom range - dynamic max from selected sources
+        fun calcMaxAllowedZoom(): Int {
+            val keys = mutableListOf(selectedBaseKey)
+            keys.addAll(overlayCheckBoxes.filter { it.second.isChecked }.map { it.first })
+            return keys.mapNotNull { allSourceMaxZooms[it] }.minOrNull() ?: 18
+        }
+        var maxAllowedZoom = calcMaxAllowedZoom()
+        val currentZ = getCurrentZoom().toInt().coerceIn(1, maxAllowedZoom)
+        var minZoom = (currentZ - 2).coerceIn(1, maxAllowedZoom)
+        var maxZoom = (currentZ + 2).coerceIn(1, maxAllowedZoom)
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Диапазон зума:"
+            setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+            setPadding(0, (16 * dp).toInt(), 0, (4 * dp).toInt())
+        })
+
+        val zoomLabel = android.widget.TextView(ctx).apply {
+            text = "Мин: $minZoom — Макс: $maxZoom"
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 14f
+            setPadding(0, 0, 0, (4 * dp).toInt())
+        }
+        root.addView(zoomLabel)
+
+        val estimateLabel = android.widget.TextView(ctx).apply {
+            setTextColor(0xFFFFAB00.toInt()); textSize = 12f
+            setPadding(0, (4 * dp).toInt(), 0, (8 * dp).toInt())
+        }
+        root.addView(estimateLabel)
+
+        fun updateEstimate() {
+            val layerCount = 1 + overlayCheckBoxes.count { it.second.isChecked } // 1 base + overlays
+            val tiles = TileDownloadManager.estimateTiles(bounds, minZoom, maxZoom) * layerCount
+            val mbEstimate = tiles * 15 / 1024  // ~15 KB per tile average
+            estimateLabel.text = "~$tiles тайлов (~${mbEstimate} МБ)"
+            if (tiles > 50000) estimateLabel.setTextColor(0xFFFF5252.toInt())
+            else estimateLabel.setTextColor(0xFFFFAB00.toInt())
+        }
+
+        // Min zoom seekbar
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Мин. зум:"; setTextColor(0xFF999999.toInt()); textSize = 11f
+        })
+        val seekMin = android.widget.SeekBar(ctx).apply {
+            max = maxAllowedZoom - 1; progress = minZoom - 1
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, u: Boolean) {
+                    minZoom = p + 1
+                    if (minZoom > maxZoom) { maxZoom = minZoom }
+                    zoomLabel.text = "Мин: $minZoom — Макс: $maxZoom (до $maxAllowedZoom)"
+                    updateEstimate()
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+            })
+        }
+        root.addView(seekMin)
+
+        // Max zoom seekbar
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Макс. зум:"; setTextColor(0xFF999999.toInt()); textSize = 11f
+        })
+        val seekMax = android.widget.SeekBar(ctx).apply {
+            max = maxAllowedZoom - 1; progress = maxZoom - 1
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, u: Boolean) {
+                    maxZoom = p + 1
+                    if (maxZoom < minZoom) { minZoom = maxZoom }
+                    zoomLabel.text = "Мин: $minZoom — Макс: $maxZoom (до $maxAllowedZoom)"
+                    updateEstimate()
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+            })
+        }
+        root.addView(seekMax)
+
+        // Update zoom limits when base or overlay selection changes
+        fun onSelectionChanged() {
+            maxAllowedZoom = calcMaxAllowedZoom()
+            seekMin.max = maxAllowedZoom - 1
+            seekMax.max = maxAllowedZoom - 1
+            if (maxZoom > maxAllowedZoom) {
+                maxZoom = maxAllowedZoom
+                seekMax.progress = maxZoom - 1
+            }
+            if (minZoom > maxAllowedZoom) {
+                minZoom = maxAllowedZoom
+                seekMin.progress = minZoom - 1
+            }
+            zoomLabel.text = "Мин: $minZoom — Макс: $maxZoom (до $maxAllowedZoom)"
+            updateEstimate()
+        }
+
+        baseRadioGroup.setOnCheckedChangeListener { group, checkedId ->
+            for (i in 0 until group.childCount) {
+                val rb = group.getChildAt(i) as android.widget.RadioButton
+                if (rb.id == checkedId) {
+                    selectedBaseKey = baseKeys[i]
+                    break
+                }
+            }
+            onSelectionChanged()
+        }
+
+        overlayCheckBoxes.forEach { (_, cb) ->
+            cb.setOnCheckedChangeListener { _, _ -> onSelectionChanged() }
+        }
+
+        updateEstimate()
+
+        // Download button
+        val btnDownload = android.widget.Button(ctx).apply {
+            text = "Скачать"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1565C0.toInt())
+            textSize = 14f
+            isAllCaps = false
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                (48 * dp).toInt()
+            )
+            lp.topMargin = (16 * dp).toInt()
+            layoutParams = lp
+        }
+        root.addView(btnDownload)
+
+        // Cancel button
+        val btnCancel = android.widget.Button(ctx).apply {
+            text = "Отмена"
+            setTextColor(0xFF999999.toInt())
+            setBackgroundColor(0xFF2A2A3E.toInt())
+            textSize = 14f
+            isAllCaps = false
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                (48 * dp).toInt()
+            )
+            lp.topMargin = (8 * dp).toInt()
+            layoutParams = lp
+        }
+        root.addView(btnCancel)
+
+        btnCancel.setOnClickListener {
+            removeDownloadRect()
+            dialog.dismiss()
+        }
+
+        btnDownload.setOnClickListener {
+            val mapName = nameEdit.text.toString().ifBlank { "Карта" }
+            val docsDir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOCUMENTS
+            )
+            val mapsDir = java.io.File(docsDir, "RaceNav/maps")
+            mapsDir.mkdirs()
+
+            // Build layers list: base first, then selected overlays
+            val layers = mutableListOf<LayerDownload>()
+
+            // Base layer (always exactly one)
+            val baseSource = tileSources[selectedBaseKey]
+            val baseLabel = baseSource?.label ?: selectedBaseKey
+            val baseSafeName = "${mapName}_${baseLabel}".replace(Regex("[^\\w]"), "_")
+            layers.add(LayerDownload(selectedBaseKey, baseLabel, java.io.File(mapsDir, "$baseSafeName.mbtiles").absolutePath))
+
+            // Overlay layers
+            val selectedOverlays = overlayCheckBoxes.filter { it.second.isChecked }
+            for ((key, cb) in selectedOverlays) {
+                val label = cb.text.toString()
+                val safeName = "${mapName}_${label}".replace(Regex("[^\\w]"), "_")
+                layers.add(LayerDownload(key, label, java.io.File(mapsDir, "$safeName.mbtiles").absolutePath))
+            }
+
+            val task = DownloadTask(mapName, layers, bounds, minZoom, maxZoom)
+
+            // Provide tile source info to download manager
+            TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
+            TileDownloadManager.onProgressUpdate = { progress ->
+                updateDownloadIndicator(progress)
+            }
+            TileDownloadManager.onComplete = {
+                onDownloadComplete()
+            }
+            TileDownloadManager.startDownload(ctx, task)
+
+            // Show indicator
+            _binding?.downloadIndicator?.visibility = View.VISIBLE
+
+            removeDownloadRect()
+            dialog.dismiss()
+            Toast.makeText(ctx, "Загрузка начата: $mapName", Toast.LENGTH_SHORT).show()
+        }
+
+        dialog.setContentView(scroll)
+        dialog.behavior.peekHeight = resources.displayMetrics.heightPixels
+        dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        dialog.show()
+        // Dark background for bottom sheet
+        dialog.window?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)?.setBackgroundColor(0xFF1A1A2E.toInt())
+    }
+
+    private fun updateDownloadIndicator(progress: DownloadProgress) {
+        val b = _binding ?: return
+        b.dlProgressText.text = "${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+        if (!progress.isRunning) {
+            if (progress.error != null) {
+                b.dlProgressText.text = "Ошибка"
+            } else {
+                b.dlProgressText.text = "Готово!"
+            }
+        }
+    }
+
+    private fun onDownloadComplete() {
+        val b = _binding ?: return
+        b.dlProgressText.text = "✅ Готово!"
+        b.dlProgress.visibility = View.GONE
+        // Auto-hide after 3 seconds
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            b.downloadIndicator.visibility = View.GONE
+            b.dlProgress.visibility = View.VISIBLE
+        }, 3000)
+
+        // Register downloaded maps: only the base layer as offline map,
+        // overlay names included in display name for reference
+        val task = TileDownloadManager.lastTask
+        if (task != null && task.layers.isNotEmpty()) {
+            // First layer is always the base map
+            val baseLayer = task.layers.first()
+            val baseFile = java.io.File(baseLayer.outputPath)
+            if (baseFile.exists() && baseFile.length() > 0) {
+                // Build display name: "Name (BaseLabel + overlay1, overlay2)"
+                val overlayLabels = task.layers.drop(1).filter {
+                    val f = java.io.File(it.outputPath)
+                    f.exists() && f.length() > 0
+                }.map { it.layerLabel }
+
+                val displayName = if (overlayLabels.isNotEmpty()) {
+                    "${task.name} (${baseLayer.layerLabel} + ${overlayLabels.joinToString(", ")})"
+                } else {
+                    "${task.name} (${baseLayer.layerLabel})"
+                }
+
+                val key = addOfflineMap(baseFile.absolutePath, displayName)
+                if (key != null) {
+                    Log.d("TileDownload", "Registered offline map: $displayName -> $key (${baseFile.length()} bytes)")
+                    // Save overlay paths keyed by offline map key for future use
+                    val overlayPaths = task.layers.drop(1).filter {
+                        val f = java.io.File(it.outputPath)
+                        f.exists() && f.length() > 0
+                    }.map { org.json.JSONObject().put("key", it.layerKey).put("path", it.outputPath) }
+                    // Also register each overlay .mbtiles as a separate offline map
+                    task.layers.drop(1).forEach { overlayLayer ->
+                        val overlayFile = java.io.File(overlayLayer.outputPath)
+                        if (overlayFile.exists() && overlayFile.length() > 0) {
+                            val overlayName = "${task.name} — ${overlayLayer.layerLabel}"
+                            addOfflineMap(overlayFile.absolutePath, overlayName)
+                            Log.d("TileDownload", "Registered overlay: $overlayName (${overlayFile.length()} bytes)")
+                        }
+                    }
+                }
+                Toast.makeText(context, "Загружено: $displayName", Toast.LENGTH_LONG).show()
+            } else {
+                Log.w("TileDownload", "Base layer file missing or empty: ${baseLayer.outputPath}")
+                Toast.makeText(context, "Ошибка: базовый слой не загружен", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "Загрузка завершена", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showDownloadDetailsDialog() {
+        val ctx = context ?: return
+        val progress = TileDownloadManager.getProgress()
+        val builder = androidx.appcompat.app.AlertDialog.Builder(ctx, com.google.android.material.R.style.ThemeOverlay_Material3_MaterialAlertDialog)
+        builder.setTitle("Загрузка карт")
+        val bytesStr = if (progress.bytesDownloaded > 1024 * 1024)
+            String.format("%.1f МБ", progress.bytesDownloaded / (1024.0 * 1024.0))
+        else
+            "${progress.bytesDownloaded / 1024} КБ"
+        builder.setMessage("Слой: ${progress.currentLayer}\nПрогресс: ${progress.downloadedTiles}/${progress.totalTiles} (${progress.percent}%)\nЗагружено: $bytesStr")
+        if (progress.isRunning) {
+            builder.setNegativeButton("Остановить") { _, _ ->
+                TileDownloadManager.stopDownload()
+                _binding?.downloadIndicator?.visibility = View.GONE
+                Toast.makeText(ctx, "Загрузка остановлена", Toast.LENGTH_SHORT).show()
+            }
+        }
+        builder.setPositiveButton("OK", null)
+        builder.show()
     }
 
     override fun onDestroyView() {

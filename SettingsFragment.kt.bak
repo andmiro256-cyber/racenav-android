@@ -62,7 +62,6 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_ROUTE_LINE_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.PREF_ROUTE_LINE_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_LABEL_SIZE
 import android.widget.EditText
-import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ImageButton
 import android.widget.ProgressBar
@@ -139,13 +138,6 @@ class SettingsFragment : Fragment() {
         switchVol.isChecked = prefs.getBoolean(PREF_VOLUME_ZOOM, true)
         switchVol.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_VOLUME_ZOOM, checked).apply()
-        }
-
-        // Volume+ screen lock toggle
-        val switchVolLock = view.findViewById<SwitchCompat>(R.id.switchVolumeLock)
-        switchVolLock.isChecked = prefs.getBoolean(MapFragment.PREF_VOLUME_LOCK, true)
-        switchVolLock.setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean(MapFragment.PREF_VOLUME_LOCK, checked).apply()
         }
 
         // Auto-recenter
@@ -379,23 +371,6 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        // Clear recorded track
-        view.findViewById<android.widget.Button>(R.id.btnClearTrack).setOnClickListener {
-            androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                .setTitle("Очистить трек")
-                .setMessage("Удалить записанный трек с карты?")
-                .setPositiveButton("Очистить") { _, _ ->
-                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.clearRecordedTrack()
-                }
-                .setNegativeButton("Отмена", null)
-                .show()
-        }
-
-        // Share recorded track
-        view.findViewById<android.widget.Button>(R.id.btnShareTrack).setOnClickListener {
-            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.shareRecordedTrack()
-        }
-
         // Marker color — single swatch with picker
         val viewMarkerColor = view.findViewById<View>(R.id.viewMarkerColor)
         val savedMarkerColor = prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR
@@ -408,132 +383,25 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        // Marker size (+/- buttons, scale 1-10)
+        // Marker size
+        val seekSize = view.findViewById<SeekBar>(R.id.seekMarkerSize)
         val txtSize = view.findViewById<TextView>(R.id.txtMarkerSize)
-        var markerSizeScale = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE).coerceIn(1, 10)
-        txtSize.text = markerSizeScale.toString()
-        view.findViewById<android.widget.ImageButton>(R.id.btnMarkerSizeMinus)?.setOnClickListener {
-            if (markerSizeScale > 1) {
-                markerSizeScale -= 1
-                txtSize.text = markerSizeScale.toString()
-                prefs.edit().putInt(PREF_MARKER_SIZE, markerSizeScale).apply()
+        val savedSize = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
+        seekSize.progress = savedSize
+        txtSize.text = savedSize.toString()
+        seekSize.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                txtSize.text = p.toString()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {
+                prefs.edit().putInt(PREF_MARKER_SIZE, sb.progress).apply()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsArrow()
             }
-        }
-        view.findViewById<android.widget.ImageButton>(R.id.btnMarkerSizePlus)?.setOnClickListener {
-            if (markerSizeScale < 10) {
-                markerSizeScale += 1
-                txtSize.text = markerSizeScale.toString()
-                prefs.edit().putInt(PREF_MARKER_SIZE, markerSizeScale).apply()
-                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsArrow()
-            }
-        }
+        })
 
         // Widgets — dynamic ordered list with enable toggles and up/down reorder buttons
         buildWidgetOrderUI(view, prefs)
-
-        // Build current map selector
-        val mapContainer = view.findViewById<LinearLayout>(R.id.currentMapContainer)
-        if (mapContainer != null) {
-            val dp = resources.displayMetrics.density
-            val mapFrag = (activity as? MainActivity)?.supportFragmentManager
-                ?.fragments?.filterIsInstance<MapFragment>()?.firstOrNull()
-
-            val currentBase = prefs.getString(MapFragment.PREF_TILE_KEY, "osm") ?: "osm"
-
-            // --- Online base maps ---
-            mapContainer.addView(TextView(requireContext()).apply {
-                text = "Онлайн карты"
-                setTextColor(0xFFCCCCCC.toInt())
-                textSize = 13f
-                setPadding(0, 0, 0, (4 * dp).toInt())
-            })
-
-            var offlineRg: RadioGroup? = null
-            val baseRg = RadioGroup(requireContext()).apply { orientation = RadioGroup.VERTICAL }
-            // Get tile sources dynamically from MapFragment
-            val allTileSources = mapFrag?.getTileSources() ?: emptyMap()
-            allTileSources.filter { !it.key.startsWith("offline_") }.forEach { (key, source) ->
-                baseRg.addView(RadioButton(requireContext()).apply {
-                    text = source.label; tag = key
-                    setTextColor(0xFFCCCCCC.toInt()); textSize = 14f
-                    id = View.generateViewId()
-                    isChecked = (key == currentBase)
-                })
-            }
-            baseRg.setOnCheckedChangeListener { group, checkedId ->
-                val rb = group.findViewById<RadioButton>(checkedId)
-                val key = rb?.tag as? String ?: return@setOnCheckedChangeListener
-                // Uncheck offline radio if exists
-                offlineRg?.clearCheck()
-                prefs.edit().putString(MapFragment.PREF_TILE_KEY, key).apply()
-                mapFrag?.switchMap(key)
-            }
-            mapContainer.addView(baseRg)
-
-            // --- Offline maps ---
-            val offlineMaps = mapFrag?.getOfflineMaps() ?: emptyList()
-            mapContainer.addView(TextView(requireContext()).apply {
-                text = "Офлайн карты"
-                setTextColor(0xFFCCCCCC.toInt())
-                textSize = 13f
-                setPadding(0, (16 * dp).toInt(), 0, (4 * dp).toInt())
-            })
-
-            if (offlineMaps.isEmpty()) {
-                mapContainer.addView(TextView(requireContext()).apply {
-                    text = "Нет загруженных карт"
-                    setTextColor(0xFF555555.toInt()); textSize = 13f
-                    setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
-                })
-            } else {
-                offlineRg = RadioGroup(requireContext()).apply { orientation = RadioGroup.VERTICAL }
-                offlineMaps.forEach { info ->
-                    offlineRg!!.addView(RadioButton(requireContext()).apply {
-                        text = info.name; tag = info.key
-                        setTextColor(0xFFCCCCCC.toInt()); textSize = 14f
-                        id = View.generateViewId()
-                        isChecked = (info.key == currentBase)
-                    })
-                }
-                offlineRg!!.setOnCheckedChangeListener { group, checkedId ->
-                    val rb = group.findViewById<RadioButton>(checkedId)
-                    val key = rb?.tag as? String ?: return@setOnCheckedChangeListener
-                    baseRg.clearCheck()
-                    prefs.edit().putString(MapFragment.PREF_TILE_KEY, key).apply()
-                    mapFrag?.switchMap(key)
-                }
-                mapContainer.addView(offlineRg!!)
-            }
-
-            // --- Overlays ---
-            mapContainer.addView(TextView(requireContext()).apply {
-                text = "Оверлеи"
-                setTextColor(0xFFCCCCCC.toInt())
-                textSize = 13f
-                setPadding(0, (16 * dp).toInt(), 0, (4 * dp).toInt())
-            })
-
-            val allOverlays = mapFrag?.getOverlaySources() ?: emptyMap()
-            val activeOverlayStr = prefs.getString(MapFragment.PREF_OVERLAY_KEY, "") ?: ""
-            val activeOverlays = activeOverlayStr.split(",").filter { it.isNotBlank() && it != "none" }.toSet()
-            allOverlays.filter { it.key != "none" }.forEach { (key, source) ->
-                mapContainer.addView(android.widget.CheckBox(requireContext()).apply {
-                    text = source.label; tag = key
-                    setTextColor(0xFFCCCCCC.toInt()); textSize = 14f
-                    isChecked = key in activeOverlays
-                    setOnCheckedChangeListener { _, checked ->
-                        val currentStr = prefs.getString(MapFragment.PREF_OVERLAY_KEY, "") ?: ""
-                        val current = currentStr.split(",").filter { it.isNotBlank() && it != "none" }.toMutableSet()
-                        if (checked) current.add(key) else current.remove(key)
-                        val newVal = if (current.isEmpty()) "none" else current.joinToString(",")
-                        prefs.edit().putString(MapFragment.PREF_OVERLAY_KEY, newVal).apply()
-                        val baseKey = prefs.getString(MapFragment.PREF_TILE_KEY, "osm") ?: "osm"
-                        mapFrag?.switchMap(baseKey)
-                    }
-                })
-            }
-        }
 
         // File loader — show dataset library first
         view.findViewById<View>(R.id.btnLoadFile).setOnClickListener {
@@ -582,12 +450,6 @@ class SettingsFragment : Fragment() {
         val hasWaypoints = mapFrag?.hasLoadedWaypoints() == true ||
             prefs.getString(MapFragment.PREF_SAVED_WAYPOINTS_JSON, null)?.isNotEmpty() == true
         if (hasWaypoints) rowNavButtons.visibility = View.VISIBLE
-        if (hasWaypoints) view.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
-
-        // Share waypoints
-        view.findViewById<android.widget.Button>(R.id.btnShareWp)?.setOnClickListener {
-            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.shareLoadedWaypoints()
-        }
 
         // Approach radius
         val txtApproachRadius = view.findViewById<TextView>(R.id.txtApproachRadius)
@@ -765,16 +627,6 @@ class SettingsFragment : Fragment() {
         view.findViewById<View>(R.id.btnLoadOfflineMap).setOnClickListener {
             offlineMapPicker.launch(arrayOf("*/*", "application/octet-stream"))
         }
-// Download maps button
-        view.findViewById<android.widget.Button>(R.id.btnStartDownload)?.setOnClickListener {
-            val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-            if (mapFrag != null) {
-                parentFragmentManager.popBackStack()
-                mapFrag.startDownloadMode()
-            } else {
-                Toast.makeText(context, "Карта не найдена", Toast.LENGTH_SHORT).show()
-            }
-        }
 
         // Tile cache size
         val txtCache = view.findViewById<TextView>(R.id.txtCacheMb)
@@ -852,30 +704,8 @@ class SettingsFragment : Fragment() {
         if (prefs.getString(MapFragment.PREF_TRACCAR_URL, "").isNullOrBlank()) {
             prefs.edit().putString(MapFragment.PREF_TRACCAR_URL, "http://217.60.1.225:5055").apply()
         }
-        run {
-            val stableId = LicenseManager.getRawDeviceId(requireContext())
-            val stableTraccarId = stableId.replace("-", "").take(8).uppercase()
-            val currentId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
-            
-            if (currentId.isBlank()) {
-                // New install — use stable ID
-                prefs.edit().putString(MapFragment.PREF_TRACCAR_DEVICE_ID, stableTraccarId).apply()
-            } else if (currentId != stableTraccarId && !prefs.getBoolean("traccar_id_migrated", false)) {
-                // Existing user with old random ID — migrate to stable
-                val oldId = currentId
-                prefs.edit()
-                    .putString(MapFragment.PREF_TRACCAR_DEVICE_ID, stableTraccarId)
-                    .putString("traccar_old_device_id", oldId)
-                    .putBoolean("traccar_id_migrated", true)
-                    .apply()
-                // Update device on Traccar server (change uniqueId)
-                val url = prefs.getString(MapFragment.PREF_TRACCAR_URL, "") ?: ""
-                val name = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_NAME, "") ?: ""
-                if (url.isNotBlank()) {
-                    migrateTraccarDeviceId(url, oldId, stableTraccarId, name)
-                }
-                android.util.Log.d("Settings", "Traccar ID migrated: $oldId -> $stableTraccarId")
-            }
+        if (prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "").isNullOrBlank()) {
+            prefs.edit().putString(MapFragment.PREF_TRACCAR_DEVICE_ID, "${(10000000..99999999).random()}").apply()
         }
 
         val traccarEnabled = prefs.getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
@@ -1027,120 +857,11 @@ class SettingsFragment : Fragment() {
                 setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean(MapFragment.PREF_LIVE_USERS_ONLINE_ONLY, c).apply() }
             })
             parentVg.addView(cbRow, idx)
-
-        // ── Live user marker size ──
-        val txtLiveUserSize = view.findViewById<TextView>(R.id.txtLiveUserSize)
-        var liveUserSize = prefs.getInt(MapFragment.PREF_LIVE_USER_SIZE, MapFragment.DEFAULT_LIVE_USER_SIZE).coerceIn(1, 10)
-        txtLiveUserSize?.text = liveUserSize.toString()
-        view.findViewById<ImageButton>(R.id.btnLiveUserSizeMinus)?.setOnClickListener {
-            if (liveUserSize > 1) {
-                liveUserSize -= 1
-                txtLiveUserSize?.text = liveUserSize.toString()
-                prefs.edit().putInt(MapFragment.PREF_LIVE_USER_SIZE, liveUserSize).apply()
-            }
-        }
-        view.findViewById<ImageButton>(R.id.btnLiveUserSizePlus)?.setOnClickListener {
-            if (liveUserSize < 10) {
-                liveUserSize += 1
-                txtLiveUserSize?.text = liveUserSize.toString()
-                prefs.edit().putInt(MapFragment.PREF_LIVE_USER_SIZE, liveUserSize).apply()
-            }
-        }
-
-        // ── Live user label size ──
-        val txtLiveUserLabelSize = view.findViewById<TextView>(R.id.txtLiveUserLabelSize)
-        var liveUserLabelSize = prefs.getInt(MapFragment.PREF_LIVE_USER_LABEL_SIZE, MapFragment.DEFAULT_LIVE_USER_LABEL_SIZE).coerceIn(1, 10)
-        txtLiveUserLabelSize?.text = liveUserLabelSize.toString()
-        view.findViewById<ImageButton>(R.id.btnLiveUserLabelMinus)?.setOnClickListener {
-            if (liveUserLabelSize > 1) {
-                liveUserLabelSize -= 1
-                txtLiveUserLabelSize?.text = liveUserLabelSize.toString()
-                prefs.edit().putInt(MapFragment.PREF_LIVE_USER_LABEL_SIZE, liveUserLabelSize).apply()
-            }
-        }
-        view.findViewById<ImageButton>(R.id.btnLiveUserLabelPlus)?.setOnClickListener {
-            if (liveUserLabelSize < 10) {
-                liveUserLabelSize += 1
-                txtLiveUserLabelSize?.text = liveUserLabelSize.toString()
-                prefs.edit().putInt(MapFragment.PREF_LIVE_USER_LABEL_SIZE, liveUserLabelSize).apply()
-            }
-        }
-
-        // ── Live users list (sorted by distance) ──
-        val liveUsersListContainer = view.findViewById<LinearLayout>(R.id.liveUsersListContainer)
-        val liveHandler = android.os.Handler(android.os.Looper.getMainLooper())
-        liveUsersHandler = liveHandler
-        val liveUsersRefreshRunnable = object : Runnable {
-            override fun run() {
-                if (!isAdded) return
-                val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-                val container = liveUsersListContainer ?: return
-                container.removeAllViews()
-                val devices = mapFrag?.lastLiveDevices ?: emptyList()
-                val gps = mapFrag?.getLastGpsPoint()
-                val density = resources.displayMetrics.density
-                val onlineDevices = devices.filter { it.status == "online" }
-                val sorted = if (gps != null) {
-                    onlineDevices.sortedBy { d ->
-                        val R = 6371000.0
-                        val dLat = Math.toRadians(d.lat - gps.latitude)
-                        val dLon = Math.toRadians(d.lon - gps.longitude)
-                        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                                Math.cos(Math.toRadians(gps.latitude)) * Math.cos(Math.toRadians(d.lat)) *
-                                Math.sin(dLon / 2) * Math.sin(dLon / 2)
-                        R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-                    }
-                } else onlineDevices
-                sorted.forEach { d ->
-                    val dist = if (gps != null) {
-                        val R = 6371000.0
-                        val dLat = Math.toRadians(d.lat - gps.latitude)
-                        val dLon = Math.toRadians(d.lon - gps.longitude)
-                        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                                Math.cos(Math.toRadians(gps.latitude)) * Math.cos(Math.toRadians(d.lat)) *
-                                Math.sin(dLon / 2) * Math.sin(dLon / 2)
-                        R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-                    } else 0.0
-                    val distStr = if (dist > 0) String.format("%.1f км", dist / 1000.0) else "—"
-                    val row = LinearLayout(requireContext()).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        setPadding((16 * density).toInt(), (6 * density).toInt(), (16 * density).toInt(), (6 * density).toInt())
-                        gravity = android.view.Gravity.CENTER_VERTICAL
-                        setBackgroundColor(0xFF1E1E1E.toInt())
-                    }
-                    // Green dot for online
-                    val dot = android.view.View(requireContext()).apply {
-                        val lp = LinearLayout.LayoutParams((8 * density).toInt(), (8 * density).toInt())
-                        lp.marginEnd = (8 * density).toInt()
-                        layoutParams = lp
-                        setBackgroundColor(android.graphics.Color.parseColor("#4CAF50"))
-                    }
-                    row.addView(dot)
-                    row.addView(TextView(requireContext()).apply {
-                        text = "${d.name} — $distStr"
-                        setTextColor(0xFFCCCCCC.toInt())
-                        textSize = 13f
-                    })
-                    container.addView(row)
-                }
-                if (sorted.isEmpty()) {
-                    container.addView(TextView(requireContext()).apply {
-                        text = "Нет участников онлайн"
-                        setTextColor(0xFF666666.toInt())
-                        textSize = 12f
-                        setPadding((16 * density).toInt(), (8 * density).toInt(), 0, (4 * density).toInt())
-                    })
-                }
-                liveHandler.postDelayed(this, 4000)
-            }
-        }
-        liveUsersRunnable = liveUsersRefreshRunnable
-        liveHandler.post(liveUsersRefreshRunnable)
         }
 
         // ── Crosshair, Coords, Distance Line settings (programmatic) ──
         try {
-            val markerSizeView = view.findViewById<View>(R.id.markerSizeRow)
+            val markerSizeView = view.findViewById<View>(R.id.seekMarkerSize)?.parent as? View
             val parentContainer = markerSizeView?.parent as? ViewGroup
             if (parentContainer != null) {
                 val insertIdx = parentContainer.indexOfChild(markerSizeView) + 1
@@ -1298,7 +1019,7 @@ class SettingsFragment : Fragment() {
                 val days = LicenseManager.trialDaysLeft(ctx)
                 "Пробный период: $days дн. осталось"
             }
-            view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v\n© Andrey Mironchik\n$licStatus"
+            view.findViewById<TextView>(R.id.txtVersion).text = "v$v  •  © Andrey Mironchik\n$licStatus"
             view.findViewById<TextView>(R.id.txtAboutFeatures).text = listOf(
                 "• Оффлайн и онлайн карты с кешированием",
                 "• Запись и экспорт треков (GPX/PLT/KML)",
@@ -1472,46 +1193,6 @@ class SettingsFragment : Fragment() {
      * If device with this uniqueId exists — check name, offer rename if different.
      * If device doesn't exist — create it.
      */
-
-    /** Migrate Traccar device: update uniqueId on server from old random to stable */
-    private fun migrateTraccarDeviceId(serverUrl: String, oldId: String, newId: String, deviceName: String) {
-        val apiBase = serverUrl.replace(":5055", ":8082").replace(":5056", ":8082").trimEnd('/')
-        val auth = okhttp3.Credentials.basic("snowwolf888@gmail.com", "7513")
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val client = okhttp3.OkHttpClient.Builder()
-                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                    .build()
-                // Find old device
-                val checkReq = okhttp3.Request.Builder()
-                    .url("$apiBase/api/devices?uniqueId=$oldId")
-                    .header("Authorization", auth)
-                    .get().build()
-                val resp = client.newCall(checkReq).execute()
-                val body = resp.body?.string() ?: "[]"
-                resp.close()
-                val devices = org.json.JSONArray(body)
-                if (devices.length() > 0) {
-                    val device = devices.getJSONObject(0)
-                    val deviceServerId = device.getInt("id")
-                    device.put("uniqueId", newId)
-                    if (deviceName.isNotBlank()) device.put("name", deviceName)
-                    val updateReq = okhttp3.Request.Builder()
-                        .url("$apiBase/api/devices/$deviceServerId")
-                        .header("Authorization", auth)
-                        .put(device.toString().toRequestBody("application/json".toMediaType()))
-                        .build()
-                    val updateResp = client.newCall(updateReq).execute()
-                    updateResp.close()
-                    android.util.Log.d("Settings", "Traccar device migrated on server: $oldId -> $newId")
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("Settings", "Traccar migration failed: ${e.message}")
-            }
-        }
-    }
-
     private fun registerTraccarDevice(serverUrl: String, uniqueId: String, deviceName: String, onDone: () -> Unit) {
         val ctx = context ?: return
         // Traccar API is on port 8082, OsmAnd is on 5055. Derive API base from OsmAnd URL.
@@ -1591,14 +1272,11 @@ class SettingsFragment : Fragment() {
     // Section header texts → tab groups
     private val tabSections = mapOf(
         "main" to listOf("ЭКРАН", "МАРКЕР ПОЗИЦИИ", "УПРАВЛЕНИЕ", "ВИДЖЕТЫ НА КАРТЕ", "Карта — дополнительно"),
-        "files" to listOf("ОБЪЕКТЫ КАРТЫ", "ЗАПИСЬ ТРЕКА", "НАВИГАЦИЯ"),
-        "maps" to listOf("ТЕКУЩАЯ КАРТА", "ИСТОЧНИКИ КАРТ", "ОФФЛАЙН КАРТЫ", "ЗАГРУЗКА КАРТ", "КЭШ КАРТ"),
-        "network" to listOf("МОНИТОРИНГ", "СИНХРОНИЗАЦИЯ", "О ПРИЛОЖЕНИИ"),
+        "files" to listOf("ОБЪЕКТЫ КАРТЫ", "ИСТОЧНИКИ КАРТ"),
+        "network" to listOf("СИНХРОНИЗАЦИЯ"),
         "about" to listOf("О ПРИЛОЖЕНИИ")
     )
 
-    private var liveUsersHandler: android.os.Handler? = null
-    private var liveUsersRunnable: Runnable? = null
     private var currentSettingsTab = "main"
     private var scrollContentRef: android.view.ViewGroup? = null
 
@@ -1606,7 +1284,6 @@ class SettingsFragment : Fragment() {
         val tabs = mapOf(
             "main" to view.findViewById<TextView>(R.id.tabMain),
             "files" to view.findViewById<TextView>(R.id.tabFiles),
-            "maps" to view.findViewById<TextView>(R.id.tabMaps),
             "network" to view.findViewById<TextView>(R.id.tabNetwork),
             "about" to view.findViewById<TextView>(R.id.tabAbout)
         )
@@ -1633,35 +1310,18 @@ class SettingsFragment : Fragment() {
         var curTab = "main"
         for (i in 0 until sc.childCount) {
             val child = sc.getChildAt(i)
-            // Check tag first (reliable), fallback to text matching
-            val tag = child.tag
-            if (tag is String && tag.startsWith("tab:")) {
-                curTab = tag.removePrefix("tab:")
-            } else if (tag is Map<*, *>) {
-                // collapsible header — use origTag
-                val origTag = (tag as? Map<String, Any>)?.get("origTag") as? String ?: ""
-                if (origTag.startsWith("tab:")) {
-                    curTab = origTag.removePrefix("tab:")
+            if (child is TextView) {
+                val text = child.text?.toString()?.trim() ?: ""
+                for ((tab, headers) in tabSections) {
+                    if (headers.any { text.equals(it, ignoreCase = true) }) {
+                        curTab = tab
+                        break
+                    }
                 }
             }
             child.visibility = if (curTab == currentSettingsTab) View.VISIBLE else View.GONE
         }
-        // Re-apply collapsed state for visible sections
-        reapplyCollapsedState(sc)
         (sc.parent as? android.widget.ScrollView)?.scrollTo(0, 0)
-    }
-
-    private fun reapplyCollapsedState(sc: android.view.ViewGroup) {
-        for (i in 0 until sc.childCount) {
-            val child = sc.getChildAt(i)
-            if (child is TextView && child.tag is Map<*, *>) {
-                @Suppress("UNCHECKED_CAST")
-                val info = child.tag as? Map<String, Any> ?: continue
-                val collapsed = info["collapsed"] as? Boolean ?: continue
-                val views = info["contentViews"] as? List<View> ?: continue
-                if (collapsed) views.forEach { it.visibility = View.GONE }
-            }
-        }
     }
 
     private fun showColorPicker(currentColor: String, onColorSelected: (String) -> Unit) {
@@ -1797,35 +1457,6 @@ class SettingsFragment : Fragment() {
             "💡 Подсказки" to """
 • Долгое нажатие на любую кнопку покажет подсказку
 • Отключаются в Настройках → Подсказки на кнопках
-""".trimIndent(),
-
-            "📁 Файлы и папки" to """
-• Приложение создаёт папку Documents/RaceNav/ с подпапками:
-  📂 maps/ — офлайн карты (.sqlitedb, .mbtiles)
-  📂 tracks/ — записанные и сохранённые треки (.gpx)
-  📂 points/ — экспортированные точки (.gpx, .wpt)
-  📂 routes/ — маршруты (.gpx, .rte)
-• Вы можете вручную копировать файлы в эти папки
-• Загрузка файлов: Настройки → Файлы → 📂 Загрузить файл
-• Офлайн карты: Настройки → Карты → 📥 Загрузить карту
-""".trimIndent(),
-
-            "🆕 Что нового (v2.1.6)" to """
-• 5 вкладок настроек: Основные, Файлы, Карты, Сеть, О программе
-• Сворачиваемые секции в настройках
-• Вкладка «Карты»: выбор базовой карты, оверлеев, офлайн-карт
-• 13 новых источников карт (Яндекс Спутник, Google Карты/Рельеф/Гибрид, ESRI Clarity, 2GIS, CyclOSM, LoMaps и др.)
-• 2 новых оверлея (Windy рельеф, Горнолыжные трассы)
-• Мониторинг участников: размер маркера и подписей, онлайн = синие, офлайн = серые
-• Список участников по удалению от вас
-• Два радиуса на КП: взятие (оранжевый) + proximity из свойств точки (синий)
-• Блокировка экрана Volume+ — вкл/выкл в настройках
-• Кнопки «Поделиться» для трека, точек, офлайн-карт
-• Очистка записанного трека
-• Координаты участников в формате WGS84
-• Единая шкала размеров 1–10
-• Быстрая анимация поворотов (500ms)
-• Новая иконка приложения
 """.trimIndent()
         )
 
@@ -1859,14 +1490,12 @@ class SettingsFragment : Fragment() {
 
     private val SECTION_HEADERS = setOf(
         "ЭКРАН", "МАРКЕР ПОЗИЦИИ", "УПРАВЛЕНИЕ", "ВИДЖЕТЫ НА КАРТЕ",
-        "ОБЪЕКТЫ КАРТЫ", "ЗАПИСЬ ТРЕКА", "НАВИГАЦИЯ",
-        "ТЕКУЩАЯ КАРТА", "ИСТОЧНИКИ КАРТ", "ОФФЛАЙН КАРТЫ", "ЗАГРУЗКА КАРТ", "КЭШ КАРТ",
-        "МОНИТОРИНГ", "СИНХРОНИЗАЦИЯ", "О ПРИЛОЖЕНИИ"
+        "ФАЙЛЫ КАРТЫ", "ОФФЛАЙН КАРТЫ", "КЭШ КАРТ", "СИНХРОНИЗАЦИЯ", "ОТПРАВКА НА СЕРВЕР", "О ПРИЛОЖЕНИИ"
     )
 
     /** Default collapsed sections — less frequently used */
     private val DEFAULT_COLLAPSED = setOf(
-        "ВИДЖЕТЫ НА КАРТЕ", "КЭШ КАРТ", "ЗАГРУЗКА КАРТ"
+        "МАРКЕР ПОЗИЦИИ", "ВИДЖЕТЫ НА КАРТЕ", "КЭШ КАРТ", "СИНХРОНИЗАЦИЯ", "ОТПРАВКА НА СЕРВЕР", "О ПРИЛОЖЕНИИ"
     )
 
     private fun setupCollapsibleSections(view: View) {
@@ -1885,7 +1514,7 @@ class SettingsFragment : Fragment() {
             val child = contentLayout.getChildAt(i)
             if (child is TextView) {
                 val text = child.text?.toString()?.trim() ?: ""
-                if (SECTION_HEADERS.any { text.contains(it, ignoreCase = true) }) {
+                if (text in SECTION_HEADERS) {
                     headerIndices.add(i)
                 }
             }
@@ -1904,25 +1533,24 @@ class SettingsFragment : Fragment() {
             for (i in (headerIdx + 1) until nextHeaderIdx) {
                 contentViews.add(contentLayout.getChildAt(i))
             }
-            if (contentViews.isEmpty() || sectionName.contains("О ПРИЛОЖЕНИИ")) continue
+            if (contentViews.isEmpty()) continue
 
             // Always start collapsed when settings open
             val prefKey = "section_collapsed_$sectionName"
             var collapsed = true
 
-            // Set initial state — always collapsed
-            header.text = "▶  $sectionName"
+            // Set initial state
+            val arrow = if (collapsed) "▶" else "▼"
+            header.text = "$arrow $sectionName"
             header.setPadding(0, 16, 0, 8)
             header.textSize = 12f
-            val origTag = header.tag as? String ?: ""; header.tag = mapOf("collapsed" to true, "contentViews" to contentViews, "name" to sectionName, "origTag" to origTag)
-            contentViews.forEach { it.visibility = View.GONE }
+            contentViews.forEach { it.visibility = if (collapsed) View.GONE else View.VISIBLE }
 
             // Click handler
             header.setOnClickListener {
                 collapsed = !collapsed
                 prefs.edit().putBoolean(prefKey, collapsed).apply()
-                header.text = "${if (collapsed) "▶" else "▼"}  $sectionName"
-                header.tag = mapOf("collapsed" to collapsed, "contentViews" to contentViews, "name" to sectionName, "origTag" to origTag)
+                header.text = "${if (collapsed) "▶" else "▼"} $sectionName"
                 contentViews.forEach { it.visibility = if (collapsed) View.GONE else View.VISIBLE }
             }
         }
@@ -2441,7 +2069,6 @@ class SettingsFragment : Fragment() {
                         filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                         filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, ds.name).apply()
                         view?.findViewById<android.view.View>(R.id.rowNavButtons)?.visibility = android.view.View.VISIBLE
-                        view?.findViewById<android.view.View>(R.id.rowShareWp)?.visibility = android.view.View.VISIBLE
                         if (!ds.mapKey.isNullOrBlank()) mapFrag?.switchMap(ds.mapKey)
                         android.widget.Toast.makeText(ctx,
                             "✅ ${ds.name}: ${wpts.size} КП загружено", android.widget.Toast.LENGTH_SHORT).show()
@@ -2507,7 +2134,6 @@ class SettingsFragment : Fragment() {
                                         filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                         filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
                                         view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                        view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
                                     }
                                     saveDatasetToList(
                                         name,
@@ -2544,7 +2170,6 @@ class SettingsFragment : Fragment() {
                                             filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                             filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
                                             view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                            view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
                                         }
                                         saveDatasetToList(
                                             name,
@@ -2569,7 +2194,6 @@ class SettingsFragment : Fragment() {
                                     filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                     filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
                                     view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                    view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
                                     saveDatasetToList(name, wpts.size, 0, wpts)
                                     // Show summary of loaded waypoints
                                     if (wpts.size <= 30) {
@@ -2596,7 +2220,6 @@ class SettingsFragment : Fragment() {
                                 filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
                                 filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
                                 view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
                                 saveDatasetToList(name, wpts.size, 0, wpts)
                                 // Show summary of loaded waypoints
                                 if (wpts.size <= 30) {
@@ -2715,27 +2338,6 @@ class SettingsFragment : Fragment() {
             maps.forEach { info ->
                 val row = layoutInflater.inflate(R.layout.item_offline_map, container, false)
                 row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).text = info.name
-                // Add share button before remove button
-                val shareBtn = android.widget.ImageButton(requireContext()).apply {
-                    layoutParams = android.widget.LinearLayout.LayoutParams(
-                        (36 * resources.displayMetrics.density).toInt(),
-                        (36 * resources.displayMetrics.density).toInt()
-                    )
-                    setImageResource(android.R.drawable.ic_menu_share)
-                    setBackgroundResource(android.R.attr.selectableItemBackgroundBorderless.let { attr ->
-                        val ta = requireContext().obtainStyledAttributes(intArrayOf(attr))
-                        val resId = ta.getResourceId(0, 0)
-                        ta.recycle()
-                        resId
-                    })
-                    imageTintList = android.content.res.ColorStateList.valueOf(0xFF1565C0.toInt())
-                    contentDescription = "Share"
-                    setOnClickListener {
-                        mapFrag?.shareOfflineMap(info.key)
-                    }
-                }
-                (row as android.widget.LinearLayout).addView(shareBtn, row.childCount - 1)
-
                 row.findViewById<View>(R.id.btnRemoveOfflineMap).setOnClickListener {
                     mapFrag?.removeOfflineMap(info.key)
                     refreshOfflineMapsUI(view)
@@ -2966,14 +2568,5 @@ class SettingsFragment : Fragment() {
             .setNegativeButton("Отмена", null)
 
         dialogBuilder.show()
-    }
-
-
-
-
-    override fun onDestroyView() {
-        liveUsersHandler?.removeCallbacksAndMessages(null)
-        liveUsersHandler = null
-        super.onDestroyView()
     }
 }
