@@ -840,6 +840,51 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // ── Backup ──
+        val editBackupEmail = view.findViewById<EditText>(R.id.editBackupEmail)
+        val btnBackupCreate = view.findViewById<android.widget.Button>(R.id.btnBackupCreate)
+        val btnBackupRestore = view.findViewById<android.widget.Button>(R.id.btnBackupRestore)
+        val txtBackupStatus = view.findViewById<TextView>(R.id.txtBackupStatus)
+
+        editBackupEmail.setText(prefs.getString("backup_email", ""))
+
+        fun setBackupStatus(ok: Boolean, msg: String) {
+            txtBackupStatus.text = msg
+            txtBackupStatus.setTextColor(if (ok) 0xFF4CAF50.toInt() else 0xFFE53935.toInt())
+            txtBackupStatus.visibility = View.VISIBLE
+            btnBackupCreate.isEnabled = true
+            btnBackupRestore.isEnabled = true
+        }
+
+        btnBackupCreate.setOnClickListener {
+            val email = editBackupEmail.text.toString().trim()
+            if (email.isNotEmpty()) prefs.edit().putString("backup_email", email).apply()
+            btnBackupCreate.isEnabled = false; btnBackupRestore.isEnabled = false
+            txtBackupStatus.text = "Создаю бэкап..."; txtBackupStatus.setTextColor(0xFF888888.toInt()); txtBackupStatus.visibility = View.VISIBLE
+            kotlinx.coroutines.MainScope().launch {
+                val result = BackupManager.createBackup(requireContext(), email.ifEmpty { null })
+                setBackupStatus(result.ok, result.message)
+            }
+        }
+
+        btnBackupRestore.setOnClickListener {
+            val email = editBackupEmail.text.toString().trim()
+            if (email.isEmpty()) { Toast.makeText(requireContext(), "Введите email для восстановления", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+            android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Восстановить бэкап?")
+                .setMessage("Текущие настройки будут заменены. Продолжить?")
+                .setPositiveButton("Да") { _, _ ->
+                    btnBackupCreate.isEnabled = false; btnBackupRestore.isEnabled = false
+                    txtBackupStatus.text = "Восстанавливаю..."; txtBackupStatus.setTextColor(0xFF888888.toInt()); txtBackupStatus.visibility = View.VISIBLE
+                    kotlinx.coroutines.MainScope().launch {
+                        val result = BackupManager.restoreBackup(requireContext(), email)
+                        setBackupStatus(result.ok, result.message)
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+
         // ── Server Live Monitoring ──
         val switchTraccar = view.findViewById<SwitchCompat>(R.id.switchTraccar)
         val rowTraccarDeviceName = view.findViewById<View>(R.id.rowTraccarDeviceName)
@@ -954,6 +999,14 @@ class SettingsFragment : Fragment() {
                             action = TraccarService.ACTION_START
                         }
                     )
+                    // Включаем тумблер мониторинга и запускаем если он был включён
+                    view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchLiveUsers)?.let {
+                        it.isEnabled = true
+                        it.alpha = 1.0f
+                    }
+                    if (prefs.getBoolean(MapFragment.PREF_LIVE_USERS_ENABLED, false)) {
+                        parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.startLiveUsersPoller()
+                    }
                     view.postDelayed({ updateTraccarStatus() }, 500)
                 }
             } else {
@@ -962,6 +1015,12 @@ class SettingsFragment : Fragment() {
                         action = TraccarService.ACTION_STOP
                     }
                 )
+                // Блокируем тумблер и останавливаем мониторинг — взаимная функция
+                view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchLiveUsers)?.let {
+                    it.isEnabled = false
+                    it.alpha = 0.4f
+                }
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.stopLiveUsersPoller()
                 view.postDelayed({ updateTraccarStatus() }, 500)
             }
         }
@@ -996,7 +1055,10 @@ class SettingsFragment : Fragment() {
 
         // Live Users on map toggle
         val switchLiveUsers = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchLiveUsers)
+        val traccarOn = prefs.getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
         switchLiveUsers.isChecked = prefs.getBoolean(MapFragment.PREF_LIVE_USERS_ENABLED, false)
+        switchLiveUsers.isEnabled = traccarOn
+        switchLiveUsers.alpha = if (traccarOn) 1.0f else 0.4f
         switchLiveUsers.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(MapFragment.PREF_LIVE_USERS_ENABLED, checked).apply()
             val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
@@ -1810,22 +1872,23 @@ class SettingsFragment : Fragment() {
 • Офлайн карты: Настройки → Карты → 📥 Загрузить карту
 """.trimIndent(),
 
-            "🆕 Что нового (v2.1.6)" to """
-• 5 вкладок настроек: Основные, Файлы, Карты, Сеть, О программе
-• Сворачиваемые секции в настройках
-• Вкладка «Карты»: выбор базовой карты, оверлеев, офлайн-карт
-• 13 новых источников карт (Яндекс Спутник, Google Карты/Рельеф/Гибрид, ESRI Clarity, 2GIS, CyclOSM, LoMaps и др.)
-• 2 новых оверлея (Windy рельеф, Горнолыжные трассы)
-• Мониторинг участников: размер маркера и подписей, онлайн = синие, офлайн = серые
-• Список участников по удалению от вас
-• Два радиуса на КП: взятие (оранжевый) + proximity из свойств точки (синий)
-• Блокировка экрана Volume+ — вкл/выкл в настройках
-• Кнопки «Поделиться» для трека, точек, офлайн-карт
-• Очистка записанного трека
-• Координаты участников в формате WGS84
-• Единая шкала размеров 1–10
-• Быстрая анимация поворотов (500ms)
-• Новая иконка приложения
+            "☁️ Бэкап и восстановление" to """
+• Настройки → Сеть → раздел «Бэкап»
+• Укажите email — он служит ключом для восстановления на новом устройстве
+• «Создать бэкап» — сохраняет в облако: все настройки, маршруты, треки
+• «Восстановить» — введите email, данные загрузятся автоматически
+• Бэкап привязан к устройству (Android ID) и email одновременно
+• Файлы оффлайн-карт не включаются в бэкап (слишком большие)
+""".trimIndent(),
+
+            "🆕 Что нового (v2.2.3)" to """
+• Бэкап настроек, треков и маршрутов в облако по email
+• Восстановление на новом устройстве по email
+• Загрузка оффлайн-карт прямо из приложения (выбор области на карте)
+• Мониторинг участников и GPS-сервер — взаимная функция
+• Тумблер мониторинга недоступен пока сервер выключен
+• Стабильный ID устройства (не меняется при переустановке)
+• 20+ источников карт: Google, Яндекс, ESRI, 2GIS, Thunderforest и др.
 """.trimIndent()
         )
 
