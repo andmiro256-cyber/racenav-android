@@ -223,8 +223,12 @@ object LicenseManager {
             val conn = url.openConnection() as java.net.HttpURLConnection
             conn.connectTimeout = 10_000
             conn.readTimeout = 10_000
-            val response = conn.inputStream.bufferedReader().readText()
-            conn.disconnect()
+            val response = try {
+                if (conn.responseCode !in 200..299) throw Exception("HTTP ${conn.responseCode}")
+                conn.inputStream.bufferedReader().readText()
+            } finally {
+                conn.disconnect()
+            }
             android.util.Log.d("LicenseManager", "Server response: $response")
 
             val json = org.json.JSONObject(response)

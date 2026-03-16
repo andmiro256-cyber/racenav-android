@@ -1480,7 +1480,7 @@ class MapFragment : Fragment() {
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconAnchor("left"),
+            PropertyFactory.iconAnchor("center"),
             *wpIconSizeProps()
         ))
         // User markers layer
@@ -1489,7 +1489,7 @@ class MapFragment : Fragment() {
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconAnchor("left"),
+            PropertyFactory.iconAnchor("center"),
             *wpIconSizeProps()
         ))
 
@@ -1568,14 +1568,14 @@ class MapFragment : Fragment() {
         val labelH = labelSize + labelPadV * 2
         val gap = 4f * circleScale
 
-        // Total bitmap size: circle + gap + label
+        // Total bitmap: [padLeft] [circle] [gap] [label] — padLeft = labelBoxW for centering
         val labelBoxW = if (labelWidth > 0) gap + labelWidth + labelPadH * 2 else 0f
         val circleBlockW = circleDiam.toFloat()
-        val totalW = (circleBlockW + labelBoxW).toInt()
-        val totalH = maxOf(circleDiam + (4 * circleScale).toInt(), labelH.toInt() + 4)
+        val totalW = (labelBoxW + circleBlockW + labelBoxW).toInt()
+        val totalH = maxOf(circleDiam, labelH.toInt() + 4)
         val bmp = android.graphics.Bitmap.createBitmap(maxOf(totalW, 1), maxOf(totalH, 1), android.graphics.Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
-        val cx = circleR
+        val cx = labelBoxW + circleR  // center of circle = center of bitmap
         val cy = totalH / 2f
 
         // Circle fill
@@ -2075,9 +2075,10 @@ class MapFragment : Fragment() {
 
     fun unlockScreen() {
         isScreenLocked = false
-        _binding?.lockOverlay?.visibility = View.GONE
+        val b = _binding ?: return
+        b.lockOverlay.visibility = View.GONE
         ImageViewCompat.setImageTintList(
-            _binding!!.btnLock,
+            b.btnLock,
             android.content.res.ColorStateList.valueOf(Color.WHITE)
         )
     }
@@ -2884,18 +2885,49 @@ class MapFragment : Fragment() {
         }
         root.addView(routeNameInput)
 
-        // Hide route button
-        root.addView(android.widget.Button(ctx).apply {
-            text = "👁 Скрыть маршрут"
-            textSize = 13f; isAllCaps = false
-            setPadding(0, 4, 0, 4)
+        // Hide/Clear route buttons
+        val routeBtnRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 8)
+        }
+        val routeBtnLp = android.widget.LinearLayout.LayoutParams(0,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        routeBtnRow.addView(android.widget.Button(ctx).apply {
+            text = "👁 Скрыть линию"
+            textSize = 12f; isAllCaps = false
+            layoutParams = routeBtnLp
             setOnClickListener {
-                setLoadedWpVisible(false)
-                setLoadedTrackVisible(false)
+                setRouteLineVisible(false)
                 dialog.dismiss()
-                Toast.makeText(ctx, "Маршрут скрыт", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "Линия маршрута скрыта", Toast.LENGTH_SHORT).show()
             }
         })
+        routeBtnRow.addView(android.widget.Button(ctx).apply {
+            text = "🗑 Очистить маршрут"
+            textSize = 12f; isAllCaps = false
+            layoutParams = routeBtnLp
+            setOnClickListener {
+                androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+                    .setTitle("Очистить маршрут?")
+                    .setMessage("Все точки маршрута и линии будут удалены")
+                    .setPositiveButton("Очистить") { _, _ ->
+                        editWps.clear()
+                        waypoints.clear()
+                        wpBitmapCache.clear()
+                        updateWaypointsOnMap()
+                        updateRouteLineOnMap()
+                        updateRadiusCircles()
+                        updateNavLine()
+                        updateWaypointNavBar()
+                        saveWaypointsToPrefs()
+                        dialog.dismiss()
+                        Toast.makeText(ctx, "Маршрут очищен", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        })
+        root.addView(routeBtnRow)
 
         // Approach radius setting
         val radiusRow = android.widget.LinearLayout(ctx).apply {
