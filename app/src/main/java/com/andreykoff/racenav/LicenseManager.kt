@@ -18,6 +18,14 @@ object LicenseManager {
     private const val KEY_BACKUP_INSTALL = "bi"
     private const val KEY_BACKUP_UUID = "bu"
 
+    // Server license check
+    private const val KEY_LICENSE_STATUS = "license_status"      // "active"|"expired"|"trial"
+    private const val KEY_LICENSE_UNTIL = "license_until"         // ISO date string
+    private const val KEY_SERVER_STATUS = "server_status"         // "active"|"expired"|"none"
+    private const val KEY_SERVER_UNTIL = "server_until"           // ISO date string
+    private const val KEY_LAST_CHECK = "last_license_check"      // timestamp ms
+    private const val LICENSE_API = "http://87.120.84.254:9222/api/license"
+
     const val TRIAL_DAYS = 30
     private const val CONTACT_TELEGRAM = "https://t.me/Andreykoff"
     private const val CONTACT_EMAIL = "snowwolf888@gmail.com"
@@ -132,7 +140,7 @@ object LicenseManager {
 
     /** Can the user use the app (either trial active or activated)? */
     fun canUse(context: Context): Boolean {
-        return isActivated(context) || isTrialActive(context)
+        return isActivated(context) || isTrialActive(context) || canUseCached(context)
     }
 
     /**
@@ -200,4 +208,80 @@ object LicenseManager {
             .remove(KEY_LICENSE)
             .apply()
     }
+
+    /** Check license from server. Call from background thread. */
+    fun checkLicenseFromServer(context: Context): Boolean {
+        val deviceId = getOrCreateDeviceId(context)
+        try {
+            val url = java.net.URL("$LICENSE_API/$deviceId")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            val response = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+
+            val json = org.json.JSONObject(response)
+            val prefs = getPrefs(context)
+            prefs.edit()
+                .putString(KEY_LICENSE_STATUS, json.optString("license", "trial"))
+                .putString(KEY_LICENSE_UNTIL, json.optString("license_until", ""))
+                .putString(KEY_SERVER_STATUS, json.optString("server", "none"))
+                .putString(KEY_SERVER_UNTIL, json.optString("server_until", ""))
+                .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
+                .apply()
+
+            // If server says "active", mark as activated locally too
+            if (json.optString("license") == "active") {
+                prefs.edit().putBoolean(KEY_ACTIVATED, true).apply()
+            }
+
+            return json.optString("license") != "expired"
+        } catch (e: Exception) {
+            // No network -- use cached status
+            return canUseCached(context)
+        }
+    }
+
+    /** Check cached license (when no network) */
+    fun canUseCached(context: Context): Boolean {
+        val prefs = getPrefs(context)
+        val status = prefs.getString(KEY_LICENSE_STATUS, null)
+
+        if (status == "active") {
+            // Check if license_until has passed
+            val until = prefs.getString(KEY_LICENSE_UNTIL, "") ?: ""
+            if (until.isNotEmpty()) {
+                try {
+                    val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).parse(until)
+                    if (date != null && date.time > System.currentTimeMillis()) return true
+                } catch (_: Exception) {}
+            }
+            return true // If can't parse date, trust the status
+        }
+
+        if (status == "trial") {
+            return isTrialActive(context)
+        }
+
+        if (status == null) {
+            // Never checked server -- use local trial
+            return isTrialActive(context) || isActivated(context)
+        }
+
+        return false
+    }
+
+    /** Is server subscription active? */
+    fun isServerActive(context: Context): Boolean {
+        val prefs = getPrefs(context)
+        val status = prefs.getString(KEY_SERVER_STATUS, "none")
+        if (status != "active") return false
+        val until = prefs.getString(KEY_SERVER_UNTIL, "") ?: ""
+        if (until.isEmpty()) return false
+        try {
+            val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).parse(until)
+            return date != null && date.time > System.currentTimeMillis()
+        } catch (_: Exception) { return false }
+    }
+
 }

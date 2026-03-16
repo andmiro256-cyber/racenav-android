@@ -49,6 +49,22 @@ class MainActivity : AppCompatActivity() {
                     .commit()
                 // Handle file open intent (GPX/WPT/RTE/PLT)
                 handleFileIntent(intent)
+
+                // Check license from server in background (non-blocking)
+                Thread {
+                    val ok = LicenseManager.checkLicenseFromServer(this)
+                    if (!ok) {
+                        runOnUiThread {
+                            // License expired on server -- show expired screen
+                            try {
+                                supportFragmentManager.beginTransaction()
+                                    .replace(R.id.container, androidx.fragment.app.Fragment())
+                                    .commitAllowingStateLoss()
+                            } catch (_: Exception) {}
+                            showTrialExpired()
+                        }
+                    }
+                }.start()
             } else {
                 Analytics.sendEvent(this, "trial_expired")
                 showTrialExpired()

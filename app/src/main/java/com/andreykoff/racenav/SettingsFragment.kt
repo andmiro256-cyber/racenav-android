@@ -1018,6 +1018,13 @@ class SettingsFragment : Fragment() {
                     prefs.edit().putBoolean(MapFragment.PREF_TRACCAR_ENABLED, false).apply()
                     return@setOnCheckedChangeListener
                 }
+                // Check server subscription
+                if (!LicenseManager.isServerActive(ctx)) {
+                    Toast.makeText(ctx, "Серверная подписка не активна", Toast.LENGTH_LONG).show()
+                    switchTraccar.isChecked = false
+                    prefs.edit().putBoolean(MapFragment.PREF_TRACCAR_ENABLED, false).apply()
+                    return@setOnCheckedChangeListener
+                }
                 // First-time consent dialog
                 val consentGiven = prefs.getBoolean("traccar_consent_given", false)
                 if (!consentGiven) {
@@ -1112,6 +1119,11 @@ class SettingsFragment : Fragment() {
         switchLiveUsers.isEnabled = traccarOn
         switchLiveUsers.alpha = if (traccarOn) 1.0f else 0.4f
         switchLiveUsers.setOnCheckedChangeListener { _, checked ->
+            if (checked && !LicenseManager.isServerActive(requireContext())) {
+                Toast.makeText(requireContext(), "Серверная подписка не активна", Toast.LENGTH_LONG).show()
+                switchLiveUsers.isChecked = false
+                return@setOnCheckedChangeListener
+            }
             prefs.edit().putBoolean(MapFragment.PREF_LIVE_USERS_ENABLED, checked).apply()
             val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
             Toast.makeText(context, "LiveUsers: ${if (checked) "ON" else "OFF"}, mapFrag=${mapFrag != null}", Toast.LENGTH_SHORT).show()
