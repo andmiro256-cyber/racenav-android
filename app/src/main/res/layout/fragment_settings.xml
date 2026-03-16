@@ -805,6 +805,39 @@
 
             </LinearLayout>
 
+            <!-- Route line toggle row -->
+            <LinearLayout
+                android:id="@+id/rowRouteLine"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:id="@+id/txtRouteLine"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Линия маршрута"
+                        android:textColor="#888888"
+                        android:textSize="13sp"
+                        android:paddingStart="4dp" />
+                    <ImageButton
+                        android:id="@+id/btnToggleRouteLine"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
+                        android:src="@drawable/ic_eye"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:tint="#FFFFFF" />
+                </LinearLayout>
+
+            </LinearLayout>
+
             <!-- Navigation start/stop — always visible when route is loaded -->
             <LinearLayout
                 android:id="@+id/rowNavButtons"

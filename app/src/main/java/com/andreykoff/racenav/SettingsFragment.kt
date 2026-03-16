@@ -678,6 +678,20 @@ class SettingsFragment : Fragment() {
             mapFrag?.setLoadedWpVisible(wpVisible)
         }
 
+        // Route line toggle
+        val rowRouteLine = view.findViewById<View>(R.id.rowRouteLine)
+        val btnToggleRouteLine = view.findViewById<ImageButton>(R.id.btnToggleRouteLine)
+        var routeLineVisible = prefs.getBoolean(MapFragment.PREF_ROUTE_LINE_VISIBLE, true)
+        if (prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null) != null) {
+            rowRouteLine?.visibility = View.VISIBLE
+            btnToggleRouteLine.setImageResource(if (routeLineVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+        }
+        btnToggleRouteLine.setOnClickListener {
+            routeLineVisible = !routeLineVisible
+            btnToggleRouteLine.setImageResource(if (routeLineVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
+            mapFrag?.setRouteLineVisible(routeLineVisible)
+        }
+
         // Nav buttons: show if waypoints are loaded (from memory or from prefs)
         val rowNavButtons = view.findViewById<View>(R.id.rowNavButtons)
         val hasWaypoints = mapFrag?.hasLoadedWaypoints() == true ||
@@ -1526,7 +1540,7 @@ class SettingsFragment : Fragment() {
                     "Пробный период: $days дн. осталось"
                 }
             }
-            val deviceId = LicenseManager.getDeviceIdForUser(ctx)
+            val deviceId = LicenseManager.getShortDeviceId(ctx)
             view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v\n© Andrey Mironchik\n$licStatus\nID: $deviceId"
             view.findViewById<TextView>(R.id.txtAboutFeatures).text = listOf(
                 "• Оффлайн и онлайн карты с кешированием",
@@ -2273,11 +2287,11 @@ class SettingsFragment : Fragment() {
             WInfo("bearing",       "Курс / стрелка",   PREF_WIDGET_BEARING,       true),
             WInfo("tracklen",      "Длина трека",       PREF_WIDGET_TRACKLEN,      true),
             WInfo("nextcp",        "До след. WP",       PREF_WIDGET_NEXTCP,        true),
-            WInfo("altitude",      "Высота",            PREF_WIDGET_ALTITUDE,      true),
+            WInfo("altitude",      "Высота",            PREF_WIDGET_ALTITUDE,      false),
             WInfo("chrono",        "Хронометр",         PREF_WIDGET_CHRONO,        false),
             WInfo("time",          "Текущее время",     PREF_WIDGET_TIME,          false),
             WInfo("remain_km",     "Остаток км",        PREF_WIDGET_REMAIN_KM,     false),
-            WInfo("nextcp_name",   "Имя след. WP",      PREF_WIDGET_NEXTCP_NAME,   false),
+            WInfo("nextcp_name",   "Имя след. WP",      PREF_WIDGET_NEXTCP_NAME,   true),
             WInfo("tripmaster",    "Триппмастер",       PREF_WIDGET_TRIPMASTER,    false),
             WInfo("server_status", "Статус сервера",    MapFragment.PREF_WIDGET_SERVER_STATUS, false),
         )

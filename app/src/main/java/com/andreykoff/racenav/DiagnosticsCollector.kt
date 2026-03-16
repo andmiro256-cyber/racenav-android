@@ -44,7 +44,7 @@ object DiagnosticsCollector {
             put("versionCode", try { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode } catch (_: Exception) { 0 })
             put("hasGooglePlayServices", hasGms)
             put("gpsProvider", if (hasGms) "FusedLocation" else "GPS_PROVIDER")
-            put("deviceId", LicenseManager.getDeviceIdForUser(context))
+            put("deviceId", LicenseManager.getShortDeviceId(context))
             put("traccarId", prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: "")
             put("locale", Locale.getDefault().toString())
             put("timezone", TimeZone.getDefault().id)

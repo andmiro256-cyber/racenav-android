@@ -191,6 +191,11 @@ object LicenseManager {
         return "${short.substring(0,4)}-${short.substring(4,8)}-${short.substring(8,12)}"
     }
 
+    /** Get short device ID (8 chars, no dashes, uppercase) for admin/diagnostics */
+    fun getShortDeviceId(context: Context): String {
+        return getOrCreateDeviceId(context).replace("-", "").take(8).uppercase()
+    }
+
     /** Get raw device ID for key generation (internal) */
     fun getRawDeviceId(context: Context): String {
         return getOrCreateDeviceId(context)
@@ -211,7 +216,7 @@ object LicenseManager {
 
     /** Check license from server. Call from background thread. */
     fun checkLicenseFromServer(context: Context): Boolean {
-        val deviceId = getOrCreateDeviceId(context)
+        val deviceId = getOrCreateDeviceId(context).replace("-", "").take(8).uppercase()
         android.util.Log.d("LicenseManager", "Checking license for deviceId: $deviceId")
         try {
             val url = java.net.URL("$LICENSE_API/$deviceId")

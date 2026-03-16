@@ -248,7 +248,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         // Device ID display (copyable)
-        val deviceId = LicenseManager.getDeviceIdForUser(this@MainActivity)
+        val deviceId = LicenseManager.getShortDeviceId(this@MainActivity)
 
         root.addView(android.widget.TextView(this).apply {
             text = "ID устройства: $deviceId"

@@ -242,6 +242,7 @@ class MapFragment : Fragment() {
         const val PREF_TRACK_ONLY_MOVING = "track_only_moving"    // boolean, default false
         const val PREF_LOADED_TRACK_VISIBLE = "loaded_track_visible"
         const val PREF_LOADED_WP_VISIBLE = "loaded_wp_visible"
+        const val PREF_ROUTE_LINE_VISIBLE = "route_line_visible"
         const val PREF_LOADED_TRACK_NAME = "loaded_track_name"
         const val PREF_LOADED_WP_NAME = "loaded_wp_name"
         const val PREF_TRACK_COLOR = "track_rec_color"
@@ -763,12 +764,12 @@ class MapFragment : Fragment() {
             WidgetDef("bearing",     PREF_WIDGET_BEARING,     true),
             WidgetDef("tracklen",    PREF_WIDGET_TRACKLEN,    true),
             WidgetDef("nextcp",      PREF_WIDGET_NEXTCP,      true),
-            WidgetDef("altitude",    PREF_WIDGET_ALTITUDE,    true),
+            WidgetDef("altitude",    PREF_WIDGET_ALTITUDE,    false),
             WidgetDef("chrono",      PREF_WIDGET_CHRONO,      false),
             WidgetDef("time",        PREF_WIDGET_TIME,        false),
             WidgetDef("remain_km",   PREF_WIDGET_REMAIN_KM,   false),
-            WidgetDef("nextcp_name", PREF_WIDGET_NEXTCP_NAME, false),
-            WidgetDef("tripmaster",  PREF_WIDGET_TRIPMASTER,  true),
+            WidgetDef("nextcp_name", PREF_WIDGET_NEXTCP_NAME, true),
+            WidgetDef("tripmaster",  PREF_WIDGET_TRIPMASTER,  false),
             WidgetDef("server_status", PREF_WIDGET_SERVER_STATUS, false),
         )
 
@@ -1429,11 +1430,13 @@ class MapFragment : Fragment() {
         val routeLineColor = routeLinePrefs?.getString(PREF_ROUTE_LINE_COLOR, "#B388FF") ?: "#FF6F00"
         val routeLineWidth = routeLinePrefs?.getInt(PREF_ROUTE_LINE_WIDTH, 2)?.toFloat() ?: 2f
         style.addSource(GeoJsonSource(ROUTE_LINE_SOURCE_ID))
+        val routeLineVis = if (routeLinePrefs?.getBoolean(PREF_ROUTE_LINE_VISIBLE, true) != false) "visible" else "none"
         style.addLayer(LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
             PropertyFactory.lineColor(routeLineColor),
             PropertyFactory.lineWidth(routeLineWidth),
             PropertyFactory.lineOpacity(0.8f),
-            PropertyFactory.lineDasharray(arrayOf(6f, 4f))
+            PropertyFactory.lineDasharray(arrayOf(6f, 4f)),
+            PropertyFactory.visibility(routeLineVis)
         ))
 
         // Approach radius circles (behind waypoint dots)
@@ -1567,12 +1570,12 @@ class MapFragment : Fragment() {
 
         // Total bitmap size: circle + gap + label
         val labelBoxW = if (labelWidth > 0) gap + labelWidth + labelPadH * 2 else 0f
-        val circleBlockW = circleDiam + 4 * circleScale
+        val circleBlockW = circleDiam.toFloat()
         val totalW = (circleBlockW + labelBoxW).toInt()
         val totalH = maxOf(circleDiam + (4 * circleScale).toInt(), labelH.toInt() + 4)
         val bmp = android.graphics.Bitmap.createBitmap(maxOf(totalW, 1), maxOf(totalH, 1), android.graphics.Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
-        val cx = circleR + 2f * circleScale
+        val cx = circleR
         val cy = totalH / 2f
 
         // Circle fill
@@ -2035,7 +2038,6 @@ class MapFragment : Fragment() {
         val vis = if (visible) "visible" else "none"
         val style = mapboxMap?.style
         style?.getLayer(WP_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
-        style?.getLayer(ROUTE_LINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         style?.getLayer(WP_RADIUS_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         style?.getLayer(WP_RADIUS_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         style?.getLayer(WP_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
@@ -2043,6 +2045,13 @@ class MapFragment : Fragment() {
         style?.getLayer(NAV_LINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putBoolean(PREF_LOADED_WP_VISIBLE, visible)?.apply()
+    }
+
+    fun setRouteLineVisible(visible: Boolean) {
+        val vis = if (visible) "visible" else "none"
+        mapboxMap?.style?.getLayer(ROUTE_LINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_ROUTE_LINE_VISIBLE, visible)?.apply()
     }
 
     fun applyTrackStyle() {
@@ -2701,8 +2710,8 @@ class MapFragment : Fragment() {
             }
         })
 
-        // Apply dark background to BottomSheet
-        val scroll = android.widget.ScrollView(ctx).apply {
+        // NestedScrollView for proper scroll inside BottomSheet
+        val scroll = androidx.core.widget.NestedScrollView(ctx).apply {
             addView(root)
             setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         }
@@ -2862,6 +2871,32 @@ class MapFragment : Fragment() {
             setPadding(0, 0, 0, 12)
         })
 
+        // Route name
+        val currentRouteName = prefs.getString(PREF_ROUTE_NAME, "") ?: ""
+        val routeNameInput = android.widget.EditText(ctx).apply {
+            hint = "Имя маршрута"
+            setText(currentRouteName)
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            textSize = 14f
+            setSingleLine(true)
+            setPadding(16, 12, 16, 12)
+        }
+        root.addView(routeNameInput)
+
+        // Hide route button
+        root.addView(android.widget.Button(ctx).apply {
+            text = "👁 Скрыть маршрут"
+            textSize = 13f; isAllCaps = false
+            setPadding(0, 4, 0, 4)
+            setOnClickListener {
+                setLoadedWpVisible(false)
+                setLoadedTrackVisible(false)
+                dialog.dismiss()
+                Toast.makeText(ctx, "Маршрут скрыт", Toast.LENGTH_SHORT).show()
+            }
+        })
+
         // Approach radius setting
         val radiusRow = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
@@ -2981,7 +3016,13 @@ class MapFragment : Fragment() {
             layoutParams = btnLp
             setOnClickListener {
                 val newRadius = radiusInput.text.toString().toIntOrNull() ?: approachRadius
-                prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, newRadius).apply()
+                val newRouteName = routeNameInput.text.toString().trim()
+                prefs.edit()
+                    .putInt(PREF_WP_APPROACH_RADIUS, newRadius)
+                    .apply()
+                if (newRouteName.isNotEmpty()) {
+                    prefs.edit().putString(PREF_ROUTE_NAME, newRouteName).apply()
+                }
                 waypoints.clear()
                 editWps.forEachIndexed { idx, wp -> waypoints.add(wp.copy(index = idx + 1)) }
                 activeWpIndex = 0
