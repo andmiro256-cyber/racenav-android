@@ -62,9 +62,8 @@ class TrackingService : Service() {
 
         val newPoint = Pair(loc.latitude, loc.longitude)
 
-        // Standstill filter (speed < 1 m/s)
-        val isMoving = !loc.hasSpeed() || loc.speed >= 1.0f
-        if (isMoving && (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0)) {
+        // Distance filter only — speed filter removed (caused gaps on Vivo with accurate GPS chip)
+        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0) {
             if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
             trackPoints.add(newPoint)
             updateNotification()
