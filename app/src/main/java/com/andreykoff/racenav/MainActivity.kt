@@ -50,6 +50,11 @@ class MainActivity : AppCompatActivity() {
                 // Handle file open intent (GPX/WPT/RTE/PLT)
                 handleFileIntent(intent)
 
+                // Auto-check for updates (non-blocking, 3s delay)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    checkForAppUpdate()
+                }, 3000)
+
                 // Check license from server in background (non-blocking)
                 Thread {
                     val ok = LicenseManager.checkLicenseFromServer(this)
@@ -425,6 +430,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    private fun checkForAppUpdate() {
+        val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return
+        mapFrag.checkForUpdates { latest, current, hasUpdate, apkUrl, changelog ->
+            if (!hasUpdate || apkUrl == null) return@checkForUpdates
+            try {
+                AlertDialog.Builder(this)
+                    .setTitle("Доступно обновление")
+                    .setMessage("Новая версия: $latest (текущая: $current)\n\n${changelog ?: "Исправления и улучшения"}")
+                    .setPositiveButton("Обновить") { _, _ ->
+                        UpdateManager.downloadAndInstall(this, apkUrl, latest ?: "")
+                    }
+                    .setNegativeButton("Позже", null)
+                    .show()
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {

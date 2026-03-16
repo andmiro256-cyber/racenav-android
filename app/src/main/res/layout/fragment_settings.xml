@@ -876,7 +876,89 @@
                     style="?attr/materialButtonStyle" />
             </LinearLayout>
 
-            <!-- KP label size -->
+            <!-- Waypoint list + Route editor buttons -->
+            <LinearLayout
+                android:id="@+id/rowWpRouteButtons"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:layout_marginTop="2dp"
+                android:visibility="gone">
+                <Button
+                    android:id="@+id/btnWaypointList"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="📋 Точки на карте"
+                    android:textSize="11sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#FF6F00"
+                    android:textAllCaps="false"
+                    android:layout_marginEnd="4dp" />
+                <Button
+                    android:id="@+id/btnRouteEditor"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="✏️ Маршрут"
+                    android:textSize="11sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#1565C0"
+                    android:textAllCaps="false"
+                    android:layout_marginStart="4dp" />
+            </LinearLayout>
+
+            <!-- WP circle size -->
+            <LinearLayout
+                android:id="@+id/rowWpCircleSize"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Размер кружка WP"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnWpCircleSizeMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtWpCircleSize"
+                    android:layout_width="44dp"
+                    android:layout_height="wrap_content"
+                    android:text="3"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnWpCircleSizePlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- WP label size -->
             <LinearLayout
                 android:id="@+id/rowWpLabelSize"
                 android:layout_width="match_parent"
@@ -894,7 +976,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Размер подписей КП"
+                    android:text="Размер подписей WP"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <ImageButton
@@ -1002,6 +1084,110 @@
                     android:src="@drawable/ic_add"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:tint="#FFFFFF" />
+            </LinearLayout>
+            <!-- Track min distance filter -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Мин. расстояние между точками"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnMinDistMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtTrackMinDistance"
+                    android:layout_width="52dp"
+                    android:layout_height="wrap_content"
+                    android:text="2м"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnMinDistPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+            <!-- Track min accuracy filter -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Макс. точность GPS (отсечка)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnMinAccMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtTrackMinAccuracy"
+                    android:layout_width="52dp"
+                    android:layout_height="wrap_content"
+                    android:text="50м"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnMinAccPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+            <!-- Track only moving switch -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Писать только в движении"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <android.widget.Switch
+                    android:id="@+id/switchTrackOnlyMoving"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:thumbTint="#FF6F00"
+                    android:trackTint="#555555" />
             </LinearLayout>
             <!-- Recording track color -->
             <LinearLayout
@@ -1245,7 +1431,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Цвет линии к КП"
+                    android:text="Цвет линии к WP"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <View
@@ -1272,7 +1458,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Толщина линии к КП"
+                    android:text="Толщина линии к WP"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <ImageButton
@@ -1386,7 +1572,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Звук въезда в радиус КП"
+                    android:text="Звук въезда в радиус WP"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <Switch
@@ -1412,7 +1598,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Звук взятия КП"
+                    android:text="Звук взятия WP"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <Switch
@@ -1857,7 +2043,7 @@
                         android:layout_height="wrap_content"
                         android:minHeight="36dp"
                         android:layout_weight="1"
-                        android:text="📥 Получить КП"
+                        android:text="📥 Получить WP"
                         android:textSize="11sp"
                         android:textColor="#FFFFFF"
                         android:backgroundTint="#1565C0"

@@ -57,13 +57,22 @@ class TrackingService : Service() {
     }
 
     private fun handleLocation(loc: Location) {
-        // Skip points with very poor accuracy (> 50 meters)
-        if (loc.hasAccuracy() && loc.accuracy > 50f) return
+        // Read filter settings
+        val prefs = getSharedPreferences(MapFragment.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val minAccuracy = prefs.getInt(MapFragment.PREF_TRACK_MIN_ACCURACY, 50).toFloat()
+        val minDistance = prefs.getInt(MapFragment.PREF_TRACK_MIN_DISTANCE, 2).toDouble()
+        val onlyMoving = prefs.getBoolean(MapFragment.PREF_TRACK_ONLY_MOVING, false)
+
+        // Skip points with poor accuracy
+        if (loc.hasAccuracy() && loc.accuracy > minAccuracy) return
+
+        // Skip stationary points if "only moving" enabled (< 1 km/h)
+        if (onlyMoving && loc.hasSpeed() && loc.speed < 0.3f) return
 
         val newPoint = Pair(loc.latitude, loc.longitude)
 
-        // Distance filter only — speed filter removed (caused gaps on Vivo with accurate GPS chip)
-        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0) {
+        // Distance filter
+        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > minDistance) {
             if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
             trackPoints.add(newPoint)
             updateNotification()

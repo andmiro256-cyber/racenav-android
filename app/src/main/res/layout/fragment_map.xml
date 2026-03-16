@@ -89,11 +89,35 @@
             android:layout_marginStart="1dp"
             android:layout_marginEnd="1dp" />
 
+        <!-- STOP navigation -->
+        <TextView
+            android:id="@+id/btnWidgetStop"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:gravity="center"
+            android:text="■"
+            android:textSize="18sp"
+            android:textColor="#666666"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
         <!-- Push remaining buttons to right -->
         <View
             android:layout_width="0dp"
             android:layout_height="1dp"
             android:layout_weight="1" />
+
+        <!-- GO navigation -->
+        <TextView
+            android:id="@+id/btnWidgetGo"
+            android:layout_width="40dp"
+            android:layout_height="36dp"
+            android:gravity="center"
+            android:text="GO"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif-black"
+            android:textColor="#666666"
+            android:background="?attr/selectableItemBackgroundBorderless" />
 
         <View
             android:layout_width="1dp"
@@ -196,7 +220,7 @@
             android:src="@drawable/ic_arrow_back"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:tint="#FFFFFF"
-            android:contentDescription="Предыдущий КП"
+            android:contentDescription="Предыдущий WP"
             android:padding="10dp" />
 
         <TextView
@@ -204,9 +228,10 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="КП 1/1: —"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
+            android:text="WP 1/1: —"
+            android:textColor="#FF6F00"
+            android:textSize="14sp"
+            android:textStyle="bold"
             android:gravity="center"
             android:singleLine="true"
             android:ellipsize="end" />
@@ -218,7 +243,7 @@
             android:src="@drawable/ic_arrow_right"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:tint="#FFFFFF"
-            android:contentDescription="Следующий КП"
+            android:contentDescription="Следующий WP"
             android:padding="10dp" />
 
     </LinearLayout>
@@ -236,6 +261,9 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- STOP navigation button (shown when waypoints loaded) -->
+        <!-- GO/STOP moved to waypointNavBar -->
 
         <!-- Speed -->
         <LinearLayout
@@ -327,7 +355,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="след.КП"
+                android:text="след.WP"
                 android:textColor="#888888"
                 android:textSize="10sp" />
         </LinearLayout>
@@ -454,7 +482,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="имя КП"
+                android:text="имя WP"
                 android:textColor="#888888"
                 android:textSize="10sp" />
         </LinearLayout>
@@ -507,6 +535,9 @@
                 android:textSize="10sp"
                 android:layout_marginTop="2dp" />
         </LinearLayout>
+
+        <!-- GO navigation button (shown when waypoints loaded) -->
+        <!-- GO moved to waypointNavBar -->
 
     </LinearLayout>
 

@@ -48,6 +48,14 @@ object DiagnosticsCollector {
             put("locale", Locale.getDefault().toString())
             put("timezone", TimeZone.getDefault().id)
             put("timestamp", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
+            // Install time for trial calculation on server
+            val licPrefs = context.getSharedPreferences("racenav_license", Context.MODE_PRIVATE)
+            val backupPrefs = context.getSharedPreferences("rnav_sys", Context.MODE_PRIVATE)
+            var instTime = licPrefs.getLong("install_time", 0L)
+            if (instTime == 0L) instTime = backupPrefs.getLong("bi", 0L)
+            if (instTime > 0L) {
+                put("installTime", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(instTime)))
+            }
         }
     }
     

@@ -170,6 +170,8 @@ class MapFragment : Fragment() {
     private var userBaseZoom = -1.0 // user's preferred zoom; auto-zoom adjusts relative to this
     private var userDragged = false  // true = user moved map manually, pause following
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
+    private var bearingFrozen = true      // true = курсор заморожен (стоим)
+    private var lastValidBearing = 0f     // последний валидный bearing для freeze
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
@@ -204,6 +206,7 @@ class MapFragment : Fragment() {
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
         const val TRACK_ARROW_ICON = "track-arrow-icon"
+        const val MAX_WAYPOINTS = 200
         const val WP_SOURCE_ID = "wp-source"
         const val WP_CIRCLE_LAYER_ID = "wp-circle-layer"
         const val WP_LAYER_ID = "wp-layer"
@@ -234,6 +237,9 @@ class MapFragment : Fragment() {
         const val PREF_KEEP_SCREEN = "keep_screen_on"
         const val PREF_ORIENTATION = "screen_orientation" // 0=auto, 1=portrait, 2=landscape
         const val PREF_TRACK_INTERVAL = "track_interval_sec"  // seconds, default 1
+        const val PREF_TRACK_MIN_DISTANCE = "track_min_distance"  // meters, default 2
+        const val PREF_TRACK_MIN_ACCURACY = "track_min_accuracy"  // meters, default 50
+        const val PREF_TRACK_ONLY_MOVING = "track_only_moving"    // boolean, default false
         const val PREF_LOADED_TRACK_VISIBLE = "loaded_track_visible"
         const val PREF_LOADED_WP_VISIBLE = "loaded_wp_visible"
         const val PREF_LOADED_TRACK_NAME = "loaded_track_name"
@@ -368,6 +374,7 @@ class MapFragment : Fragment() {
         const val PREF_ROUTE_LINE_COLOR = "route_line_color"  // hex, default "#FF6F00"
         const val PREF_ROUTE_LINE_WIDTH = "route_line_width"  // dp, default 2
         const val PREF_WP_LABEL_SIZE = "wp_label_size"        // 1-10 scale, default 3
+        const val PREF_WP_CIRCLE_SIZE = "wp_circle_size"      // 1-10 scale, default 3
         const val USER_MARKER_SOURCE_ID = "user-marker-source"
         const val USER_MARKER_LAYER_ID = "user-marker-layer"
         const val USER_MARKER_ICON = "user-marker-icon"
@@ -554,7 +561,11 @@ class MapFragment : Fragment() {
     // Public method to load waypoints from SettingsFragment
     fun loadWaypoints(wps: List<Waypoint>) {
         waypoints.clear()
-        waypoints.addAll(wps)
+        val limited = if (wps.size > MAX_WAYPOINTS) {
+            Toast.makeText(context, "Обрезано до $MAX_WAYPOINTS точек (было ${wps.size})", Toast.LENGTH_LONG).show()
+            wps.take(MAX_WAYPOINTS)
+        } else wps
+        waypoints.addAll(limited)
         activeWpIndex = 0
         updateWaypointsOnMap()
         updateRouteLineOnMap()
@@ -1466,16 +1477,16 @@ class MapFragment : Fragment() {
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconAnchor("center"),
+            PropertyFactory.iconAnchor("left"),
             *wpIconSizeProps()
         ))
-        // User markers layer — yellow circles with number, like KP but different color
+        // User markers layer
         style.addSource(GeoJsonSource(USER_MARKER_SOURCE_ID))
         style.addLayer(SymbolLayer(USER_MARKER_LAYER_ID, USER_MARKER_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconAnchor("center"),
+            PropertyFactory.iconAnchor("left"),
             *wpIconSizeProps()
         ))
 
@@ -1497,10 +1508,15 @@ class MapFragment : Fragment() {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(WP_SOURCE_ID) ?: return
 
+        // Remove old wp icons
+        for (i in 0 until lastWpIconCount) {
+            try { style.removeImage("wp-icon-$i") } catch (_: Exception) {}
+        }
+
         val features = JSONArray()
         waypoints.forEachIndexed { i, wp ->
             val iconId = "wp-icon-$i"
-            val bmp = createWaypointBitmap(i, wp.name)
+            val bmp = createWaypointBitmap(wp)
             style.addImage(iconId, bmp)
             val feature = JSONObject()
                 .put("type", "Feature")
@@ -1512,55 +1528,107 @@ class MapFragment : Fragment() {
             features.put(feature)
         }
         source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+        lastWpIconCount = waypoints.size
     }
 
-    private fun createWaypointBitmap(index: Int, name: String = "", sizeLevel: Int = -1): android.graphics.Bitmap {
-        val lvl = if (sizeLevel < 0) {
-            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                ?.getInt(PREF_WP_LABEL_SIZE, 3) ?: 3
-        } else sizeLevel
-        // Scale: 1=tiny … 3=normal … 10=huge (x4.5)
-        val scale = when (lvl) {
+    private val wpBitmapCache = mutableMapOf<String, android.graphics.Bitmap>()
+    private var lastWpIconCount = 0
+
+    private fun createWaypointBitmap(wp: Waypoint, sizeLevel: Int = -1): android.graphics.Bitmap {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val labelLvl = if (sizeLevel < 0) prefs?.getInt(PREF_WP_LABEL_SIZE, 3) ?: 3 else sizeLevel
+        val circleLvl = prefs?.getInt(PREF_WP_CIRCLE_SIZE, 3) ?: 3
+        fun scaleOf(lvl: Int) = when (lvl) {
             1 -> 0.5f; 2 -> 0.7f; 3 -> 1.0f; 4 -> 1.4f; 5 -> 1.8f
             6 -> 2.3f; 7 -> 2.8f; 8 -> 3.3f; 9 -> 3.9f; 10 -> 4.5f
             else -> 1.0f
         }
+        val labelScale = scaleOf(labelLvl)
+        val circleScale = scaleOf(circleLvl)
+        val fillColor = if (wp.color.isNotBlank()) wp.color else "#FF6F00"
+        val upperName = wp.name.uppercase()
+        val displayName = if (upperName.length > 14) upperName.take(14) + "…" else upperName
+        val cacheKey = "$fillColor|${wp.symbol}|$displayName|$labelLvl|$circleLvl"
+        wpBitmapCache[cacheKey]?.let { return it }
+
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        val circleR = 18f * circleScale
+        val circleDiam = (circleR * 2).toInt()
 
-        // Name text inside circle — truncate to fit
-        val nameTextSize = 16f * scale
-        paint.textSize = nameTextSize
+        // Measure label text
+        val labelSize = 13f * labelScale
+        paint.textSize = labelSize
         paint.isFakeBoldText = true
-        val displayName = if (name.length > 12) name.take(12) + "…" else name.ifBlank { "•" }
-        val textWidth = paint.measureText(displayName)
+        val labelWidth = if (displayName.isNotBlank()) paint.measureText(displayName) else 0f
+        val labelPadH = 6f * labelScale
+        val labelPadV = 3f * labelScale
+        val labelH = labelSize + labelPadV * 2
+        val gap = 4f * circleScale
 
-        // Circle radius adapts to text width — minimum 22dp*scale
-        val circleR = maxOf(22f * scale, textWidth / 2f + 10f * scale)
-        val bmpSize = ((circleR + 3f) * 2).toInt()
-        val bmp = android.graphics.Bitmap.createBitmap(bmpSize, bmpSize, android.graphics.Bitmap.Config.ARGB_8888)
+        // Total bitmap size: circle + gap + label
+        val labelBoxW = if (labelWidth > 0) gap + labelWidth + labelPadH * 2 else 0f
+        val circleBlockW = circleDiam + 4 * circleScale
+        val totalW = (circleBlockW + labelBoxW).toInt()
+        val totalH = maxOf(circleDiam + (4 * circleScale).toInt(), labelH.toInt() + 4)
+        val bmp = android.graphics.Bitmap.createBitmap(maxOf(totalW, 1), maxOf(totalH, 1), android.graphics.Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
-        val cx = bmpSize / 2f
-        val cy = bmpSize / 2f
+        val cx = circleR + 2f * circleScale
+        val cy = totalH / 2f
 
-        // Orange fill
+        // Circle fill
         paint.style = android.graphics.Paint.Style.FILL
-        paint.color = android.graphics.Color.parseColor("#FF6F00")
+        try { paint.color = android.graphics.Color.parseColor(fillColor) } catch (_: Exception) { paint.color = android.graphics.Color.parseColor("#FF6F00") }
         canvas.drawCircle(cx, cy, circleR, paint)
 
-        // White stroke
+        // Circle stroke
         paint.style = android.graphics.Paint.Style.STROKE
         paint.color = android.graphics.Color.WHITE
-        paint.strokeWidth = 3f * scale
+        paint.strokeWidth = 2.5f * circleScale
         canvas.drawCircle(cx, cy, circleR, paint)
 
-        // Name text centered inside circle
+        // Draw symbol inside circle
         paint.style = android.graphics.Paint.Style.FILL
         paint.color = android.graphics.Color.WHITE
-        paint.textAlign = android.graphics.Paint.Align.CENTER
-        val textY = cy - (paint.descent() + paint.ascent()) / 2f
-        canvas.drawText(displayName, cx, textY, paint)
+        drawSymbolInCircle(canvas, paint, cx, cy, circleR * 0.55f, wp.symbol, circleScale)
 
+        // Draw label to the right of circle (semi-transparent background)
+        if (displayName.isNotBlank()) {
+            val labelX = cx + circleR + gap
+            val labelY = cy - labelH / 2f
+            // Background rect
+            paint.color = android.graphics.Color.argb(200, 40, 40, 40)
+            paint.style = android.graphics.Paint.Style.FILL
+            val rr = 4f * labelScale
+            canvas.drawRoundRect(labelX, labelY, labelX + labelWidth + labelPadH * 2, labelY + labelH, rr, rr, paint)
+            // Text
+            paint.color = android.graphics.Color.WHITE
+            paint.textSize = labelSize
+            paint.textAlign = android.graphics.Paint.Align.LEFT
+            paint.isFakeBoldText = true
+            canvas.drawText(displayName, labelX + labelPadH, labelY + labelPadV - paint.ascent(), paint)
+        }
+
+        wpBitmapCache[cacheKey] = bmp
         return bmp
+    }
+
+    private fun drawSymbolInCircle(canvas: android.graphics.Canvas, paint: android.graphics.Paint, cx: Float, cy: Float, r: Float, symbol: String, scale: Float) {
+        val ctx = context ?: return
+        val drawableId = when (symbol.lowercase()) {
+            "triangle" -> R.drawable.ic_sym_triangle
+            "flag" -> R.drawable.ic_sym_flag
+            "star" -> R.drawable.ic_sym_star
+            "cross" -> R.drawable.ic_sym_cross
+            "square" -> R.drawable.ic_sym_square
+            "diamond" -> R.drawable.ic_sym_diamond
+            "pin" -> R.drawable.ic_sym_pin
+            else -> R.drawable.ic_sym_crosshair
+        }
+        val drawable = androidx.core.content.ContextCompat.getDrawable(ctx, drawableId) ?: return
+        val size = (r * 1.4f).toInt()
+        drawable.setBounds((cx - size / 2).toInt(), (cy - size / 2).toInt(), (cx + size / 2).toInt(), (cy + size / 2).toInt())
+        drawable.setTint(android.graphics.Color.WHITE)
+        drawable.draw(canvas)
     }
 
 
@@ -1682,7 +1750,7 @@ class MapFragment : Fragment() {
     }
 
     fun applyWpLabelSize() {
-        // Rebuild bitmaps with new size and refresh map
+        wpBitmapCache.clear()
         updateWaypointsOnMap()
     }
 
@@ -1776,7 +1844,7 @@ class MapFragment : Fragment() {
         binding.btnSettings.setOnLongClickListener { showHint("Настройки приложения"); true }
         binding.btnPrevWp.setOnLongClickListener { showHint("Предыдущая точка маршрута"); true }
         binding.btnNextWp.setOnLongClickListener { showHint("Следующая точка маршрута"); true }
-        binding.txtWpNavInfo.setOnLongClickListener { showHint("Нажми чтобы открыть список КП"); true }
+        binding.txtWpNavInfo.setOnLongClickListener { showHint("Нажми чтобы открыть список WP"); true }
 
         // Tripmaster reset on tap
         binding.widgetTripmaster.setOnClickListener {
@@ -1793,6 +1861,13 @@ class MapFragment : Fragment() {
         binding.btnPrevWp.setOnClickListener { prevWaypoint() }
         binding.btnNextWp.setOnClickListener { advanceWaypoint() }
         binding.txtWpNavInfo.setOnClickListener { showWaypointList() }
+
+        // Top bar GO / STOP buttons
+        binding.btnWidgetGo.setOnClickListener { startNavigation() }
+        binding.btnWidgetStop.setOnClickListener { stopNavigation() }
+        // Init colors (grey = inactive)
+        binding.btnWidgetGo.setTextColor(0xFF666666.toInt())
+        binding.btnWidgetStop.setTextColor(0xFF666666.toInt())
 
         // Restore nav active state
         val prefs2 = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -2041,7 +2116,7 @@ class MapFragment : Fragment() {
         }
         updateNavLine()
         updateWaypointNavBar()
-        Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "WP${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
         // Immediately refresh distance widget with new target
         val b = _binding ?: return
         val wp = waypoints.getOrNull(activeWpIndex)
@@ -2056,7 +2131,7 @@ class MapFragment : Fragment() {
                 b.widgetNextCp.text = "--"
                 b.widgetRemainKm.text = "--"
             }
-            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "WP${activeWpIndex + 1}"
         }
     }
 
@@ -2067,9 +2142,11 @@ class MapFragment : Fragment() {
             Toast.makeText(context, "Карта не готова", Toast.LENGTH_SHORT).show()
             return
         }
-        userMarkers.add(UserPoint("Точка ${userMarkers.size + 1}", pos))
+        val num = userMarkers.size + 1
+        val wpName = "WP%02d".format(num)
+        userMarkers.add(UserPoint(wpName, pos))
         updateUserMarkersOnMap()
-        Toast.makeText(context, "Точка ${userMarkers.size} поставлена", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "$wpName поставлена", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateUserMarkersOnMap() {
@@ -2156,44 +2233,15 @@ class MapFragment : Fragment() {
 
     /** Blue circle bitmap with text label for user points (uses КП size settings) */
     private fun createMarkerBitmap(label: String): android.graphics.Bitmap {
-        val lvl = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.getInt(PREF_WP_LABEL_SIZE, 3) ?: 3
-        val scale = when (lvl) {
-            1 -> 0.5f; 2 -> 0.7f; 3 -> 1.0f; 4 -> 1.4f; 5 -> 1.8f
-            6 -> 2.3f; 7 -> 2.8f; 8 -> 3.3f; 9 -> 3.9f; 10 -> 4.5f
-            else -> 1.0f
-        }
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-        val textSize = 16f * scale
-        paint.textSize = textSize
-        paint.isFakeBoldText = true
-        val displayLabel = if (label.length > 12) label.take(12) + "…" else label
-        val textW = paint.measureText(displayLabel)
-        val circleR = maxOf(22f * scale, textW / 2f + 10f * scale)
-        val bmpSize = ((circleR + 3f) * 2).toInt()
-        val bmp = android.graphics.Bitmap.createBitmap(bmpSize, bmpSize, android.graphics.Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bmp)
-        val cx = bmpSize / 2f; val cy = bmpSize / 2f
+        // Reuse createWaypointBitmap with blue color and crosshair symbol
+        val tempWp = Waypoint(name = label, lat = 0.0, lon = 0.0, index = 0, color = "#1565C0", symbol = "")
+        return createWaypointBitmap(tempWp)
+    }
 
-        // Blue fill
-        paint.style = android.graphics.Paint.Style.FILL
-        paint.color = android.graphics.Color.parseColor("#1565C0")
-        canvas.drawCircle(cx, cy, circleR, paint)
+    fun hasUserMarkers() = userMarkers.isNotEmpty()
 
-        // White stroke
-        paint.style = android.graphics.Paint.Style.STROKE
-        paint.color = android.graphics.Color.WHITE
-        paint.strokeWidth = 3f * scale
-        canvas.drawCircle(cx, cy, circleR, paint)
-
-        // Text centered
-        paint.style = android.graphics.Paint.Style.FILL
-        paint.color = android.graphics.Color.WHITE
-        paint.textAlign = android.graphics.Paint.Align.CENTER
-        val textY = cy - (paint.descent() + paint.ascent()) / 2f
-        canvas.drawText(label, cx, textY, paint)
-
-        return bmp
+    fun getUserMarkersCopy(): List<Waypoint> = userMarkers.mapIndexed { i, pt ->
+        Waypoint(pt.name, pt.position.latitude, pt.position.longitude, i + 1, color = "#1565C0")
     }
 
     /** Calculate total polyline length in meters */
@@ -2243,7 +2291,7 @@ class MapFragment : Fragment() {
                             if (wpts.isNotEmpty()) {
                                 loadWaypoints(wpts)
                                 prefs.edit().putString(PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                Toast.makeText(ctx, "Загружено КП: ${wpts.size}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(ctx, "Загружено WP: ${wpts.size}", Toast.LENGTH_SHORT).show()
                             } else Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
                         }
                     }
@@ -2260,7 +2308,7 @@ class MapFragment : Fragment() {
                             if (wpts.isNotEmpty()) {
                                 loadWaypoints(wpts)
                                 prefs.edit().putString(PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                Toast.makeText(ctx, "Загружено КП: ${wpts.size}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(ctx, "Загружено WP: ${wpts.size}", Toast.LENGTH_SHORT).show()
                             } else if (trackPts.isNullOrEmpty()) {
                                 Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
                             }
@@ -2300,6 +2348,7 @@ class MapFragment : Fragment() {
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         }
 
         // Title
@@ -2325,7 +2374,7 @@ class MapFragment : Fragment() {
                 setPadding(0, 8, 0, 4)
             })
             root.addView(android.widget.TextView(ctx).apply {
-                text = "   КП: ${waypoints.size}  •  Длина: ${"%.1f".format(routeLenKm)} км"
+                text = "   WP: ${waypoints.size}  •  Длина: ${"%.1f".format(routeLenKm)} км"
                 setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
                 textSize = 13f
             })
@@ -2369,7 +2418,7 @@ class MapFragment : Fragment() {
                 setOnClickListener {
                     android.app.AlertDialog.Builder(ctx)
                         .setTitle("Очистить маршрут?")
-                        .setMessage("Маршрут «${routeName ?: "Без имени"}» (${waypoints.size} КП) будет убран с карты")
+                        .setMessage("Маршрут «${routeName ?: "Без имени"}» (${waypoints.size} WP) будет убран с карты")
                         .setPositiveButton("Очистить") { _, _ ->
                             stopNavigation()
                             waypoints.clear()
@@ -2653,11 +2702,15 @@ class MapFragment : Fragment() {
         })
 
         // Apply dark background to BottomSheet
-        val scroll = android.widget.ScrollView(ctx).apply { addView(root) }
+        val scroll = android.widget.ScrollView(ctx).apply {
+            addView(root)
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+        }
         dialog.setContentView(scroll)
         dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
         (scroll.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         dialog.show()
+        dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
     }
 
     /** Full list of waypoints with statuses — tap on nav bar to open */
@@ -2679,7 +2732,7 @@ class MapFragment : Fragment() {
             .getString(PREF_ROUTE_NAME, "Маршрут") ?: "Маршрут"
 
         root.addView(android.widget.TextView(ctx).apply {
-            text = "🗺 $routeName — ${waypoints.size} КП"
+            text = "🗺 $routeName — ${waypoints.size} WP"
             setTextColor(android.graphics.Color.WHITE)
             textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
@@ -2759,10 +2812,10 @@ class MapFragment : Fragment() {
                         b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1f", distM / 1000)
                         val remKm = calcRemainingKm(gps)
                         b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
-                        b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${i + 1}"
+                        b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "WP${i + 1}"
                     }
                     dialog.dismiss()
-                    Toast.makeText(ctx, "→ КП ${i + 1}: ${wp.name}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, "→ WP${i + 1}: ${wp.name}", Toast.LENGTH_SHORT).show()
                 }
             })
 
@@ -2777,274 +2830,216 @@ class MapFragment : Fragment() {
     }
 
     /** Full route editor — create/edit/delete waypoints, set radius, save as GPX */
-    private fun showRouteEditor() {
+    fun showRouteEditor() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dialog = BottomSheetDialog(ctx)
         val pad = 24
 
-        // Editing copy of waypoints
-        val editWps = waypoints.map { it.copy() }.toMutableList()
+        // Editing copy of waypoints — if empty, import user markers
+        val editWps = if (waypoints.isNotEmpty()) {
+            waypoints.map { it.copy() }.toMutableList()
+        } else {
+            userMarkers.mapIndexed { i, pt ->
+                Waypoint(pt.name, pt.position.latitude, pt.position.longitude, i + 1, color = "#1565C0")
+            }.toMutableList()
+        }
         val approachRadius = prefs.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)
 
-        fun buildUI(): android.widget.ScrollView {
-            val root = android.widget.LinearLayout(ctx).apply {
-                orientation = android.widget.LinearLayout.VERTICAL
-                setPadding(pad, pad, pad, pad)
-            }
-
-            // Title
-            root.addView(android.widget.TextView(ctx).apply {
-                text = "✏️ Редактор маршрута"
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = 18f
-                setTypeface(null, android.graphics.Typeface.BOLD)
-                setPadding(0, 0, 0, 12)
-            })
-
-            // Approach radius setting
-            val radiusRow = android.widget.LinearLayout(ctx).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(0, 4, 0, 12)
-            }
-            radiusRow.addView(android.widget.TextView(ctx).apply {
-                text = "Радиус сближения: "
-                setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
-                textSize = 14f
-            })
-            val radiusInput = android.widget.EditText(ctx).apply {
-                setText(approachRadius.toString())
-                setTextColor(android.graphics.Color.WHITE)
-                inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                layoutParams = android.widget.LinearLayout.LayoutParams(120, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
-                textSize = 14f
-            }
-            radiusRow.addView(radiusInput)
-            radiusRow.addView(android.widget.TextView(ctx).apply {
-                text = " м"
-                setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
-                textSize = 14f
-            })
-            root.addView(radiusRow)
-
-            // Waypoint list
-            if (editWps.isEmpty()) {
-                root.addView(android.widget.TextView(ctx).apply {
-                    text = "Нет точек. Добавьте кнопками ниже."
-                    setTextColor(android.graphics.Color.parseColor("#888888"))
-                    textSize = 14f
-                    setPadding(0, 8, 0, 16)
-                })
-            }
-
-            editWps.forEachIndexed { i, wp ->
-                val row = android.widget.LinearLayout(ctx).apply {
-                    orientation = android.widget.LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 6, 0, 6)
-                    if (i % 2 == 0) setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
-                }
-
-                // Number
-                row.addView(android.widget.TextView(ctx).apply {
-                    text = "${i + 1}."
-                    setTextColor(android.graphics.Color.parseColor("#FF6F00"))
-                    textSize = 14f
-                    setPadding(0, 0, 8, 0)
-                })
-
-                // Name + coords
-                val info = android.widget.LinearLayout(ctx).apply {
-                    orientation = android.widget.LinearLayout.VERTICAL
-                    layoutParams = android.widget.LinearLayout.LayoutParams(0,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                info.addView(android.widget.TextView(ctx).apply {
-                    text = wp.name.ifBlank { "КП ${i + 1}" }
-                    setTextColor(android.graphics.Color.WHITE)
-                    textSize = 14f
-                })
-                info.addView(android.widget.TextView(ctx).apply {
-                    text = "%.5f, %.5f".format(wp.lat, wp.lon)
-                    setTextColor(android.graphics.Color.parseColor("#888888"))
-                    textSize = 11f
-                })
-                row.addView(info)
-
-                // Edit button
-                row.addView(android.widget.Button(ctx).apply {
-                    text = "✏"
-                    textSize = 14f; isAllCaps = false
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    setTextColor(android.graphics.Color.parseColor("#FF6F00"))
-                    setOnClickListener {
-                        showEditWpDialog(editWps, i) {
-                            dialog.setContentView(buildUI())
-                        }
-                    }
-                })
-
-                // Move up
-                if (i > 0) {
-                    row.addView(android.widget.Button(ctx).apply {
-                        text = "↑"; textSize = 14f; isAllCaps = false
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        setTextColor(android.graphics.Color.WHITE)
-                        setOnClickListener {
-                            val tmp = editWps[i]; editWps[i] = editWps[i - 1]; editWps[i - 1] = tmp
-                            dialog.setContentView(buildUI())
-                        }
-                    })
-                }
-
-                // Delete
-                row.addView(android.widget.Button(ctx).apply {
-                    text = "✕"; textSize = 14f; isAllCaps = false
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    setTextColor(android.graphics.Color.parseColor("#FF4444"))
-                    setOnClickListener {
-                        editWps.removeAt(i)
-                        dialog.setContentView(buildUI())
-                    }
-                })
-
-                root.addView(row)
-            }
-
-            // Divider
-            root.addView(android.view.View(ctx).apply {
-                layoutParams = android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
-                setBackgroundColor(android.graphics.Color.parseColor("#444444"))
-            })
-
-            // Buttons
-            val btnRow = android.widget.LinearLayout(ctx).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                setPadding(0, 12, 0, 4)
-            }
-            val btnLp = android.widget.LinearLayout.LayoutParams(0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-
-            // Add at GPS position
-            btnRow.addView(android.widget.Button(ctx).apply {
-                text = "📍 Текущая"; textSize = 12f; isAllCaps = false
-                layoutParams = btnLp
-                setOnClickListener {
-                    val gps = lastKnownGpsPoint
-                    if (gps == null) {
-                        Toast.makeText(ctx, "Нет GPS", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    val num = editWps.size + 1
-                    editWps.add(Waypoint("КП $num", gps.latitude, gps.longitude, num))
-                    dialog.setContentView(buildUI())
-                }
-            })
-
-            // Add at map center
-            btnRow.addView(android.widget.Button(ctx).apply {
-                text = "🗺 Центр карты"; textSize = 12f; isAllCaps = false
-                layoutParams = btnLp
-                setOnClickListener {
-                    val center = mapboxMap?.cameraPosition?.target
-                    if (center == null) {
-                        Toast.makeText(ctx, "Нет карты", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    val num = editWps.size + 1
-                    editWps.add(Waypoint("КП $num", center.latitude, center.longitude, num))
-                    dialog.setContentView(buildUI())
-                }
-            })
-            root.addView(btnRow)
-
-            // Apply + Save buttons
-            val saveRow = android.widget.LinearLayout(ctx).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                setPadding(0, 8, 0, 0)
-            }
-
-            // Apply to map
-            saveRow.addView(android.widget.Button(ctx).apply {
-                text = "✅ Применить"
-                textSize = 13f; isAllCaps = false
-                layoutParams = btnLp
-                setOnClickListener {
-                    // Save radius
-                    val newRadius = radiusInput.text.toString().toIntOrNull() ?: approachRadius
-                    prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, newRadius).apply()
-
-                    // Re-index and apply
-                    waypoints.clear()
-                    editWps.forEachIndexed { idx, wp ->
-                        waypoints.add(Waypoint(wp.name, wp.lat, wp.lon, idx + 1, wp.description))
-                    }
-                    activeWpIndex = 0
-                    updateWaypointsOnMap()
-                    updateRouteLineOnMap()
-                    updateRadiusCircles()
-                    updateNavLine()
-                    updateWaypointNavBar()
-                    saveWaypointsToPrefs()
-                    dialog.dismiss()
-                    Toast.makeText(ctx, "Маршрут обновлён: ${waypoints.size} КП", Toast.LENGTH_SHORT).show()
-                }
-            })
-
-            // Save as GPX
-            saveRow.addView(android.widget.Button(ctx).apply {
-                text = "💾 Сохранить GPX"
-                textSize = 13f; isAllCaps = false
-                layoutParams = btnLp
-                setOnClickListener {
-                    if (editWps.isEmpty()) {
-                        Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    val routeName = prefs.getString(PREF_ROUTE_NAME, "Маршрут") ?: "Маршрут"
-                    val reindexed = editWps.mapIndexed { idx, wp ->
-                        Waypoint(wp.name, wp.lat, wp.lon, idx + 1, wp.description)
-                    }
-                    val gpx = GpxParser.writeWaypointsGpx(reindexed, routeName)
-                    val dir = getRaceNavDir(ctx, "routes")
-                    val file = java.io.File(dir, "route_${System.currentTimeMillis()}.gpx")
-                    file.writeText(gpx)
-                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                        ctx, "${ctx.packageName}.provider", file)
-                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                        type = "application/gpx+xml"
-                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    startActivity(android.content.Intent.createChooser(intent, "Сохранить маршрут"))
-                }
-            })
-            root.addView(saveRow)
-
-            return android.widget.ScrollView(ctx).apply {
-                addView(root)
-                setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
-            }
+        val dp = resources.displayMetrics.density
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         }
 
-        val scroll = buildUI()
-        dialog.setContentView(scroll)
+        // Title
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "✏️ Редактор маршрута"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 18f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 12)
+        })
+
+        // Approach radius setting
+        val radiusRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, 4, 0, 12)
+        }
+        radiusRow.addView(android.widget.TextView(ctx).apply {
+            text = "Радиус сближения: "
+            setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
+            textSize = 14f
+        })
+        val radiusInput = android.widget.EditText(ctx).apply {
+            setText(approachRadius.toString())
+            setTextColor(android.graphics.Color.WHITE)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            layoutParams = android.widget.LinearLayout.LayoutParams(120, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+            textSize = 14f
+        }
+        radiusRow.addView(radiusInput)
+        radiusRow.addView(android.widget.TextView(ctx).apply {
+            text = " м"
+            setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
+            textSize = 14f
+        })
+        root.addView(radiusRow)
+
+        // Hint for drag
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "≡ — перетащите для сортировки"
+            setTextColor(android.graphics.Color.parseColor("#666666"))
+            textSize = 11f
+            setPadding(0, 0, 0, 8)
+        })
+
+        // RecyclerView with drag & drop
+        val recyclerView = androidx.recyclerview.widget.RecyclerView(ctx).apply {
+            layoutManager = androidx.recyclerview.widget.LinearLayoutManager(ctx)
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        val adapter = RouteEditorAdapter(
+            items = editWps,
+            dp = dp,
+            distanceCalc = { a, b -> distanceM(LatLng(a.lat, a.lon), LatLng(b.lat, b.lon)).toFloat() },
+            onEdit = { i ->
+                showEditWpDialog(editWps, i) { recyclerView.adapter?.notifyDataSetChanged() }
+            },
+            onDelete = { i ->
+                if (i in editWps.indices) {
+                    editWps.removeAt(i)
+                    recyclerView.adapter?.notifyDataSetChanged()
+                }
+            }
+        )
+        recyclerView.adapter = adapter
+
+        val touchCallback = RouteItemTouchCallback(adapter)
+        val itemTouchHelper = androidx.recyclerview.widget.ItemTouchHelper(touchCallback)
+        itemTouchHelper.attachToRecyclerView(recyclerView)
+        adapter.dragStartListener = { vh -> itemTouchHelper.startDrag(vh) }
+
+        root.addView(recyclerView)
+
+        // Buttons
+        val btnRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, 12, 0, 4)
+        }
+        val btnLp = android.widget.LinearLayout.LayoutParams(0,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+
+        btnRow.addView(android.widget.Button(ctx).apply {
+            text = "📌 Добавить WP с карты"; textSize = 12f; isAllCaps = false
+            layoutParams = btnLp
+            setOnClickListener {
+                if (userMarkers.isEmpty()) {
+                    Toast.makeText(ctx, "Нет точек на карте. Поставьте точки в свободном режиме", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                if (editWps.size >= MAX_WAYPOINTS) {
+                    Toast.makeText(ctx, "Максимум $MAX_WAYPOINTS точек", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                // Show checklist of user markers
+                val names = userMarkers.map { it.name }.toTypedArray()
+                val checked = BooleanArray(names.size) { true }
+                androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+                    .setTitle("Выберите точки")
+                    .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
+                    .setPositiveButton("Добавить") { _, _ ->
+                        var added = 0
+                        userMarkers.forEachIndexed { idx, pt ->
+                            if (checked[idx] && editWps.size < MAX_WAYPOINTS) {
+                                val num = editWps.size + 1
+                                editWps.add(Waypoint(pt.name, pt.position.latitude, pt.position.longitude, num, color = "#1565C0"))
+                                added++
+                            }
+                        }
+                        adapter.notifyDataSetChanged()
+                        Toast.makeText(ctx, "Добавлено $added точек", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        })
+        root.addView(btnRow)
+
+        // Apply + Save buttons
+        val saveRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 0)
+        }
+
+        saveRow.addView(android.widget.Button(ctx).apply {
+            text = "✅ Применить"
+            textSize = 13f; isAllCaps = false
+            layoutParams = btnLp
+            setOnClickListener {
+                val newRadius = radiusInput.text.toString().toIntOrNull() ?: approachRadius
+                prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, newRadius).apply()
+                waypoints.clear()
+                editWps.forEachIndexed { idx, wp -> waypoints.add(wp.copy(index = idx + 1)) }
+                activeWpIndex = 0
+                wpBitmapCache.clear()
+                updateWaypointsOnMap()
+                updateRouteLineOnMap()
+                updateRadiusCircles()
+                updateNavLine()
+                updateWaypointNavBar()
+                saveWaypointsToPrefs()
+                dialog.dismiss()
+                Toast.makeText(ctx, "Маршрут обновлён: ${waypoints.size} WP", Toast.LENGTH_SHORT).show()
+            }
+        })
+
+        saveRow.addView(android.widget.Button(ctx).apply {
+            text = "💾 Сохранить GPX"
+            textSize = 13f; isAllCaps = false
+            layoutParams = btnLp
+            setOnClickListener {
+                if (editWps.isEmpty()) {
+                    Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val routeName = prefs.getString(PREF_ROUTE_NAME, "Маршрут") ?: "Маршрут"
+                val reindexed = editWps.mapIndexed { idx, wp -> wp.copy(index = idx + 1) }
+                val gpx = GpxParser.writeWaypointsGpx(reindexed, routeName)
+                val dir = getRaceNavDir(ctx, "routes")
+                val file = java.io.File(dir, "route_${System.currentTimeMillis()}.gpx")
+                file.writeText(gpx)
+                val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "application/gpx+xml"
+                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(android.content.Intent.createChooser(intent, "Сохранить маршрут"))
+            }
+        })
+        root.addView(saveRow)
+
+        dialog.setContentView(root)
         dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
-        (scroll.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+        (root.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         dialog.show()
+        dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
     }
 
     /** Dialog to edit a single waypoint's name and coordinates */
     private fun showEditWpDialog(wps: MutableList<Waypoint>, index: Int, onDone: () -> Unit) {
         val ctx = context ?: return
-        val wp = wps[index]
+        val wp = wps.getOrNull(index) ?: return
         val pad = 24
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         }
 
         val inputName = android.widget.EditText(ctx).apply {
@@ -3081,16 +3076,177 @@ class MapFragment : Fragment() {
         }
         root.addView(inputDesc)
 
-        android.app.AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Редактировать КП ${index + 1}")
+        androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+            .setTitle("Редактировать WP ${index + 1}")
             .setView(root)
             .setPositiveButton("OK") { _, _ ->
-                val name = inputName.text.toString().trim().ifBlank { "КП ${index + 1}" }
+                val name = inputName.text.toString().trim().ifBlank { "WP${index + 1}" }
                 val lat = inputLat.text.toString().toDoubleOrNull() ?: wp.lat
                 val lon = inputLon.text.toString().toDoubleOrNull() ?: wp.lon
                 val desc = inputDesc.text.toString().trim()
-                wps[index] = Waypoint(name, lat, lon, index + 1, desc)
+                wps[index] = wp.copy(name = name, lat = lat, lon = lon, index = index + 1, description = desc)
                 onDone()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /** Enhanced edit dialog with color, symbol, proximity */
+    private fun showEnhancedEditWpDialog(index: Int) {
+        val ctx = context ?: return
+        val wp = waypoints.getOrNull(index) ?: return
+        val pad = 24
+        val dp = resources.displayMetrics.density
+
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+        }
+
+        fun label(text: String) = android.widget.TextView(ctx).apply {
+            this.text = text
+            setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
+            textSize = 12f
+            setPadding(0, 12, 0, 2)
+        }
+
+        // Name
+        root.addView(label("Имя"))
+        val inputName = android.widget.EditText(ctx).apply {
+            setText(wp.name); setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            hint = "Имя точки"
+        }
+        root.addView(inputName)
+
+        // Description
+        root.addView(label("Описание"))
+        val inputDesc = android.widget.EditText(ctx).apply {
+            setText(wp.description); setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            hint = "Описание (необязательно)"
+            minLines = 2; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        root.addView(inputDesc)
+
+        // Coordinates
+        val coordRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+        }
+        root.addView(label("Координаты"))
+        val inputLat = android.widget.EditText(ctx).apply {
+            hint = "Широта"; setText(wp.lat.toString()); setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val inputLon = android.widget.EditText(ctx).apply {
+            hint = "Долгота"; setText(wp.lon.toString()); setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        coordRow.addView(inputLat); coordRow.addView(inputLon)
+        root.addView(coordRow)
+
+        // Symbol selector
+        root.addView(label("Символ"))
+        val symbols = listOf("" to "⊕", "triangle" to "△", "flag" to "⚑", "star" to "★", "cross" to "✚", "square" to "■", "diamond" to "◆", "pin" to "📍")
+        var selectedSymbol = wp.symbol
+        val symbolGrid = android.widget.GridLayout(ctx).apply { columnCount = 4; setPadding(0, 4, 0, 8) }
+        val symbolViews = mutableListOf<android.widget.TextView>()
+        val swatchSz = (44 * dp).toInt()
+        val gapSz = (6 * dp).toInt()
+        symbols.forEach { (key, label) ->
+            val tv = android.widget.TextView(ctx).apply {
+                text = label; textSize = 20f; gravity = android.view.Gravity.CENTER
+                setTextColor(if (key == selectedSymbol) android.graphics.Color.parseColor("#FF6F00") else android.graphics.Color.WHITE)
+                setBackgroundColor(if (key == selectedSymbol) android.graphics.Color.parseColor("#333333") else android.graphics.Color.TRANSPARENT)
+                val lp = android.widget.GridLayout.LayoutParams().apply { width = swatchSz; height = swatchSz; setMargins(gapSz, gapSz, gapSz, gapSz) }
+                layoutParams = lp
+            }
+            tv.setOnClickListener {
+                selectedSymbol = key
+                symbolViews.forEach { v ->
+                    val isSelected = v == tv
+                    v.setTextColor(if (isSelected) android.graphics.Color.parseColor("#FF6F00") else android.graphics.Color.WHITE)
+                    v.setBackgroundColor(if (isSelected) android.graphics.Color.parseColor("#333333") else android.graphics.Color.TRANSPARENT)
+                }
+            }
+            symbolViews.add(tv)
+            symbolGrid.addView(tv)
+        }
+        root.addView(symbolGrid)
+
+        // Color picker
+        root.addView(label("Цвет"))
+        val colors = listOf("#FF6F00", "#FFFF00", "#FFFFFF", "#00FF00", "#FF4444", "#00BFFF",
+            "#FF00FF", "#1565C0", "#00E676", "#FF8A80", "#B388FF", "#CCCCCC")
+        var selectedColor = wp.color.ifBlank { "#FF6F00" }
+        val colorGrid = android.widget.GridLayout(ctx).apply { columnCount = 6; setPadding(0, 4, 0, 8) }
+        val colorViews = mutableListOf<android.view.View>()
+        val colorSz = (36 * dp).toInt()
+        colors.forEach { hex ->
+            val swatch = android.view.View(ctx).apply {
+                setBackgroundColor(android.graphics.Color.parseColor(hex))
+                val lp = android.widget.GridLayout.LayoutParams().apply { width = colorSz; height = colorSz; setMargins(gapSz, gapSz, gapSz, gapSz) }
+                layoutParams = lp
+                if (hex == selectedColor) {
+                    foreground = android.graphics.drawable.GradientDrawable().apply {
+                        setStroke((3 * dp).toInt(), android.graphics.Color.WHITE)
+                        cornerRadius = 4 * dp
+                    }
+                }
+            }
+            swatch.setOnClickListener {
+                selectedColor = hex
+                colorViews.forEach { v ->
+                    v.foreground = null
+                }
+                swatch.foreground = android.graphics.drawable.GradientDrawable().apply {
+                    setStroke((3 * dp).toInt(), android.graphics.Color.WHITE)
+                    cornerRadius = 4 * dp
+                }
+            }
+            colorViews.add(swatch)
+            colorGrid.addView(swatch)
+        }
+        root.addView(colorGrid)
+
+        // Proximity radius
+        root.addView(label("Радиус сближения"))
+        val proxRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val inputProx = android.widget.EditText(ctx).apply {
+            setText(if (wp.proximity > 0) wp.proximity.toInt().toString() else "")
+            hint = "0 = глобальный"
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        proxRow.addView(inputProx)
+        proxRow.addView(android.widget.TextView(ctx).apply { text = " м"; setTextColor(android.graphics.Color.parseColor("#CCCCCC")) })
+        root.addView(proxRow)
+
+        val scroll = android.widget.ScrollView(ctx).apply { addView(root) }
+
+        androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+            .setTitle("Свойства WP ${index + 1}")
+            .setView(scroll)
+            .setPositiveButton("OK") { _, _ ->
+                val name = inputName.text.toString().trim().ifBlank { "WP${index + 1}" }
+                val lat = inputLat.text.toString().toDoubleOrNull() ?: wp.lat
+                val lon = inputLon.text.toString().toDoubleOrNull() ?: wp.lon
+                val desc = inputDesc.text.toString().trim()
+                val prox = inputProx.text.toString().toDoubleOrNull() ?: 0.0
+                val newColor = if (selectedColor == "#FF6F00") "" else selectedColor
+                val newWp = wp.copy(name = name, lat = lat, lon = lon, description = desc,
+                    proximity = prox, color = newColor, symbol = selectedSymbol)
+                updateWaypoint(index, newWp)
             }
             .setNegativeButton("Отмена", null)
             .show()
@@ -3103,7 +3259,7 @@ class MapFragment : Fragment() {
             ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
         updateNavLine()
         updateWaypointNavBar()
-        Toast.makeText(context, "КП ${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "WP${waypoints[activeWpIndex].index}: ${waypoints[activeWpIndex].name}", Toast.LENGTH_SHORT).show()
         // Immediately refresh distance widget with new target
         val b = _binding ?: return
         val wp = waypoints.getOrNull(activeWpIndex)
@@ -3118,7 +3274,7 @@ class MapFragment : Fragment() {
                 b.widgetNextCp.text = "--"
                 b.widgetRemainKm.text = "--"
             }
-            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+            b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "WP${activeWpIndex + 1}"
         }
     }
 
@@ -3148,7 +3304,7 @@ class MapFragment : Fragment() {
             appendLine("📏 Пройдено: ${"%.2f".format(distKm)} км")
             if (elapsed > 0) appendLine("⏱ Время: $timeStr")
             if (avgSpeedKmh > 0) appendLine("⚡ Средняя скорость: ${"%.1f".format(avgSpeedKmh)} км/ч")
-            appendLine("🎯 КП пройдено: ${waypoints.size}")
+            appendLine("🎯 WP пройдено: ${waypoints.size}")
             if (trackCount > 0) appendLine("📍 Точек трека: $trackCount")
             if (kpList.isNotBlank()) {
                 appendLine()
@@ -3198,7 +3354,7 @@ class MapFragment : Fragment() {
         // Track & nav info
         val trackPts = TrackingService.trackPoints.size
         val trackKm = "%.2f км".format(TrackingService.trackLengthM / 1000)
-        val navStatus = if (navActive) "Активна → КП ${activeWpIndex + 1}/${waypoints.size}" else "Не активна"
+        val navStatus = if (navActive) "Активна → WP${activeWpIndex + 1}/${waypoints.size}" else "Не активна"
         val routeName = prefs.getString(PREF_ROUTE_NAME, null) ?: "—"
 
         val msg = buildString {
@@ -3214,7 +3370,7 @@ class MapFragment : Fragment() {
             appendLine()
             appendLine("🧭 Навигация: $navStatus")
             appendLine("Маршрут: $routeName")
-            appendLine("КП загружено: ${waypoints.size}")
+            appendLine("WP загружено: ${waypoints.size}")
             appendLine()
             appendLine("📏 Трек: $trackPts точек ($trackKm)")
         }
@@ -3238,7 +3394,7 @@ class MapFragment : Fragment() {
                 activeWpIndex = nearest
                 context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
-                Toast.makeText(context, "Старт с ближайшей КП ${waypoints[nearest].index}: ${waypoints[nearest].name}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Старт с ближайшей WP ${waypoints[nearest].index}: ${waypoints[nearest].name}", Toast.LENGTH_SHORT).show()
             }
         }
         wasInApproachRadius = false
@@ -3270,17 +3426,106 @@ class MapFragment : Fragment() {
         updateWaypointNavBar()
     }
 
+    /** Returns a copy of current waypoints list for use in Settings */
+    fun getWaypointsCopy(): List<Waypoint> = waypoints.toList()
+
+    /** Zoom camera to a specific waypoint */
+    fun zoomToWaypoint(index: Int) {
+        val wp = waypoints.getOrNull(index) ?: return
+        zoomToCoords(wp.lat, wp.lon)
+    }
+
+    /** Zoom camera to coordinates */
+    fun zoomToCoords(lat: Double, lon: Double) {
+        mapboxMap?.animateCamera(
+            com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngZoom(
+                LatLng(lat, lon), 16.0
+            ), 500
+        )
+    }
+
+    /** Remove a user marker by index */
+    fun removeUserMarker(index: Int) {
+        if (index < 0 || index >= userMarkers.size) return
+        userMarkers.removeAt(index)
+        updateUserMarkersOnMap()
+        saveUserPoints()
+    }
+
+    /** Start navigation to a specific waypoint in the loaded route */
+    fun navigateToWaypoint(index: Int) {
+        if (index < 0 || index >= waypoints.size) return
+        activeWpIndex = index
+        navActive = true
+        wasInApproachRadius = false
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_NAV_ACTIVE, true)
+            ?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)
+            ?.apply()
+        updateNavLine()
+        updateWaypointNavBar()
+        val wp = waypoints[index]
+        Toast.makeText(context, "Навигация к: ${wp.name}", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Remove a waypoint by index, re-index remaining */
+    fun removeWaypoint(index: Int) {
+        if (index < 0 || index >= waypoints.size) return
+        waypoints.removeAt(index)
+        // Re-index
+        for (i in waypoints.indices) {
+            waypoints[i] = waypoints[i].copy(index = i + 1)
+        }
+        if (activeWpIndex >= waypoints.size) activeWpIndex = maxOf(0, waypoints.size - 1)
+        wpBitmapCache.clear()
+        updateWaypointsOnMap()
+        updateRouteLineOnMap()
+        updateRadiusCircles()
+        updateNavLine()
+        updateWaypointNavBar()
+        saveWaypointsToPrefs()
+    }
+
+    /** Update a waypoint at index with new data */
+    fun updateWaypoint(index: Int, newWp: Waypoint) {
+        if (index < 0 || index >= waypoints.size) return
+        waypoints[index] = newWp.copy(index = index + 1)
+        wpBitmapCache.clear()
+        updateWaypointsOnMap()
+        updateRouteLineOnMap()
+        updateRadiusCircles()
+        saveWaypointsToPrefs()
+    }
+
+    /** Open edit dialog for a waypoint — callable from SettingsFragment */
+    fun showEditWpDialogForIndex(index: Int) {
+        if (index < 0 || index >= waypoints.size) return
+        showEnhancedEditWpDialog(index)
+    }
+
     fun updateWaypointNavBar() {
         val b = _binding ?: return
-        val show = navActive && waypoints.isNotEmpty()
-        b.waypointNavBar.visibility = if (show) View.VISIBLE else View.GONE
-        if (show) {
+        val hasWp = waypoints.isNotEmpty()
+        // Show nav bar when waypoints loaded (for GO/STOP), not only when navActive
+        b.waypointNavBar.visibility = if (hasWp) View.VISIBLE else View.GONE
+        if (hasWp) {
             val routeName = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.getString(PREF_ROUTE_NAME, "") ?: ""
-            val taken = activeWpIndex  // number of КП already passed
             val header = routeName.ifBlank { "Маршрут" }
-            b.txtWpNavInfo.text = "$header  $taken/${waypoints.size}"
+            val gps = lastKnownGpsPoint
+            val remainStr = if (gps != null && navActive) {
+                val remKm = calcRemainingKm(gps)
+                if (remKm < 10) " • %.1fкм".format(remKm) else " • ${remKm.toInt()}км"
+            } else ""
+            if (navActive) {
+                b.txtWpNavInfo.text = "$header  ${activeWpIndex + 1}/${waypoints.size}$remainStr"
+            } else {
+                b.txtWpNavInfo.text = "$header  ${waypoints.size} WP"
+            }
         }
+        // GO/STOP in top bar — always visible, color indicates state
+        b.btnWidgetGo.setTextColor(if (navActive) 0xFF00E676.toInt() else 0xFF666666.toInt())
+        b.btnWidgetStop.setTextColor(if (navActive) 0xFFFF4444.toInt() else 0xFF666666.toInt())
     }
 
     private fun saveWaypointsToPrefs() {
@@ -3296,7 +3541,10 @@ class MapFragment : Fragment() {
                 .put("lat", wp.lat)
                 .put("lon", wp.lon)
                 .put("index", wp.index)
-                .put("description", wp.description))
+                .put("description", wp.description)
+                .put("color", wp.color)
+                .put("symbol", wp.symbol)
+                .put("proximity", wp.proximity))
         }
         prefs.edit()
             .putString(PREF_SAVED_WAYPOINTS_JSON, arr.toString())
@@ -3330,7 +3578,10 @@ class MapFragment : Fragment() {
                     lat = o.getDouble("lat"),
                     lon = o.getDouble("lon"),
                     index = o.optInt("index", i + 1),
-                    description = o.optString("description", "")
+                    description = o.optString("description", ""),
+                    color = o.optString("color", ""),
+                    symbol = o.optString("symbol", ""),
+                    proximity = o.optDouble("proximity", 0.0)
                 ))
             }
             if (restored.isNotEmpty()) {
@@ -3463,8 +3714,8 @@ class MapFragment : Fragment() {
                                     .tilt(tilt)
                                     .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
                                 if (targetZoom != null) builder.zoom(targetZoom)
-                                mapboxMap?.animateCamera(
-                                    CameraUpdateFactory.newCameraPosition(builder.build()), 500)
+                                mapboxMap?.easeCamera(
+                                    CameraUpdateFactory.newCameraPosition(builder.build()), 300)
                             }
                             FollowMode.FOLLOW_COURSE -> {
                                 val speedKmhCourse = loc.speed * 3.6
@@ -3472,14 +3723,28 @@ class MapFragment : Fragment() {
                                     .target(newPoint)
                                     .tilt(tilt)
                                     .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
-                                // Freeze bearing when stopped — prevents map spinning from GPS noise
-                                // 1 km/h threshold: winch crawling can be ~1 km/h
-                                if (speedKmhCourse > 1.0) {
-                                    builder.bearing(bearing.toDouble())
+                                // Bearing freeze with hysteresis:
+                                // Freeze at < 1 km/h (0.3 m/s), unfreeze at > 3 km/h (0.8 m/s)
+                                // Prevents map spinning from GPS noise on stops
+                                if (bearingFrozen) {
+                                    if (speedKmhCourse > 3.0) {
+                                        bearingFrozen = false
+                                        lastValidBearing = bearing
+                                        builder.bearing(bearing.toDouble())
+                                    } else {
+                                        builder.bearing(lastValidBearing.toDouble())
+                                    }
+                                } else {
+                                    if (speedKmhCourse < 1.0) {
+                                        bearingFrozen = true
+                                    } else {
+                                        lastValidBearing = bearing
+                                        builder.bearing(bearing.toDouble())
+                                    }
                                 }
                                 if (targetZoom != null) builder.zoom(targetZoom)
-                                mapboxMap?.animateCamera(
-                                    CameraUpdateFactory.newCameraPosition(builder.build()), 500)
+                                mapboxMap?.easeCamera(
+                                    CameraUpdateFactory.newCameraPosition(builder.build()), 300)
                             }
                             FollowMode.FREE -> { /* user controls camera */ }
                         }
@@ -3497,7 +3762,7 @@ class MapFragment : Fragment() {
                         val wp = waypoints[activeWpIndex]
                         val distM = distanceM(newPoint, LatLng(wp.lat, wp.lon))
                         b.widgetNextCp.text = if (distM < 1000) "${distM.toInt()}м" else String.format("%.1f", distM / 1000)
-                        b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "КП ${activeWpIndex + 1}"
+                        b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "WP${activeWpIndex + 1}"
                         val remKm = calcRemainingKm(newPoint)
                         b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
                         // Auto-advance when within approach radius (only during active navigation)
@@ -3620,6 +3885,12 @@ class MapFragment : Fragment() {
             return
         }
         val km = calcTrackKm(savedPoints)
+        // Don't offer to resume a track with essentially 0 distance
+        if (km < 0.05) {
+            tmpFile.delete()
+            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+            return
+        }
         androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Незаконченная запись")
             .setMessage("Найден трек: ${savedPoints.size} точек, ${String.format("%.1f", km)} км\n\nЧто сделать?")
@@ -3637,8 +3908,8 @@ class MapFragment : Fragment() {
                 updateTrackOnMap()
             }
             .setNeutralButton("Сохранить") { _, _ -> saveTrackToFile(savedPoints) }
-            .setNegativeButton("Удалить") { _, _ -> clearTmpTrack() }
-            .setCancelable(false)
+            .setNegativeButton("Позже", null)
+            .setCancelable(true)
             .show()
     }
 
@@ -3849,18 +4120,22 @@ class MapFragment : Fragment() {
     }
 
     fun applyFollowMode() {
-        val lc = mapboxMap?.locationComponent ?: return
-        try {
-            // Always NONE — we drive the camera manually in the GPS callback to avoid cursor jumps
-            lc.cameraMode = CameraMode.NONE
-            lc.renderMode = RenderMode.GPS
-        } catch (_: Exception) {
-            // LocationComponent not yet activated — will be applied after enableLocation()
-            return
+        // Show/hide crosshair based on mode (before locationComponent check to work at startup)
+        val crosshairEnabled = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getBoolean(PREF_CROSSHAIR_ENABLED, true) ?: true
+        if (followMode == FollowMode.FREE && crosshairEnabled) {
+            _binding?.crosshairView?.visibility = View.VISIBLE
+        } else {
+            _binding?.crosshairView?.visibility = View.GONE
         }
-        userDragged = false  // reset drag flag when follow mode changes
+        userDragged = false
         recenterRunnable?.let { recenterHandler.removeCallbacks(it) }
         updateCompassIndicator()
+        val lc = mapboxMap?.locationComponent ?: return
+        try {
+            lc.cameraMode = CameraMode.NONE
+            lc.renderMode = RenderMode.GPS
+        } catch (_: Exception) {}
     }
 
     private fun updateCompassIndicator() {
@@ -4000,11 +4275,13 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Show crosshair and auto-hide after 3 seconds of no camera movement */
+    /** Show crosshair — permanent in FREE mode, auto-hide in follow modes */
     private fun showCrosshairTemporarily() {
         _binding?.crosshairView?.visibility = View.VISIBLE
         // Cancel previous hide
         crosshairHideRunnable?.let { crosshairHandler.removeCallbacks(it) }
+        // In FREE mode — keep crosshair visible permanently (used for placing points)
+        if (followMode == FollowMode.FREE) return
         crosshairHideRunnable = Runnable {
             _binding?.crosshairView?.visibility = View.GONE
             _binding?.coordsLabel?.visibility = View.GONE
@@ -4276,7 +4553,7 @@ class MapFragment : Fragment() {
                     JSONObject(URL(UpdateManager.UPDATE_URL).readText())
                 }
                 val latestVersion = json.getString("version")
-                val apkUrl = json.getString("url")
+                val apkUrl = json.optString("apkUrl", json.optString("url", ""))
                 val changelog = json.optString("changelog", null)
                 val hasUpdate = UpdateManager.isNewer(latestVersion, current)
                 onResult("v$latestVersion", "v$current", hasUpdate, apkUrl, changelog)
@@ -4309,7 +4586,7 @@ class MapFragment : Fragment() {
                         syncWaypoints.add(Waypoint(
                             lat = w.getDouble("lat"),
                             lon = w.getDouble("lng"),
-                            name = w.optString("name", "КП ${i + 1}"),
+                            name = w.optString("name", "WP${i + 1}"),
                             index = i,
                             description = w.optString("desc", "")
                         ))
@@ -4363,14 +4640,14 @@ class MapFragment : Fragment() {
                     val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (syncWaypoints.isNotEmpty()) {
                         loadWaypoints(syncWaypoints)
-                        prefs.edit().putString(PREF_LOADED_WP_NAME, "КП: синхронизация (${syncWaypoints.size})").apply()
+                        prefs.edit().putString(PREF_LOADED_WP_NAME, "WP: синхронизация (${syncWaypoints.size})").apply()
                     }
                     if (syncTrackPts.isNotEmpty()) {
                         loadTrack(syncTrackPts)
                         prefs.edit().putString(PREF_LOADED_TRACK_NAME, "Трек: синхронизация (${syncTrackPts.size} точек)").apply()
                     }
                     val msg = buildString {
-                        if (syncWaypoints.isNotEmpty()) append("${syncWaypoints.size} КП")
+                        if (syncWaypoints.isNotEmpty()) append("${syncWaypoints.size} WP")
                         if (syncWaypoints.isNotEmpty() && syncTrackPts.isNotEmpty()) append(", ")
                         if (syncTrackPts.isNotEmpty()) append("трек (${syncTrackPts.size} точек)")
                         if (syncRoutesCount > 0 && syncWaypoints.isEmpty() && syncTrackPts.isEmpty()) append("$syncRoutesCount маршрутов")

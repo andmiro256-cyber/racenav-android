@@ -9,7 +9,9 @@ data class Waypoint(
     val lon: Double,
     val index: Int,
     val description: String = "",
-    val proximity: Double = 0.0  // radius in meters, 0 = use global setting
+    val proximity: Double = 0.0,  // radius in meters, 0 = use global setting
+    val color: String = "",       // hex color e.g. "#FF0000", empty = default
+    val symbol: String = ""       // symbol name: circle, triangle, flag, star, cross, square, diamond, pin
 )
 
 data class GpxResult(
@@ -28,9 +30,9 @@ object GpxParser {
         parser.setInput(inputStream, null)
 
         var eventType = parser.eventType
-        var inWpt = false; var inRtept = false; var inTrkpt = false
+        var inWpt = false; var inRtept = false; var inTrkpt = false; var inExtensions = false
         var lat = 0.0; var lon = 0.0
-        var name = ""; var desc = ""; var proximity = 0.0
+        var name = ""; var desc = ""; var proximity = 0.0; var color = ""; var symbol = ""
 
         while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
             when (eventType) {
@@ -40,33 +42,37 @@ object GpxParser {
                             inWpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            name = ""; desc = ""; proximity = 0.0
+                            name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
                         "rtept" -> {
                             inRtept = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            name = ""; desc = ""; proximity = 0.0
+                            name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
                         "trkpt" -> {
                             inTrkpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                         }
+                        "extensions" -> if (inWpt || inRtept) inExtensions = true
                         "name" -> if (inWpt || inRtept) name = parser.nextText()
                         "desc", "cmt" -> if ((inWpt || inRtept) && desc.isEmpty()) desc = parser.nextText()
                         "proximity" -> if (inWpt || inRtept) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
+                        "sym" -> if (inWpt || inRtept) symbol = parser.nextText()
+                        "color" -> if ((inWpt || inRtept) && inExtensions) color = parser.nextText()
                     }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
                     when (parser.name) {
+                        "extensions" -> inExtensions = false
                         "wpt" -> {
                             if (lat != 0.0 || lon != 0.0) {
                                 wptList.add(Waypoint(
                                     name = name.ifBlank { "КП ${wptList.size + 1}" },
                                     lat = lat, lon = lon,
                                     index = wptList.size + 1, description = desc,
-                                    proximity = proximity
+                                    proximity = proximity, color = color, symbol = symbol
                                 ))
                             }
                             inWpt = false
@@ -77,7 +83,7 @@ object GpxParser {
                                     name = name.ifBlank { "КП ${rteptList.size + 1}" },
                                     lat = lat, lon = lon,
                                     index = rteptList.size + 1, description = desc,
-                                    proximity = proximity
+                                    proximity = proximity, color = color, symbol = symbol
                                 ))
                             }
                             inRtept = false
@@ -103,9 +109,9 @@ object GpxParser {
         parser.setInput(inputStream, null)
 
         var eventType = parser.eventType
-        var inWpt = false
+        var inWpt = false; var inExtensions = false
         var lat = 0.0; var lon = 0.0
-        var name = ""; var desc = ""; var proximity = 0.0
+        var name = ""; var desc = ""; var proximity = 0.0; var color = ""; var symbol = ""
 
         while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
             when (eventType) {
@@ -115,14 +121,19 @@ object GpxParser {
                             inWpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
-                            name = ""; desc = ""; proximity = 0.0
+                            name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
+                        "extensions" -> if (inWpt) inExtensions = true
                         "name" -> if (inWpt) name = parser.nextText()
                         "desc", "cmt" -> if (inWpt && desc.isEmpty()) desc = parser.nextText()
                         "proximity" -> if (inWpt) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
+                        "sym" -> if (inWpt) symbol = parser.nextText()
+                        "color" -> if (inWpt && inExtensions) color = parser.nextText()
                     }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
+                    if (parser.name == "extensions") inExtensions = false
+                    if (parser.name == "trkpt") { inWpt = false }
                     if (parser.name == "wpt" || parser.name == "rtept") {
                         if (lat != 0.0 || lon != 0.0) {
                             waypoints.add(Waypoint(
@@ -130,7 +141,7 @@ object GpxParser {
                                 lat = lat, lon = lon,
                                 index = waypoints.size + 1,
                                 description = desc,
-                                proximity = proximity
+                                proximity = proximity, color = color, symbol = symbol
                             ))
                         }
                         inWpt = false
@@ -212,7 +223,14 @@ object GpxParser {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
             appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
             appendLine("  <metadata><name>${esc(name)}</name></metadata>")
-            for (wp in waypoints) appendLine("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name></wpt>")
+            for (wp in waypoints) {
+                append("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name>")
+                if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
+                if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
+                if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
+                if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                appendLine("</wpt>")
+            }
             append("</gpx>")
         }
     }

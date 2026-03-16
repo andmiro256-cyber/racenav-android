@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Pole -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M5,2h2v20h-2z" />
+    <!-- Flag -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M7,3l12,5l-12,5z" />
+</vector>

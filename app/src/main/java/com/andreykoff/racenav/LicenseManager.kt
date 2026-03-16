@@ -212,6 +212,7 @@ object LicenseManager {
     /** Check license from server. Call from background thread. */
     fun checkLicenseFromServer(context: Context): Boolean {
         val deviceId = getOrCreateDeviceId(context)
+        android.util.Log.d("LicenseManager", "Checking license for deviceId: $deviceId")
         try {
             val url = java.net.URL("$LICENSE_API/$deviceId")
             val conn = url.openConnection() as java.net.HttpURLConnection
@@ -219,6 +220,7 @@ object LicenseManager {
             conn.readTimeout = 10_000
             val response = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
+            android.util.Log.d("LicenseManager", "Server response: $response")
 
             val json = org.json.JSONObject(response)
             val prefs = getPrefs(context)
