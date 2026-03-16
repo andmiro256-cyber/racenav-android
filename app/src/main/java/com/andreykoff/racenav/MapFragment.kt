@@ -2892,16 +2892,19 @@ class MapFragment : Fragment() {
         }
         val routeBtnLp = android.widget.LinearLayout.LayoutParams(0,
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        routeBtnRow.addView(android.widget.Button(ctx).apply {
-            text = "👁 Скрыть линию"
+        val routeLineVisible = prefs.getBoolean(PREF_ROUTE_LINE_VISIBLE, true)
+        val btnToggleLine = android.widget.Button(ctx).apply {
+            text = if (routeLineVisible) "👁 Скрыть линию" else "👁 Показать линию"
             textSize = 12f; isAllCaps = false
             layoutParams = routeBtnLp
-            setOnClickListener {
-                setRouteLineVisible(false)
-                dialog.dismiss()
-                Toast.makeText(ctx, "Линия маршрута скрыта", Toast.LENGTH_SHORT).show()
-            }
-        })
+        }
+        btnToggleLine.setOnClickListener {
+            val nowVisible = prefs.getBoolean(PREF_ROUTE_LINE_VISIBLE, true)
+            setRouteLineVisible(!nowVisible)
+            btnToggleLine.text = if (!nowVisible) "👁 Скрыть линию" else "👁 Показать линию"
+            Toast.makeText(ctx, if (!nowVisible) "Линия показана" else "Линия скрыта", Toast.LENGTH_SHORT).show()
+        }
+        routeBtnRow.addView(btnToggleLine)
         routeBtnRow.addView(android.widget.Button(ctx).apply {
             text = "🗑 Очистить маршрут"
             textSize = 12f; isAllCaps = false
