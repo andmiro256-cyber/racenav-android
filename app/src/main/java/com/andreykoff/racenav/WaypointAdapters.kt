@@ -160,7 +160,7 @@ class RouteEditorAdapter(
             holder.distText.visibility = View.GONE
         }
 
-        holder.itemView.setBackgroundColor(if (position % 2 == 0) Color.parseColor("#1A1A1A") else Color.TRANSPARENT)
+        holder.itemView.setBackgroundColor(if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT)
 
         holder.dragHandle.setOnTouchListener { _, event ->
             if (event.actionMasked == MotionEvent.ACTION_DOWN) dragStartListener?.invoke(holder)

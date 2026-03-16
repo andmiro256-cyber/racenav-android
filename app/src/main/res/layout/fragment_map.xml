@@ -86,8 +86,8 @@
             android:layout_width="1dp"
             android:layout_height="24dp"
             android:background="#444444"
-            android:layout_marginStart="1dp"
-            android:layout_marginEnd="1dp" />
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp" />
 
         <!-- STOP navigation -->
         <TextView
@@ -114,7 +114,6 @@
             android:gravity="center"
             android:text="GO"
             android:textSize="16sp"
-            android:textStyle="bold"
             android:fontFamily="sans-serif-black"
             android:textColor="#666666"
             android:background="?attr/selectableItemBackgroundBorderless" />
@@ -123,8 +122,8 @@
             android:layout_width="1dp"
             android:layout_height="24dp"
             android:background="#444444"
-            android:layout_marginStart="1dp"
-            android:layout_marginEnd="1dp" />
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp" />
 
         <!-- Layers -->
         <ImageButton
@@ -184,8 +183,8 @@
             android:layout_width="1dp"
             android:layout_height="24dp"
             android:background="#444444"
-            android:layout_marginStart="1dp"
-            android:layout_marginEnd="1dp" />
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp" />
 
         <!-- Settings -->
         <ImageButton

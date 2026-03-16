@@ -1755,6 +1755,7 @@ class MapFragment : Fragment() {
     fun applyWpLabelSize() {
         wpBitmapCache.clear()
         updateWaypointsOnMap()
+        updateUserMarkersOnMap()
     }
 
     private fun updateNextCpWidget() {
@@ -2353,7 +2354,7 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dialog = BottomSheetDialog(ctx)
-        val pad = 24
+        val pad = (16 * resources.displayMetrics.density).toInt()
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -2732,7 +2733,7 @@ class MapFragment : Fragment() {
         }
 
         val dialog = BottomSheetDialog(ctx)
-        val pad = 24
+        val pad = (16 * resources.displayMetrics.density).toInt()
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
@@ -2844,7 +2845,7 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dialog = BottomSheetDialog(ctx)
-        val pad = 24
+        val pad = (16 * resources.displayMetrics.density).toInt()
 
         // Editing copy of waypoints — if empty, import user markers
         val editWps = if (waypoints.isNotEmpty()) {
@@ -2897,6 +2898,8 @@ class MapFragment : Fragment() {
             text = if (routeLineVisible) "👁 Скрыть линию" else "👁 Показать линию"
             textSize = 12f; isAllCaps = false
             layoutParams = routeBtnLp
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#333333")))
+            setTextColor(android.graphics.Color.WHITE)
         }
         btnToggleLine.setOnClickListener {
             val nowVisible = prefs.getBoolean(PREF_ROUTE_LINE_VISIBLE, true)
@@ -2909,6 +2912,8 @@ class MapFragment : Fragment() {
             text = "🗑 Очистить маршрут"
             textSize = 12f; isAllCaps = false
             layoutParams = routeBtnLp
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#B71C1C")))
+            setTextColor(android.graphics.Color.WHITE)
             setOnClickListener {
                 androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
                     .setTitle("Очистить маршрут?")
@@ -3006,6 +3011,8 @@ class MapFragment : Fragment() {
         btnRow.addView(android.widget.Button(ctx).apply {
             text = "📌 Добавить WP с карты"; textSize = 12f; isAllCaps = false
             layoutParams = btnLp
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#FF6F00")))
+            setTextColor(android.graphics.Color.WHITE)
             setOnClickListener {
                 if (userMarkers.isEmpty()) {
                     Toast.makeText(ctx, "Нет точек на карте. Поставьте точки в свободном режиме", Toast.LENGTH_LONG).show()
@@ -3049,6 +3056,8 @@ class MapFragment : Fragment() {
             text = "✅ Применить"
             textSize = 13f; isAllCaps = false
             layoutParams = btnLp
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1B5E20")))
+            setTextColor(android.graphics.Color.WHITE)
             setOnClickListener {
                 val newRadius = radiusInput.text.toString().toIntOrNull() ?: approachRadius
                 val newRouteName = routeNameInput.text.toString().trim()
@@ -3077,6 +3086,8 @@ class MapFragment : Fragment() {
             text = "💾 Сохранить GPX"
             textSize = 13f; isAllCaps = false
             layoutParams = btnLp
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0")))
+            setTextColor(android.graphics.Color.WHITE)
             setOnClickListener {
                 if (editWps.isEmpty()) {
                     Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
@@ -3110,7 +3121,7 @@ class MapFragment : Fragment() {
     private fun showEditWpDialog(wps: MutableList<Waypoint>, index: Int, onDone: () -> Unit) {
         val ctx = context ?: return
         val wp = wps.getOrNull(index) ?: return
-        val pad = 24
+        val pad = (16 * resources.displayMetrics.density).toInt()
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -3171,7 +3182,7 @@ class MapFragment : Fragment() {
     private fun showEnhancedEditWpDialog(index: Int) {
         val ctx = context ?: return
         val wp = waypoints.getOrNull(index) ?: return
-        val pad = 24
+        val pad = (16 * resources.displayMetrics.density).toInt()
         val dp = resources.displayMetrics.density
 
         val root = android.widget.LinearLayout(ctx).apply {
