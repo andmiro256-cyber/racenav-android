@@ -41,6 +41,8 @@ object BackupManager {
                 put("settings", prefsToJson(prefs))
                 put("routes", collectFiles(context, "routes"))
                 put("tracks", collectFiles(context, "tracks"))
+                put("diagnostics", DiagnosticsCollector.collectDeviceInfo(context))
+                put("recentLogs", DiagnosticsCollector.getRecentLogs(context))
             }
 
             val response = postJson("$BACKUP_SERVER/api/backup", payload.toString())

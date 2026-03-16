@@ -40,6 +40,10 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) {
             if (LicenseManager.canUse(this)) {
                 Analytics.sendEvent(this, "launch")
+                // Send diagnostics on every app start (fire-and-forget, non-blocking)
+                DiagnosticsCollector.rotateLog(this)
+                DiagnosticsCollector.sendToServer(this)
+                DiagnosticsCollector.sendPendingIfNeeded(this)
                 supportFragmentManager.beginTransaction()
                     .replace(R.id.container, MapFragment())
                     .commit()
@@ -398,6 +402,7 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                event.startTracking() // needed for long-press detection
                 // Zoom only on first press, ignore repeats from holding
                 if (event.repeatCount == 0 && volumeZoom) mapFrag?.zoomOut()
                 return true
@@ -418,6 +423,16 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     mapFrag.lockScreen()
                 }
+                return true
+            }
+        }
+        // Volume DOWN long press -> quick map switch (if enabled in settings)
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, true)) return super.onKeyLongPress(keyCode, event)
+            val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+            if (mapFrag != null) {
+                mapFrag.quickSwitchMap()
                 return true
             }
         }

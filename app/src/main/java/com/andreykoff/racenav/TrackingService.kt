@@ -7,6 +7,14 @@ import android.location.*
 import android.os.*
 import android.util.Log
 import kotlin.math.*
+import kotlinx.coroutines.*
+
+data class LocationUpdate(
+    val lat: Double, val lon: Double,
+    val speed: Float, val bearing: Float, val altitude: Double,
+    val hasSpeed: Boolean, val hasAltitude: Boolean,
+    val accuracy: Float = 0f
+)
 
 class TrackingService : Service() {
 
@@ -23,6 +31,8 @@ class TrackingService : Service() {
         const val EXTRA_ALTITUDE = "altitude"
         const val EXTRA_HAS_SPEED    = "has_speed"
         const val EXTRA_HAS_ALTITUDE = "has_altitude"
+
+        val locationFlow = kotlinx.coroutines.flow.MutableStateFlow<LocationUpdate?>(null)
 
         // Данные трека — читаются из MapFragment
         val trackPoints   = mutableListOf<Pair<Double, Double>>()
@@ -73,6 +83,12 @@ class TrackingService : Service() {
             putExtra(EXTRA_HAS_SPEED,    loc.hasSpeed())
             putExtra(EXTRA_HAS_ALTITUDE, loc.hasAltitude())
         })
+
+        // StateFlow update (works even when broadcast is blocked, e.g. Vivo/Android 16)
+        locationFlow.value = LocationUpdate(
+            loc.latitude, loc.longitude, loc.speed, loc.bearing, loc.altitude,
+            loc.hasSpeed(), loc.hasAltitude(), loc.accuracy
+        )
     }
 
     private fun isGooglePlayServicesAvailable(): Boolean {
@@ -149,7 +165,7 @@ class TrackingService : Service() {
         // Acquire WakeLock to prevent GPS stopping in deep sleep
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "RaceNav::GPS")
-        wakeLock?.acquire()
+        wakeLock?.acquire(30 * 60 * 1000L) // 30 min timeout, re-acquired on next location update
 
         val intervalSec = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .getInt(MapFragment.PREF_TRACK_INTERVAL, 1).coerceIn(1, 60)
@@ -190,10 +206,14 @@ class TrackingService : Service() {
     /** Save current track to temp file (survives app restart) */
     private fun autoSaveTrack() {
         if (trackPoints.isEmpty()) return
-        try {
-            val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
-            file.writeText(GpxParser.writeGpx(trackPoints, "Текущий трек"))
-        } catch (_: Exception) {}
+        val pointsCopy = trackPoints.toList()
+        val dir = filesDir
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val file = java.io.File(dir, MapFragment.TRACK_TMP_FILENAME)
+                file.writeText(GpxParser.writeGpx(pointsCopy, "Текущий трек"))
+            } catch (_: Exception) {}
+        }
     }
 
     private fun updateNotification() {

@@ -109,6 +109,7 @@ object TileDownloadManager {
             } catch (e: Exception) {
                 error = e.message
                 Log.e("TileDownload", "Download error", e)
+                try { DiagnosticsCollector.logEvent(context, "DL error: ${currentLayerName} - ${e.message}") } catch (_: Exception) {}
             } finally {
                 isDownloading.set(false)
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -128,6 +129,7 @@ object TileDownloadManager {
     fun stopDownload() {
         isDownloading.set(false)
         job?.cancel()
+        client.dispatcher.cancelAll()
     }
 
     fun getProgress(): DownloadProgress {
@@ -180,6 +182,9 @@ object TileDownloadManager {
         }
         Log.d("TileDownload", "downloadLayerSync: ${tiles.size} tiles for ${layer.layerKey}")
 
+        // Compile insert statement once (reused across threads with synchronization)
+        val stmt = db.compileStatement("INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?)")
+
         // Download tiles using thread pool
         val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
         val latch = java.util.concurrent.CountDownLatch(tiles.size)
@@ -195,23 +200,23 @@ object TileDownloadManager {
                         .header("User-Agent", "RaceNav/2.1 Android")
                         .build()
                     val response = client.newCall(request).execute()
-                    if (response.isSuccessful) {
-                        val bytes = response.body?.bytes()
-                        if (bytes != null && bytes.isNotEmpty()) {
-                            val tmsY = (1 shl z) - 1 - y
-                            synchronized(db) {
-                                val stmt = db.compileStatement("INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?)")
-                                stmt.bindLong(1, z.toLong())
-                                stmt.bindLong(2, x.toLong())
-                                stmt.bindLong(3, tmsY.toLong())
-                                stmt.bindBlob(4, bytes)
-                                stmt.executeInsert()
-                                stmt.close()
+                    response.use { resp ->
+                        if (resp.isSuccessful) {
+                            val bytes = resp.body?.bytes()
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                val tmsY = (1 shl z) - 1 - y
+                                synchronized(db) {
+                                    stmt.bindLong(1, z.toLong())
+                                    stmt.bindLong(2, x.toLong())
+                                    stmt.bindLong(3, tmsY.toLong())
+                                    stmt.bindBlob(4, bytes)
+                                    stmt.executeInsert()
+                                    stmt.clearBindings()
+                                }
+                                bytesTotal.addAndGet(bytes.size.toLong())
                             }
-                            bytesTotal.addAndGet(bytes.size.toLong())
                         }
                     }
-                    response.close()
                 } catch (e: Exception) {
                     Log.w("TileDownload", "Tile fail: $e")
                 } finally {
@@ -225,16 +230,17 @@ object TileDownloadManager {
         // Wait for ALL tiles to complete
         latch.await()
         executor.shutdown()
+        stmt.close()
         db.close()
         Log.d("TileDownload", "downloadLayerSync DONE: ${layer.layerKey}, file size=${dbFile.length()}")
     }
 
-    private var lastNotifyTime = 0L
+    private val lastNotifyTime = AtomicLong(0L)
 
     private fun notifyProgressThrottled() {
         val now = System.currentTimeMillis()
-        if (now - lastNotifyTime < 500) return
-        lastNotifyTime = now
+        if (now - lastNotifyTime.get() < 500) return
+        lastNotifyTime.set(now)
         notifyProgress()
     }
 

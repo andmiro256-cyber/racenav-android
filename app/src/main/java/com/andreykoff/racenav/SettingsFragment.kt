@@ -108,6 +108,8 @@ class SettingsFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        DiagnosticsCollector.logEvent(requireContext(), "Settings opened")
+
         // Block touch events from passing through to map behind settings
         view.isClickable = true
         view.isFocusable = true
@@ -150,6 +152,13 @@ class SettingsFragment : Fragment() {
         switchVolLock.isChecked = prefs.getBoolean(MapFragment.PREF_VOLUME_LOCK, true)
         switchVolLock.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(MapFragment.PREF_VOLUME_LOCK, checked).apply()
+        }
+
+        // Volume- map switch toggle
+        val switchVolMapSwitch = view.findViewById<SwitchCompat>(R.id.switchVolumeMapSwitch)
+        switchVolMapSwitch.isChecked = prefs.getBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, true)
+        switchVolMapSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, checked).apply()
         }
 
         // Auto-recenter
@@ -241,7 +250,7 @@ class SettingsFragment : Fragment() {
                     }
                     override fun onStartTrackingTouch(sb: SeekBar) {}
                     override fun onStopTrackingTouch(sb: SeekBar) {
-                        Toast.makeText(context, "Масштаб применится после перезапуска", Toast.LENGTH_SHORT).show()
+                        parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyUiScale()
                     }
                 })
             })
@@ -453,6 +462,27 @@ class SettingsFragment : Fragment() {
 
         // Widgets — dynamic ordered list with enable toggles and up/down reorder buttons
         buildWidgetOrderUI(view, prefs)
+
+        // Widget font scale
+        val txtFontScale = view.findViewById<TextView>(R.id.txtWidgetFontScale)
+        var fontScale = prefs.getInt(MapFragment.PREF_WIDGET_FONT_SCALE, 5).coerceIn(1, 10)
+        txtFontScale?.text = fontScale.toString()
+        view.findViewById<android.widget.ImageButton>(R.id.btnWidgetFontMinus)?.setOnClickListener {
+            if (fontScale > 1) {
+                fontScale--
+                txtFontScale?.text = fontScale.toString()
+                prefs.edit().putInt(MapFragment.PREF_WIDGET_FONT_SCALE, fontScale).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetFontScale()
+            }
+        }
+        view.findViewById<android.widget.ImageButton>(R.id.btnWidgetFontPlus)?.setOnClickListener {
+            if (fontScale < 10) {
+                fontScale++
+                txtFontScale?.text = fontScale.toString()
+                prefs.edit().putInt(MapFragment.PREF_WIDGET_FONT_SCALE, fontScale).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetFontScale()
+            }
+        }
 
         // Build current map selector
         val mapContainer = view.findViewById<LinearLayout>(R.id.currentMapContainer)

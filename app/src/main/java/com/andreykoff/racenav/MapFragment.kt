@@ -26,7 +26,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.ImageViewCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.andreykoff.racenav.databinding.FragmentMapBinding
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.snackbar.Snackbar
@@ -87,39 +89,45 @@ class MapFragment : Fragment() {
     private val locationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != TrackingService.BROADCAST_LOCATION) return
-            val b = _binding ?: return
-            val lat      = intent.getDoubleExtra(TrackingService.EXTRA_LAT, 0.0)
-            val lon      = intent.getDoubleExtra(TrackingService.EXTRA_LON, 0.0)
-            val speed    = intent.getFloatExtra(TrackingService.EXTRA_SPEED, 0f)
-            val bearing  = intent.getFloatExtra(TrackingService.EXTRA_BEARING, 0f)
-            val altitude = intent.getDoubleExtra(TrackingService.EXTRA_ALTITUDE, 0.0)
-            val hasSpeed = intent.getBooleanExtra(TrackingService.EXTRA_HAS_SPEED, false)
-            val hasAlt   = intent.getBooleanExtra(TrackingService.EXTRA_HAS_ALTITUDE, false)
-
-            // Обновляем трек на карте
-            updateTrackOnMap()
-
-            // Обновляем виджеты
-            val speedKmh = (speed * 3.6).toInt()
-            b.widgetSpeed.text = if (speed > 0.5f) speedKmh.toString() else "--"
-            b.widgetBearing.text = "${bearing.toInt()}°"
-            b.widgetDirectionArrow.rotation = bearing
-            if (hasAlt) b.widgetAltitude.text = altitude.toInt().toString()
-
-            // Длина трека
-            val lenKm = TrackingService.trackLengthM / 1000.0
-            b.widgetTrackLen.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
-
-            // Tripmaster
-            Log.d("Tripmaster", "update: tripmasterLastPoint=$tripmasterLastPoint tripmasterDistM=$tripmasterDistM")
-            val gpsPoint = LatLng(lat, lon)
-            tripmasterLastPoint?.let { prev ->
-                tripmasterDistM += distanceM(prev, gpsPoint)
-            }
-            tripmasterLastPoint = gpsPoint
-            val tripKm = tripmasterDistM / 1000.0
-            b.widgetTripmaster.text = if (tripKm < 10) String.format("%.1f", tripKm) else tripKm.toInt().toString()
+            handleLocationUpdate(LocationUpdate(
+                lat = intent.getDoubleExtra(TrackingService.EXTRA_LAT, 0.0),
+                lon = intent.getDoubleExtra(TrackingService.EXTRA_LON, 0.0),
+                speed = intent.getFloatExtra(TrackingService.EXTRA_SPEED, 0f),
+                bearing = intent.getFloatExtra(TrackingService.EXTRA_BEARING, 0f),
+                altitude = intent.getDoubleExtra(TrackingService.EXTRA_ALTITUDE, 0.0),
+                hasSpeed = intent.getBooleanExtra(TrackingService.EXTRA_HAS_SPEED, false),
+                hasAltitude = intent.getBooleanExtra(TrackingService.EXTRA_HAS_ALTITUDE, false)
+            ))
         }
+    }
+
+    /** Shared handler for location updates from both BroadcastReceiver and StateFlow */
+    private fun handleLocationUpdate(update: LocationUpdate) {
+        val b = _binding ?: return
+
+        // Обновляем трек на карте
+        updateTrackOnMap()
+
+        // Обновляем виджеты
+        val speedKmh = (update.speed * 3.6).toInt()
+        b.widgetSpeed.text = if (update.speed > 0.5f) speedKmh.toString() else "--"
+        b.widgetBearing.text = "${update.bearing.toInt()}°"
+        b.widgetDirectionArrow.rotation = update.bearing
+        if (update.hasAltitude) b.widgetAltitude.text = update.altitude.toInt().toString()
+
+        // Длина трека
+        val lenKm = TrackingService.trackLengthM / 1000.0
+        b.widgetTrackLen.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
+
+        // Tripmaster
+        Log.d("Tripmaster", "update: tripmasterLastPoint=$tripmasterLastPoint tripmasterDistM=$tripmasterDistM")
+        val gpsPoint = LatLng(update.lat, update.lon)
+        tripmasterLastPoint?.let { prev ->
+            tripmasterDistM += distanceM(prev, gpsPoint)
+        }
+        tripmasterLastPoint = gpsPoint
+        val tripKm = tripmasterDistM / 1000.0
+        b.widgetTripmaster.text = if (tripKm < 10) String.format("%.1f", tripKm) else tripKm.toInt().toString()
     }
     // BroadcastReceiver для статуса синхронизации с сервером
     private val traccarStatusReceiver = object : BroadcastReceiver() {
@@ -209,6 +217,7 @@ class MapFragment : Fragment() {
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
         const val PREF_VOLUME_LOCK = "volume_lock_enabled"
+        const val PREF_VOLUME_MAP_SWITCH = "volume_map_switch_enabled"  // default true
         const val PREF_FULLSCREEN = "fullscreen_enabled"
         const val PREF_MARKER_COLOR = "marker_color"
         const val PREF_MARKER_SIZE = "marker_size"
@@ -256,6 +265,7 @@ class MapFragment : Fragment() {
 
         const val PREF_TILE_KEY = "tile_key"
         const val PREF_OVERLAY_KEY = "overlay_key"
+        const val PREF_WIDGET_FONT_SCALE = "widget_font_scale"  // 1-10, default 5
         const val PREF_WIDGET_SPEED = "widget_speed"
         const val PREF_WIDGET_BEARING = "widget_bearing"
         const val PREF_WIDGET_TRACKLEN = "widget_tracklen"
@@ -593,16 +603,23 @@ class MapFragment : Fragment() {
             insets
         }
 
-        // Adjust bottom bar padding for navigation bar (virtual buttons)
+        // Adjust bottom bar margin for navigation bar (only if virtual buttons present)
         ViewCompat.setOnApplyWindowInsetsListener(binding.bottomBar) { v, insets ->
-            val navBarHeight = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
-            v.setPadding(v.paddingLeft, v.paddingTop, v.paddingRight, navBarHeight)
+            val navBarInset = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            // Only add margin if system actually has visible navigation bar
+            // On devices with physical buttons, navBarInset should be 0
+            val params = v.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+            params.bottomMargin = navBarInset
+            v.layoutParams = params
+            android.util.Log.d("BottomBar", "navBarInset=$navBarInset")
             insets
         }
 
         // Apply fullscreen mode from prefs
         applyFullscreenPref()
         applyWidgetPrefs()
+        applyUiScale()
+        applyWidgetFontScale()
         applyTopBarPrefs()
         applyCrosshairPrefs()
 
@@ -1817,9 +1834,25 @@ class MapFragment : Fragment() {
         recenterHandler.postDelayed(recenterRunnable!!, delaySec * 1000L)
     }
 
-    fun lockScreen() {
+    fun quickSwitchMap() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val mapA = prefs.getString(PREF_MAP_SWITCH_A, "ggc500") ?: "ggc500"
+        val mapB = prefs.getString(PREF_MAP_SWITCH_B, "google") ?: "google"
+        val current = prefs.getString(PREF_TILE_KEY, "osm") ?: "osm"
+        val overlayKeys = prefs.getString(PREF_OVERLAY_KEY, "none") ?: "none"
+        val next = if (current == mapA) mapB else mapA
+        val nextName = tileSources[next]?.label ?: next
+        loadTileStyle(next, overlayKeys.split(",").toSet())
+        showHint("🗺 $nextName")
+    }
+
+        fun lockScreen() {
         isScreenLocked = true
-        _binding?.lockOverlay?.visibility = View.VISIBLE
+        _binding?.lockOverlay?.visibility = View.VISIBLE  // Always show overlay (blocks touches)
+        // Show lock icon only when bottom bar is hidden
+        val bottomBarVisible = _binding?.bottomBar?.visibility == View.VISIBLE
+        val lockIcon = _binding?.lockOverlay?.getChildAt(0) as? android.widget.ImageView
+        lockIcon?.visibility = if (bottomBarVisible) View.GONE else View.VISIBLE
         ImageViewCompat.setImageTintList(
             _binding!!.btnLock,
             android.content.res.ColorStateList.valueOf(Color.parseColor("#FFD600"))
@@ -3368,6 +3401,9 @@ class MapFragment : Fragment() {
                     val loc = result.lastLocation ?: return
                     // Skip very inaccurate fixes
                     if (loc.hasAccuracy() && loc.accuracy > 100f) return
+                    if (loc.hasAccuracy() && loc.accuracy > 30f) {
+                        context?.let { DiagnosticsCollector.logEvent(it, "GPS weak: acc=${loc.accuracy}m") }
+                    }
                     val newPoint = LatLng(loc.latitude, loc.longitude)
                     lastKnownGpsPoint = newPoint
                     val b = _binding ?: return
@@ -3375,6 +3411,7 @@ class MapFragment : Fragment() {
                     // Первый GPS-фикс — прыгаем на зум 12
                     if (!initialZoomDone) {
                         initialZoomDone = true
+                        context?.let { DiagnosticsCollector.logEvent(it, "GPS fix: acc=${loc.accuracy}m") }
                         mapboxMap?.animateCamera(
                             CameraUpdateFactory.newLatLngZoom(newPoint, 12.0), 1000
                         )
@@ -3828,12 +3865,11 @@ class MapFragment : Fragment() {
 
     private fun updateCompassIndicator() {
         val b = _binding ?: return
-        val color = when (followMode) {
-            FollowMode.FREE -> android.graphics.Color.WHITE
-            FollowMode.FOLLOW_NORTH -> android.graphics.Color.parseColor("#4CAF50")  // green
-            FollowMode.FOLLOW_COURSE -> android.graphics.Color.parseColor("#FF6F00")  // orange
+        b.compassView.mode = when (followMode) {
+            FollowMode.FREE -> CompassView.Mode.FREE
+            FollowMode.FOLLOW_NORTH -> CompassView.Mode.NORTH
+            FollowMode.FOLLOW_COURSE -> CompassView.Mode.COURSE
         }
-        b.compassView.setColorFilter(color)
     }
 
     fun applyCursorOffset() {
@@ -4099,6 +4135,9 @@ class MapFragment : Fragment() {
         val dialog = BottomSheetDialog(requireContext(), R.style.BottomSheetTheme)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_layers, null)
         dialog.setContentView(view)
+        // Show at 2/3 screen height
+        dialog.behavior.peekHeight = (resources.displayMetrics.heightPixels * 2 / 3)
+        dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
 
         // Online base layers (left column)
         val baseGroup = view.findViewById<RadioGroup>(R.id.layerRadioGroup)
@@ -4412,6 +4451,8 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onResume()
         applyFullscreenPref()
         applyWidgetPrefs()
+        applyUiScale()
+        applyWidgetFontScale()
         applyTopBarPrefs()
         // Регистрируем приёмник GPS от сервиса
         val filter = IntentFilter(TrackingService.BROADCAST_LOCATION)
@@ -4422,6 +4463,16 @@ class MapFragment : Fragment() {
         } else {
             context?.registerReceiver(locationReceiver, filter)
             context?.registerReceiver(traccarStatusReceiver, traccarFilter)
+        }
+        // StateFlow collector — works even when broadcast is blocked (Vivo/Android 16)
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                TrackingService.locationFlow.collect { update ->
+                    if (update != null) {
+                        handleLocationUpdate(update)
+                    }
+                }
+            }
         }
         // Update top bar server dot based on TraccarService running state
         _binding?.topBarServerDot?.visibility =
@@ -4493,6 +4544,17 @@ class MapFragment : Fragment() {
     // ==================== DOWNLOAD MODE ====================
 
     fun startDownloadMode() {
+        // Request storage permission on Android 9 and below
+        if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+            val ctx = context ?: return
+            if (androidx.core.content.ContextCompat.checkSelfPermission(ctx,
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != 
+                    android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 300)
+                Toast.makeText(ctx, "Разрешите доступ к хранилищу", Toast.LENGTH_LONG).show()
+                return
+            }
+        }
         isDownloadSelecting = true
         downloadFirstCorner = null
         downloadBounds = null
@@ -4903,6 +4965,10 @@ class MapFragment : Fragment() {
 
     private fun onDownloadComplete() {
         val b = _binding ?: return
+        context?.let { ctx ->
+            val task = TileDownloadManager.lastTask
+            DiagnosticsCollector.logEvent(ctx, "DL complete: ${task?.name ?: "?"}")
+        }
         b.dlProgressText.text = "✅ Готово!"
         b.dlProgress.visibility = View.GONE
         // Auto-hide after 3 seconds
@@ -4952,6 +5018,10 @@ class MapFragment : Fragment() {
                 Toast.makeText(context, "Загружено: $displayName", Toast.LENGTH_LONG).show()
             } else {
                 Log.w("TileDownload", "Base layer file missing or empty: ${baseLayer.outputPath}")
+                val ctx2 = context
+                if (ctx2 != null) {
+                    DiagnosticsCollector.logEvent(ctx2, "DL fail: base empty ${baseLayer.outputPath}")
+                }
                 Toast.makeText(context, "Ошибка: базовый слой не загружен", Toast.LENGTH_SHORT).show()
             }
         } else {
@@ -5065,6 +5135,78 @@ class MapFragment : Fragment() {
         dlg.show()
     }
 
+
+
+
+
+    /** Apply UI scale to top bar buttons and bottom bar height */
+    fun applyUiScale() {
+        val b = _binding ?: return
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val scale = prefs.getInt(PREF_UI_SCALE, 5).coerceIn(1, 10)
+        val dm = resources.displayMetrics
+        val density = dm.density
+
+        // Bottom bar height: scale 1=48dp, 5=68dp, 10=96dp
+        val barHeightDp = (scale * 5.3f + 42.7f)  // 1->48, 5->69.2, 10->95.7
+        val params = b.bottomBar.layoutParams
+        params.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        b.bottomBar.minimumHeight = (barHeightDp * density).toInt()
+        b.bottomBar.layoutParams = params
+
+        // Top bar button sizes: scale 1=32dp, 5=44dp, 10=60dp
+        val btnSizeDp = (scale * 3.1f + 28.9f)  // 1->32, 5->44.4, 10->59.9
+        val btnSizePx = (btnSizeDp * density).toInt()
+        val topButtons = listOf(
+            b.btnZoomIn, b.btnZoomOut, b.btnAddWaypoint, b.btnQuickAction,
+            b.compassView
+        )
+        for (btn in topButtons) {
+            btn?.layoutParams?.let { lp ->
+                lp.width = btnSizePx
+                lp.height = btnSizePx
+                btn.layoutParams = lp
+            }
+        }
+        val rightButtons = listOf(
+            b.btnLayers, b.btnRec, b.btnLock, b.btnMapSwitch, b.btnSettings
+        )
+        for (btn in rightButtons) {
+            btn?.layoutParams?.let { lp ->
+                lp.width = btnSizePx
+                lp.height = btnSizePx
+                btn.layoutParams = lp
+            }
+        }
+    }
+
+    /** Apply user-chosen font scale to bottom bar widgets */
+    fun applyWidgetFontScale() {
+        val b = _binding ?: return
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val scale = prefs.getInt(PREF_WIDGET_FONT_SCALE, 5).coerceIn(1, 10)
+        val dm = resources.displayMetrics
+        // Scale 1=12dp values/6dp labels, 5=20dp/10dp, 10=28dp/14dp
+        val valueSizePx = (scale * 2f + 10f) * dm.density
+        val labelSizePx = (scale * 1f + 5f) * dm.density
+        val bar = b.bottomBar
+        for (i in 0 until bar.childCount) {
+            val container = bar.getChildAt(i)
+            if (container is android.view.ViewGroup) {
+                for (j in 0 until container.childCount) {
+                    val child = container.getChildAt(j)
+                    if (child is android.widget.TextView) {
+                        if (child.typeface?.isBold == true) {
+                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, valueSizePx)
+                        } else {
+                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, labelSizePx)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         liveUsersPoller?.stop(); liveUsersPoller = null
@@ -5073,3 +5215,5 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onDestroy(); _binding = null
     }
 }
+
+
