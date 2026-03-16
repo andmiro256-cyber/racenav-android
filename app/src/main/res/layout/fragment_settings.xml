@@ -156,6 +156,41 @@
                     android:layout_height="wrap_content"
                     android:checked="true" />
             </LinearLayout>
+            <!-- Orientation -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Ориентация экрана"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:layout_marginBottom="8dp" />
+                <RadioGroup
+                    android:id="@+id/rgOrientation"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <RadioButton android:id="@+id/rbOrientAuto"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Авто (система)" android:textColor="#CCCCCC" android:textSize="14sp" />
+                    <RadioButton android:id="@+id/rbOrientPortrait"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Книжная" android:textColor="#CCCCCC" android:textSize="14sp" />
+                    <RadioButton android:id="@+id/rbOrientLandscape"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Альбомная" android:textColor="#CCCCCC" android:textSize="14sp" />
+                </RadioGroup>
+            </LinearLayout>
+
             <!-- Section: Marker -->
             <TextView
                 android:layout_width="wrap_content"

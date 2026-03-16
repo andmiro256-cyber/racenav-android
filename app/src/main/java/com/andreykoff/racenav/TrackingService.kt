@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.location.*
 import android.os.*
+import android.util.Log
 import kotlin.math.*
 
 class TrackingService : Service() {
@@ -31,37 +32,89 @@ class TrackingService : Service() {
     }
 
     private var locationManager: LocationManager? = null
+    private var fusedClient: com.google.android.gms.location.FusedLocationProviderClient? = null
+    private var fusedCallback: com.google.android.gms.location.LocationCallback? = null
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
-            val newPoint = Pair(loc.latitude, loc.longitude)
-
-            // Standstill filter (speed < 1 m/s)
-            val isMoving = !loc.hasSpeed() || loc.speed >= 1.0f
-            if (isMoving && (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0)) {
-                if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
-                trackPoints.add(newPoint)
-                updateNotification()
-
-                // Auto-save every 10 points to survive app restarts
-                if (trackPoints.size % 10 == 0) autoSaveTrack()
-            }
-
-            // Широковещание для MapFragment (обновление UI)
-            sendBroadcast(Intent(BROADCAST_LOCATION).apply {
-                putExtra(EXTRA_LAT,          loc.latitude)
-                putExtra(EXTRA_LON,          loc.longitude)
-                putExtra(EXTRA_SPEED,        loc.speed)
-                putExtra(EXTRA_BEARING,      loc.bearing)
-                putExtra(EXTRA_ALTITUDE,     loc.altitude)
-                putExtra(EXTRA_HAS_SPEED,    loc.hasSpeed())
-                putExtra(EXTRA_HAS_ALTITUDE, loc.hasAltitude())
-            })
+            handleLocation(loc)
         }
         @Deprecated("Deprecated in API 29")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
         override fun onProviderEnabled(provider: String) {}
         override fun onProviderDisabled(provider: String) {}
+    }
+
+    private fun handleLocation(loc: Location) {
+        // Skip points with very poor accuracy (> 50 meters)
+        if (loc.hasAccuracy() && loc.accuracy > 50f) return
+
+        val newPoint = Pair(loc.latitude, loc.longitude)
+
+        // Standstill filter (speed < 1 m/s)
+        val isMoving = !loc.hasSpeed() || loc.speed >= 1.0f
+        if (isMoving && (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > 2.0)) {
+            if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
+            trackPoints.add(newPoint)
+            updateNotification()
+
+            // Auto-save every 10 points to survive app restarts
+            if (trackPoints.size % 10 == 0) autoSaveTrack()
+        }
+
+        // Широковещание для MapFragment (обновление UI)
+        sendBroadcast(Intent(BROADCAST_LOCATION).apply {
+            putExtra(EXTRA_LAT,          loc.latitude)
+            putExtra(EXTRA_LON,          loc.longitude)
+            putExtra(EXTRA_SPEED,        loc.speed)
+            putExtra(EXTRA_BEARING,      loc.bearing)
+            putExtra(EXTRA_ALTITUDE,     loc.altitude)
+            putExtra(EXTRA_HAS_SPEED,    loc.hasSpeed())
+            putExtra(EXTRA_HAS_ALTITUDE, loc.hasAltitude())
+        })
+    }
+
+    private fun isGooglePlayServicesAvailable(): Boolean {
+        return try {
+            val status = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+                .isGooglePlayServicesAvailable(this)
+            status == com.google.android.gms.common.ConnectionResult.SUCCESS
+        } catch (_: Exception) { false }
+    }
+
+    private fun startFusedTracking(intervalMs: Long) {
+        fusedClient = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(this)
+        val request = com.google.android.gms.location.LocationRequest.Builder(
+            com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, intervalMs
+        ).setMinUpdateIntervalMillis(intervalMs / 2).build()
+
+        fusedCallback = object : com.google.android.gms.location.LocationCallback() {
+            override fun onLocationResult(result: com.google.android.gms.location.LocationResult) {
+                result.lastLocation?.let { handleLocation(it) }
+            }
+        }
+        try {
+            fusedClient?.requestLocationUpdates(request, fusedCallback!!, Looper.getMainLooper())
+        } catch (e: SecurityException) {
+            Log.w("TrackingService", "FusedLocation SecurityException, falling back to GPS_PROVIDER", e)
+            startGpsTracking(intervalMs)
+        }
+    }
+
+    private fun startGpsTracking(intervalMs: Long) {
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        try {
+            locationManager?.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                intervalMs,
+                0f,
+                locationListener,
+                Looper.getMainLooper()
+            )
+        } catch (e: SecurityException) {
+            stopSelf()
+        }
     }
 
     override fun onCreate() {
@@ -93,20 +146,21 @@ class TrackingService : Service() {
         NotificationHelper.trackingText = "⏺ Запись трека начата…"
         startForeground(NotificationHelper.NOTIF_ID, NotificationHelper.buildNotification(this))
 
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // Acquire WakeLock to prevent GPS stopping in deep sleep
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "RaceNav::GPS")
+        wakeLock?.acquire()
+
         val intervalSec = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .getInt(MapFragment.PREF_TRACK_INTERVAL, 1).coerceIn(1, 60)
         val intervalMs = intervalSec * 1000L
-        try {
-            locationManager?.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                intervalMs,
-                0f,
-                locationListener,
-                Looper.getMainLooper()
-            )
-        } catch (e: SecurityException) {
-            stopSelf()
+
+        if (isGooglePlayServicesAvailable()) {
+            startFusedTracking(intervalMs)
+            Log.d("TrackingService", "Using FusedLocation")
+        } else {
+            startGpsTracking(intervalMs)
+            Log.d("TrackingService", "Using GPS_PROVIDER (no Play Services)")
         }
     }
 
@@ -114,6 +168,13 @@ class TrackingService : Service() {
         isRunning = false
         NotificationHelper.trackingText = null
         autoSaveTrack()  // Final save before stopping
+
+        // Release WakeLock
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+
+        // Remove location listeners
+        fusedCallback?.let { fusedClient?.removeLocationUpdates(it) }
         locationManager?.removeUpdates(locationListener)
 
         // If TraccarService is still running, just update notification; otherwise remove

@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         applyKeepScreen()
+        applyOrientation()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -317,6 +318,16 @@ class MainActivity : AppCompatActivity() {
             .getBoolean(MapFragment.PREF_KEEP_SCREEN, true)
         if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    fun applyOrientation() {
+        val ori = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(MapFragment.PREF_ORIENTATION, 0)
+        requestedOrientation = when (ori) {
+            1 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            2 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
     }
 
     @Suppress("DEPRECATION")

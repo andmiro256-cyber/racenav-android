@@ -87,6 +87,7 @@ object TileDownloadManager {
         if (isDownloading.get()) return
 
         lastTask = task
+        skippedLayers.clear()
         isDownloading.set(true)
         downloaded.set(0)
         error = null
@@ -116,6 +117,12 @@ object TileDownloadManager {
                 }
             }
         }.start()
+    }
+
+    val skippedLayers = mutableSetOf<String>()
+
+    fun skipLayer(layerKey: String) {
+        skippedLayers.add(layerKey)
     }
 
     fun stopDownload() {
@@ -150,6 +157,10 @@ object TileDownloadManager {
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('bounds', ?)",
             arrayOf("${bounds.west},${bounds.south},${bounds.east},${bounds.north}"))
 
+        if (layer.layerKey in skippedLayers) {
+            Log.d("TileDownload", "Skipping layer: ${layer.layerKey}")
+            return
+        }
         val sourceInfo = tileSourcesRef?.get(layer.layerKey)
         Log.d("TileDownload", "downloadLayerSync: key='${layer.layerKey}', has sourceInfo=${sourceInfo != null}")
         if (sourceInfo == null) {

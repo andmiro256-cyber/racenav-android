@@ -61,11 +61,15 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_NAV_LINE_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_ROUTE_LINE_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.PREF_ROUTE_LINE_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_LABEL_SIZE
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.Spinner
 import android.widget.ImageButton
 import android.widget.ProgressBar
+import com.andreykoff.racenav.MapFragment.Companion.PREF_ORIENTATION
 import androidx.appcompat.app.AlertDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -183,6 +187,24 @@ class SettingsFragment : Fragment() {
         switchKeep.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_KEEP_SCREEN, checked).apply()
             (activity as? MainActivity)?.applyKeepScreen()
+        }
+
+        // Screen orientation spinner
+        val rgOrientation = view.findViewById<RadioGroup>(R.id.rgOrientation)
+        val savedOrientation = prefs.getInt(PREF_ORIENTATION, 0)
+        rgOrientation.check(when (savedOrientation) {
+            1 -> R.id.rbOrientPortrait
+            2 -> R.id.rbOrientLandscape
+            else -> R.id.rbOrientAuto
+        })
+        rgOrientation.setOnCheckedChangeListener { _, checkedId ->
+            val pos = when (checkedId) {
+                R.id.rbOrientPortrait -> 1
+                R.id.rbOrientLandscape -> 2
+                else -> 0
+            }
+            prefs.edit().putInt(PREF_ORIENTATION, pos).apply()
+            (activity as? MainActivity)?.applyOrientation()
         }
 
         // UI Scale slider (programmatic — after keep screen toggle)
@@ -2799,9 +2821,23 @@ class SettingsFragment : Fragment() {
                 }
                 (row as android.widget.LinearLayout).addView(shareBtn, row.childCount - 1)
 
-                row.findViewById<View>(R.id.btnRemoveOfflineMap).setOnClickListener {
-                    mapFrag?.removeOfflineMap(info.key)
-                    refreshOfflineMapsUI(view)
+                row.findViewById<View>(R.id.btnRemoveOfflineMap).apply {
+                    // Change minus icon to trash
+                    if (this is android.widget.ImageButton) {
+                        setImageResource(R.drawable.ic_delete)
+                        imageTintList = android.content.res.ColorStateList.valueOf(0xFFEF4444.toInt())
+                    }
+                    setOnClickListener {
+                        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                            .setTitle("Удалить карту")
+                            .setMessage("Удалить \"${info.name}\"?")
+                            .setPositiveButton("Удалить") { _, _ ->
+                                mapFrag?.removeOfflineMap(info.key)
+                                refreshOfflineMapsUI(view)
+                            }
+                            .setNegativeButton("Отмена", null)
+                            .show()
+                    }
                 }
                 container.addView(row)
             }

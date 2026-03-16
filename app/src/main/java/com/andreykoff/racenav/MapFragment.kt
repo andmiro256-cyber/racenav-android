@@ -223,6 +223,7 @@ class MapFragment : Fragment() {
         const val PREF_LAST_LON = "last_lon"
         const val PREF_LAST_BEARING = "last_bearing"
         const val PREF_KEEP_SCREEN = "keep_screen_on"
+        const val PREF_ORIENTATION = "screen_orientation" // 0=auto, 1=portrait, 2=landscape
         const val PREF_TRACK_INTERVAL = "track_interval_sec"  // seconds, default 1
         const val PREF_LOADED_TRACK_VISIBLE = "loaded_track_visible"
         const val PREF_LOADED_WP_VISIBLE = "loaded_wp_visible"
@@ -362,6 +363,11 @@ class MapFragment : Fragment() {
         const val USER_MARKER_ICON = "user-marker-icon"
 
         data class TileSourceInfo(val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
+
+        fun getRaceNavDir(ctx: android.content.Context, subfolder: String): java.io.File {
+            val base = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS)
+            return java.io.File(base, "RaceNav/$subfolder").also { it.mkdirs() }
+        }
     }
 
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
@@ -584,6 +590,13 @@ class MapFragment : Fragment() {
             val fs = prefs?.getBoolean(PREF_FULLSCREEN, false) ?: false
             val statusBarHeight = if (fs) 0 else insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             v.setPadding(v.paddingLeft, statusBarHeight, v.paddingRight, v.paddingBottom)
+            insets
+        }
+
+        // Adjust bottom bar padding for navigation bar (virtual buttons)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.bottomBar) { v, insets ->
+            val navBarHeight = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            v.setPadding(v.paddingLeft, v.paddingTop, v.paddingRight, navBarHeight)
             insets
         }
 
@@ -1722,7 +1735,10 @@ class MapFragment : Fragment() {
 
         binding.btnLock.setOnClickListener { lockScreen() }
 
-// Download indicator tap — show details dialog        binding.downloadIndicator.setOnClickListener {            showDownloadDetailsDialog()        }
+// Download indicator tap — show details dialog
+        binding.downloadIndicator.setOnClickListener {
+            showDownloadDetailsDialog()
+        }
         binding.btnSettings.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .add(R.id.container, SettingsFragment())
@@ -2539,8 +2555,7 @@ class MapFragment : Fragment() {
                         Waypoint(p.name, p.position.latitude, p.position.longitude, idx+1)
                     }
                     val gpx = GpxParser.writeWaypointsGpx(wps, "Точки")
-                    val dir = ctx.getExternalFilesDir("markers")
-                    dir?.mkdirs()
+                    val dir = getRaceNavDir(ctx, "points")
                     val file = java.io.File(dir, "points_${System.currentTimeMillis()}.gpx")
                     file.writeText(gpx)
                     val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -2960,8 +2975,7 @@ class MapFragment : Fragment() {
                         Waypoint(wp.name, wp.lat, wp.lon, idx + 1, wp.description)
                     }
                     val gpx = GpxParser.writeWaypointsGpx(reindexed, routeName)
-                    val dir = ctx.getExternalFilesDir("routes")
-                    dir?.mkdirs()
+                    val dir = getRaceNavDir(ctx, "routes")
                     val file = java.io.File(dir, "route_${System.currentTimeMillis()}.gpx")
                     file.writeText(gpx)
                     val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -3352,6 +3366,8 @@ class MapFragment : Fragment() {
             object : com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult> {
                 override fun onSuccess(result: com.mapbox.mapboxsdk.location.engine.LocationEngineResult) {
                     val loc = result.lastLocation ?: return
+                    // Skip very inaccurate fixes
+                    if (loc.hasAccuracy() && loc.accuracy > 100f) return
                     val newPoint = LatLng(loc.latitude, loc.longitude)
                     lastKnownGpsPoint = newPoint
                     val b = _binding ?: return
@@ -3602,8 +3618,7 @@ class MapFragment : Fragment() {
         val filename = "racenav_$timestamp.gpx"
         val gpxContent = GpxParser.writeGpx(pts, "RaceNav $timestamp")
         try {
-            val dir = ctx.getExternalFilesDir("tracks")
-            dir?.mkdirs()
+            val dir = getRaceNavDir(ctx, "tracks")
             val file = java.io.File(dir, filename)
             file.writeText(gpxContent)
             clearTmpTrack()
@@ -4625,7 +4640,8 @@ class MapFragment : Fragment() {
         val allSourceMaxZooms = mutableMapOf<String, Int>()
         val baseRadioGroup = android.widget.RadioGroup(ctx)
         val baseKeys = mutableListOf<String>() // ordered keys matching radio button indices
-        var selectedBaseKey = currentTileKey
+        // If current map is offline/custom, default to "osm"
+        var selectedBaseKey = if (currentTileKey.startsWith(OFFLINE_TILE_KEY) || currentTileKey.startsWith("custom_")) "osm" else currentTileKey
 
         tileSources.filter { !it.key.startsWith(OFFLINE_TILE_KEY) && !it.key.startsWith("custom_") }.forEach { (key, source) ->
             allSourceMaxZooms[key] = source.maxZoom
@@ -4946,22 +4962,107 @@ class MapFragment : Fragment() {
     private fun showDownloadDetailsDialog() {
         val ctx = context ?: return
         val progress = TileDownloadManager.getProgress()
-        val builder = androidx.appcompat.app.AlertDialog.Builder(ctx, com.google.android.material.R.style.ThemeOverlay_Material3_MaterialAlertDialog)
-        builder.setTitle("Загрузка карт")
+        val task = TileDownloadManager.lastTask ?: return
+        val dp = resources.displayMetrics.density
+
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((16 * dp).toInt(), (16 * dp).toInt(), (16 * dp).toInt(), (8 * dp).toInt())
+        }
+
+        // Title
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "📥 ${task.name}"
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        })
+
+        // Overall progress
         val bytesStr = if (progress.bytesDownloaded > 1024 * 1024)
             String.format("%.1f МБ", progress.bytesDownloaded / (1024.0 * 1024.0))
-        else
-            "${progress.bytesDownloaded / 1024} КБ"
-        builder.setMessage("Слой: ${progress.currentLayer}\nПрогресс: ${progress.downloadedTiles}/${progress.totalTiles} (${progress.percent}%)\nЗагружено: $bytesStr")
+        else "${progress.bytesDownloaded / 1024} КБ"
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Прогресс: ${progress.downloadedTiles}/${progress.totalTiles} (${progress.percent}%)  •  $bytesStr"
+            setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+            setPadding(0, 0, 0, (12 * dp).toInt())
+        })
+
+        // Progress bar
+        root.addView(android.widget.ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; this.progress = progress.percent
+            layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (6 * dp).toInt())
+            progressDrawable.setColorFilter(0xFFFF6F00.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+            setPadding(0, 0, 0, (12 * dp).toInt())
+        })
+
+        // Layer list
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Слои:"
+            setTextColor(0xFF888888.toInt()); textSize = 12f
+            setPadding(0, (8 * dp).toInt(), 0, (4 * dp).toInt())
+        })
+
+        val tilesPerLayer = if (task.layers.isNotEmpty()) progress.totalTiles / task.layers.size else 0
+        var completedLayers = 0
+        task.layers.forEachIndexed { idx, layer ->
+            val layerDownloaded = minOf(
+                maxOf(progress.downloadedTiles - idx * tilesPerLayer, 0),
+                tilesPerLayer
+            )
+            val isCurrent = layer.layerLabel == progress.currentLayer
+            val isDone = layerDownloaded >= tilesPerLayer
+            if (isDone) completedLayers++
+            val icon = when {
+                isDone -> "✅"
+                isCurrent -> "⏳"
+                else -> "⏸"
+            }
+            val statusText = when {
+                isDone -> "готово"
+                isCurrent -> "$layerDownloaded/$tilesPerLayer"
+                else -> "ожидание"
+            }
+            val layerRow = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((8 * dp).toInt(), (4 * dp).toInt(), 0, (4 * dp).toInt())
+            }
+            val skipped = layer.layerKey in TileDownloadManager.skippedLayers
+            layerRow.addView(android.widget.TextView(ctx).apply {
+                text = if (skipped) "⛔  ${layer.layerLabel}  —  пропущен" else "$icon  ${layer.layerLabel}  —  $statusText"
+                setTextColor(if (skipped) 0xFF666666.toInt() else if (isCurrent) 0xFFFFFFFF.toInt() else 0xFFAAAAAA.toInt())
+                textSize = 13f
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            if (!isDone && !isCurrent && !skipped && progress.isRunning) {
+                layerRow.addView(android.widget.TextView(ctx).apply {
+                    text = "✕"
+                    setTextColor(0xFFEF4444.toInt())
+                    textSize = 16f
+                    setPadding((12 * dp).toInt(), 0, (4 * dp).toInt(), 0)
+                    setOnClickListener {
+                        TileDownloadManager.skipLayer(layer.layerKey)
+                        // Refresh dialog
+                        (it.parent?.parent?.parent as? android.app.Dialog)?.dismiss()
+                        showDownloadDetailsDialog()
+                    }
+                })
+            }
+            root.addView(layerRow)
+        }
+
+        val dlg = androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+            .setView(root)
         if (progress.isRunning) {
-            builder.setNegativeButton("Остановить") { _, _ ->
+            dlg.setNegativeButton("⏹ Остановить") { _, _ ->
                 TileDownloadManager.stopDownload()
                 _binding?.downloadIndicator?.visibility = View.GONE
                 Toast.makeText(ctx, "Загрузка остановлена", Toast.LENGTH_SHORT).show()
             }
         }
-        builder.setPositiveButton("OK", null)
-        builder.show()
+        dlg.setPositiveButton("Свернуть", null)
+        dlg.show()
     }
 
     override fun onDestroyView() {

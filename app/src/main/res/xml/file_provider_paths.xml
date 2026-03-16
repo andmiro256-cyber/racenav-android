@@ -2,4 +2,5 @@
 <paths>
     <external-cache-path name="downloads" path="." />
     <external-files-path name="tracks" path="tracks/" />
+    <external-path name="racenav_documents" path="Documents/RaceNav/" />
 </paths>
