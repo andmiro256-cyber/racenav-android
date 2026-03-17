@@ -27,7 +27,7 @@ object UpdateManager {
         onProgress: ((Long, Long) -> Unit)? = null,
         onComplete: ((success: Boolean, error: String?) -> Unit)? = null
     ) {
-        val apkFile = File(context.externalCacheDir, "racenav-update.apk")
+        val apkFile = File(context.externalCacheDir ?: context.filesDir, "racenav-update.apk")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -62,9 +62,11 @@ object UpdateManager {
                 withContext(Dispatchers.Main) {
                     onComplete?.invoke(false, e.message)
                     Toast.makeText(context, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
-                    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(apkUrl))
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(apkUrl))
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    } catch (_: Exception) { /* no browser available */ }
                 }
             }
         }
@@ -105,7 +107,12 @@ object UpdateManager {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(intent)
+        try {
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e("UpdateManager", "Install failed: ${e.message}")
+            Toast.makeText(context, "Ошибка установки: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     /** Call from Activity.onResume to retry install after permission grant */

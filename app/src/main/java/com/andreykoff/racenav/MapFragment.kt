@@ -175,6 +175,15 @@ class MapFragment : Fragment() {
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
     private var bearingFrozen = true      // true = курсор заморожен (стоим)
     private var lastValidBearing = 0f     // последний валидный bearing для freeze
+
+    // Smooth camera loop state (Choreographer-driven, 60 FPS)
+    private var lastGpsLat = 0.0
+    private var lastGpsLon = 0.0
+    private var lastGpsSpeedMs = 0f
+    private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
+    private var lastGpsTimeNanos = 0L     // SystemClock.elapsedRealtimeNanos at GPS fix
+    private var lastGpsSpeedKmh = 0.0
+    private var cameraLoopRunning = false
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
@@ -1422,7 +1431,7 @@ class MapFragment : Fragment() {
         return smoothedBearing
     }
 
-    private fun updateGpsArrow(lat: Double, lon: Double, bearing: Float) {
+    private fun updateGpsArrow(lat: Double, lon: Double, bearing: Float, persist: Boolean = true) {
         val style = mapboxMap?.style ?: return
         val geoJson = JSONObject()
             .put("type", "Feature")
@@ -1431,12 +1440,14 @@ class MapFragment : Fragment() {
             .put("properties", JSONObject().put("bearing", bearing))
             .toString()
         style.getSourceAs<GeoJsonSource>(GPS_ARROW_SOURCE_ID)?.setGeoJson(geoJson)
-        // Persist so arrow can be restored after rotation
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putFloat(PREF_LAST_LAT, lat.toFloat())
-            ?.putFloat(PREF_LAST_LON, lon.toFloat())
-            ?.putFloat(PREF_LAST_BEARING, bearing)
-            ?.apply()
+        if (persist) {
+            // Persist so arrow can be restored after rotation
+            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+                ?.putFloat(PREF_LAST_LAT, lat.toFloat())
+                ?.putFloat(PREF_LAST_LON, lon.toFloat())
+                ?.putFloat(PREF_LAST_BEARING, bearing)
+                ?.apply()
+        }
     }
 
     /** Update accuracy circle polygon (circle approximation as 36-point polygon) */
@@ -4048,52 +4059,16 @@ class MapFragment : Fragment() {
                         updateAccuracyCircle(loc.latitude, loc.longitude, loc.accuracy)
                     }
 
-                    // Move camera in follow modes — animated for smooth driving experience
-                    // userDragged = true means user panned map manually; we pause until recenter
-                    if (initialZoomDone && !userDragged) {
-                        val speedKmh = loc.speed * 3.6
+                    // Save GPS state for Choreographer camera loop (smooth 60 FPS interpolation)
+                    lastGpsLat = loc.latitude
+                    lastGpsLon = loc.longitude
+                    lastGpsSpeedMs = loc.speed
+                    lastGpsBearing = effectiveBearing
+                    lastGpsTimeNanos = System.nanoTime()
+                    lastGpsSpeedKmh = loc.speed * 3.6
 
-                        // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
-                        val tilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
-                            (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
-                        else 0.0
-
-                        // Auto-zoom: relative to user's preferred zoom (userBaseZoom)
-                        // At speed 0 → zoom = userBaseZoom (unchanged)
-                        // At 120 km/h, level 10 → zoom = userBaseZoom - 4.0
-                        // At 120 km/h, level 1  → zoom = userBaseZoom - 0.4
-                        val targetZoom = if (autoZoomLevel > 0) {
-                            val base = if (userBaseZoom > 0) userBaseZoom
-                                       else mapboxMap?.cameraPosition?.zoom ?: 14.0
-                            val maxDelta = autoZoomLevel * 0.4  // level 10 = max 4 zoom levels
-                            val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
-                            (base - delta).coerceIn(base - maxDelta, base)
-                        } else null
-
-                        when (followMode) {
-                            FollowMode.FOLLOW_NORTH -> {
-                                val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-                                    .target(newPoint)
-                                    .bearing(0.0)
-                                    .tilt(tilt)
-                                    .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
-                                if (targetZoom != null) builder.zoom(targetZoom)
-                                mapboxMap?.easeCamera(
-                                    CameraUpdateFactory.newCameraPosition(builder.build()), 300)
-                            }
-                            FollowMode.FOLLOW_COURSE -> {
-                                val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-                                    .target(newPoint)
-                                    .tilt(tilt)
-                                    .bearing(effectiveBearing.toDouble())
-                                    .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
-                                if (targetZoom != null) builder.zoom(targetZoom)
-                                mapboxMap?.easeCamera(
-                                    CameraUpdateFactory.newCameraPosition(builder.build()), 300)
-                            }
-                            FollowMode.FREE -> { /* user controls camera */ }
-                        }
-                    }
+                    // Start camera loop if not running
+                    if (!cameraLoopRunning && initialZoomDone) startCameraLoop()
 
                     // Update widgets
                     val speedKmhInt = (loc.speed * 3.6).toInt()
@@ -5249,6 +5224,9 @@ class MapFragment : Fragment() {
                 if (style.getSource(LIVE_USERS_SOURCE_ID) != null) startLiveUsersPoller()
             }
         }
+        // Resume smooth camera loop if GPS is active
+        if (lastGpsTimeNanos > 0 && initialZoomDone) startCameraLoop()
+
         // Auto-start TraccarService if it was enabled but not running (e.g. after app update/restart)
         val traccarCtx = context ?: return
         if (resumePrefs?.getBoolean(PREF_TRACCAR_ENABLED, false) == true && !TraccarService.isRunning) {
@@ -5263,6 +5241,7 @@ class MapFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        stopCameraLoop()
         _binding?.mapView?.onPause()
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(traccarStatusReceiver) } catch (_: Exception) {}
@@ -5963,8 +5942,87 @@ class MapFragment : Fragment() {
         }
     }
 
+    // ─── Smooth camera loop (Choreographer, ~60 FPS) ───────────────────
+    // Extrapolates position between GPS fixes using dead reckoning.
+    // GPS callback saves lat/lon/speed/bearing/time; this loop interpolates.
+
+    private val cameraFrameCallback = object : android.view.Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!cameraLoopRunning || _binding == null || !isAdded) return
+            moveCameraSmooth(frameTimeNanos)
+            android.view.Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    private fun startCameraLoop() {
+        if (cameraLoopRunning) return
+        cameraLoopRunning = true
+        android.view.Choreographer.getInstance().postFrameCallback(cameraFrameCallback)
+    }
+
+    private fun stopCameraLoop() {
+        cameraLoopRunning = false
+        android.view.Choreographer.getInstance().removeFrameCallback(cameraFrameCallback)
+    }
+
+    private fun moveCameraSmooth(frameTimeNanos: Long) {
+        if (userDragged || followMode == FollowMode.FREE) return
+        val map = mapboxMap ?: return
+        if (lastGpsTimeNanos == 0L) return
+
+        // dt since last GPS fix, clamped to 2s to avoid runaway extrapolation
+        val dtSec = ((frameTimeNanos - lastGpsTimeNanos) / 1_000_000_000.0).coerceIn(0.0, 2.0)
+
+        // Dead reckoning: extrapolate position along bearing
+        val speedMs = lastGpsSpeedMs.toDouble()
+        val bearingRad = Math.toRadians(lastGpsBearing.toDouble())
+        // Approximate meters → degrees conversion
+        val metersPerDegLat = 111_320.0
+        val metersPerDegLon = 111_320.0 * Math.cos(Math.toRadians(lastGpsLat))
+        val dLat = (speedMs * dtSec * Math.cos(bearingRad)) / metersPerDegLat
+        val dLon = (speedMs * dtSec * Math.sin(bearingRad)) / metersPerDegLon.coerceAtLeast(1.0)
+        val extLat = lastGpsLat + dLat
+        val extLon = lastGpsLon + dLon
+
+        val speedKmh = lastGpsSpeedKmh
+
+        // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
+        val tilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
+            (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
+        else 0.0
+
+        // Auto-zoom
+        val targetZoom = if (autoZoomLevel > 0) {
+            val base = if (userBaseZoom > 0) userBaseZoom
+                       else map.cameraPosition?.zoom ?: 14.0
+            val maxDelta = autoZoomLevel * 0.4
+            val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
+            (base - delta).coerceIn(base - maxDelta, base)
+        } else null
+
+        val target = LatLng(extLat, extLon)
+        val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+            .target(target)
+            .tilt(tilt)
+            .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
+
+        when (followMode) {
+            FollowMode.FOLLOW_NORTH -> builder.bearing(0.0)
+            FollowMode.FOLLOW_COURSE -> builder.bearing(lastGpsBearing.toDouble())
+            FollowMode.FREE -> return
+        }
+        if (targetZoom != null) builder.zoom(targetZoom)
+
+        // moveCamera (instant) — Choreographer already provides smooth 60 FPS cadence
+        map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
+
+        // Move GPS arrow to extrapolated position (no persist — 60 FPS would thrash disk)
+        updateGpsArrow(extLat, extLon, lastGpsBearing, persist = false)
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
+        stopCameraLoop()
         liveUsersPoller?.stop(); liveUsersPoller = null
         stopChronoTicker(); stopTimeTicker()
         tileServer?.cleanup(); tileServer = null

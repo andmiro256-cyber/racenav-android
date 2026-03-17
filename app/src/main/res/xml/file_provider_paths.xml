@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <external-cache-path name="downloads" path="." />
+    <files-path name="internal_downloads" path="." />
     <external-files-path name="tracks" path="tracks/" />
     <external-path name="racenav_documents" path="Documents/RaceNav/" />
 </paths>
