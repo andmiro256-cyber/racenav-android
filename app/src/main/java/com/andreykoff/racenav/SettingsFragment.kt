@@ -2329,84 +2329,145 @@ class SettingsFragment : Fragment() {
         fun rebuildRows() {
             container.removeAllViews()
 
-            // ── Top bar buttons subsection ──
-            val topLabel = TextView(requireContext()).apply {
-                text = "ВЕРХНЯЯ ПАНЕЛЬ"
-                setTextColor(0xFF888888.toInt())
-                textSize = 11f
-                letterSpacing = 0.1f
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = (8 * resources.displayMetrics.density).toInt()
-                    bottomMargin = (8 * resources.displayMetrics.density).toInt()
-                }
-            }
-            container.addView(topLabel)
-
-            data class BtnInfo(val label: String, val prefKey: String, val defaultOn: Boolean)
-            val topButtons = listOf(
-                BtnInfo("Компас",          MapFragment.PREF_BTN_COMPASS,  true),
-                BtnInfo("Зум +/−",         MapFragment.PREF_BTN_ZOOM,     true),
-                BtnInfo("Добавить точку",  MapFragment.PREF_BTN_WAYPOINT, true),
-                BtnInfo("Быстрые действия", MapFragment.PREF_BTN_QUICK,   true),
-                BtnInfo("Слои карты",      MapFragment.PREF_BTN_LAYERS,   true),
-                BtnInfo("Запись трека",    MapFragment.PREF_BTN_REC,      true),
-                BtnInfo("Блокировка",      MapFragment.PREF_BTN_LOCK,     true),
-                BtnInfo("Смена карты ⇄",   MapFragment.PREF_BTN_MAP_SWITCH, false),
-                BtnInfo("Статус сервера",  MapFragment.PREF_BTN_SERVER_DOT, false),
-                BtnInfo("Батарея",         MapFragment.PREF_BTN_BATTERY, false),
-            )
+            // ── Top bar buttons: LEFT / RIGHT zones with drag & drop ──
             val dp = resources.displayMetrics.density
-            // Build top bar items for drag & drop — use prefKey as key directly
-            val topBtnKeys = topButtons.map { btn ->
-                Triple(btn.prefKey, btn.label, prefs.getBoolean(btn.prefKey, btn.defaultOn))
-            }.toMutableList()
 
-            val topRv = androidx.recyclerview.widget.RecyclerView(requireContext()).apply {
-                layoutManager = androidx.recyclerview.widget.LinearLayoutManager(requireContext())
-                isNestedScrollingEnabled = false
-                // Fixed height for all items to prevent RecyclerView clipping inside ScrollView
-                layoutParams = android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    ((49 * dp) * topButtons.size).toInt()
-                )
+            data class BtnInfo(val key: String, val label: String, val prefKey: String, val defaultOn: Boolean)
+            val topButtons = listOf(
+                BtnInfo("compass",    "Компас",           MapFragment.PREF_BTN_COMPASS,    true),
+                BtnInfo("zoom",       "Зум +/−",          MapFragment.PREF_BTN_ZOOM,       true),
+                BtnInfo("waypoint",   "Добавить точку",   MapFragment.PREF_BTN_WAYPOINT,   true),
+                BtnInfo("quick",      "Быстрые действия", MapFragment.PREF_BTN_QUICK,      true),
+                BtnInfo("stop",       "STOP",             "btn_stop_always",               true),
+                BtnInfo("go",         "GO",               "btn_go_always",                 true),
+                BtnInfo("battery",    "Батарея",          MapFragment.PREF_BTN_BATTERY,    false),
+                BtnInfo("layers",     "Слои карты",       MapFragment.PREF_BTN_LAYERS,     true),
+                BtnInfo("rec",        "Запись трека",     MapFragment.PREF_BTN_REC,        true),
+                BtnInfo("lock",       "Блокировка",       MapFragment.PREF_BTN_LOCK,       true),
+                BtnInfo("map_switch", "Смена карты ⇄",    MapFragment.PREF_BTN_MAP_SWITCH, false),
+                BtnInfo("server_dot", "Статус сервера",   MapFragment.PREF_BTN_SERVER_DOT, false),
+                BtnInfo("settings",   "Настройки",        "btn_settings_always",           true),
+            )
+            val btnByKey = topButtons.associateBy { it.key }
+
+            // Parse saved order into left/right lists (split by "spacer")
+            val defaultOrder = MapFragment.ALL_TOP_BAR_KEYS.joinToString(",")
+            val savedTopOrder = prefs.getString(MapFragment.PREF_TOP_BAR_ORDER, defaultOrder) ?: defaultOrder
+            val allSavedKeys = savedTopOrder.split(",").toMutableList()
+            // Ensure all known keys are present
+            topButtons.forEach { b -> if (b.key !in allSavedKeys) allSavedKeys.add(b.key) }
+
+            val spacerIdx = allSavedKeys.indexOf("spacer")
+            val leftKeys = if (spacerIdx >= 0) allSavedKeys.subList(0, spacerIdx).filter { it != "spacer" } else allSavedKeys.take(5)
+            val rightKeys = if (spacerIdx >= 0) allSavedKeys.subList(spacerIdx + 1, allSavedKeys.size).filter { it != "spacer" } else allSavedKeys.drop(5)
+
+            fun buildItems(keys: List<String>): MutableList<Triple<String, String, Boolean>> {
+                return keys.mapNotNull { key ->
+                    val info = btnByKey[key] ?: return@mapNotNull null
+                    val alwaysOn = info.key in listOf("stop", "go", "settings")
+                    val enabled = if (alwaysOn) true else prefs.getBoolean(info.prefKey, info.defaultOn)
+                    Triple(info.key, info.label, enabled)
+                }.toMutableList()
             }
-            val topAdapter = WidgetOrderAdapter(topBtnKeys, dp) { pos, checked ->
-                val prefKey = topBtnKeys.getOrNull(pos)?.first ?: return@WidgetOrderAdapter
-                prefs.edit().putBoolean(prefKey, checked).apply()
+
+            val leftItems = buildItems(leftKeys)
+            val rightItems = buildItems(rightKeys)
+
+            fun saveTopBarOrder() {
+                val left = leftItems.map { it.first }.joinToString(",")
+                val right = rightItems.map { it.first }.joinToString(",")
+                val order = if (left.isNotEmpty() && right.isNotEmpty()) "$left,spacer,$right"
+                            else if (left.isNotEmpty()) "$left,spacer"
+                            else "spacer,$right"
+                prefs.edit().putString(MapFragment.PREF_TOP_BAR_ORDER, order).apply()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyTopBarPrefs()
             }
-            topRv.adapter = topAdapter
-            val topTouchCallback = object : androidx.recyclerview.widget.ItemTouchHelper.Callback() {
-                override fun isLongPressDragEnabled() = false
-                override fun isItemViewSwipeEnabled() = false
-                override fun getMovementFlags(rv: androidx.recyclerview.widget.RecyclerView, vh: androidx.recyclerview.widget.RecyclerView.ViewHolder) =
-                    makeMovementFlags(androidx.recyclerview.widget.ItemTouchHelper.UP or androidx.recyclerview.widget.ItemTouchHelper.DOWN, 0)
-                override fun onMove(rv: androidx.recyclerview.widget.RecyclerView, source: androidx.recyclerview.widget.RecyclerView.ViewHolder, target: androidx.recyclerview.widget.RecyclerView.ViewHolder): Boolean {
-                    topAdapter.onItemMove(source.adapterPosition, target.adapterPosition)
-                    return true
+
+            fun makeTopBarRv(items: MutableList<Triple<String, String, Boolean>>, otherItems: MutableList<Triple<String, String, Boolean>>, isLeft: Boolean): RecyclerView {
+                val adapter = WidgetOrderAdapter(items, dp) { pos, checked ->
+                    val key = items.getOrNull(pos)?.first ?: return@WidgetOrderAdapter
+                    val info = btnByKey[key] ?: return@WidgetOrderAdapter
+                    if (info.key in listOf("stop", "go", "settings")) return@WidgetOrderAdapter // always on
+                    prefs.edit().putBoolean(info.prefKey, checked).apply()
+                    saveTopBarOrder()
                 }
-                override fun onSwiped(vh: androidx.recyclerview.widget.RecyclerView.ViewHolder, dir: Int) {}
-                override fun clearView(rv: androidx.recyclerview.widget.RecyclerView, vh: androidx.recyclerview.widget.RecyclerView.ViewHolder) {
-                    super.clearView(rv, vh)
-                    vh.itemView.alpha = 1f
-                    val newOrder = topAdapter.items.map { it.first }.joinToString(",")
-                    prefs.edit().putString(MapFragment.PREF_TOP_BAR_ORDER, newOrder).apply()
-                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyTopBarPrefs()
+                val rv = RecyclerView(requireContext()).apply {
+                    layoutManager = LinearLayoutManager(requireContext())
+                    isNestedScrollingEnabled = false
+                    this.adapter = adapter
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        ((49 * dp) * items.size.coerceAtLeast(1)).toInt()
+                    )
                 }
-                override fun onSelectedChanged(vh: androidx.recyclerview.widget.RecyclerView.ViewHolder?, actionState: Int) {
-                    super.onSelectedChanged(vh, actionState)
-                    if (actionState == androidx.recyclerview.widget.ItemTouchHelper.ACTION_STATE_DRAG) {
-                        vh?.itemView?.alpha = 0.7f
+                val touchCallback = object : ItemTouchHelper.Callback() {
+                    override fun isLongPressDragEnabled() = false
+                    override fun isItemViewSwipeEnabled() = true
+                    override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {
+                        val drag = ItemTouchHelper.UP or ItemTouchHelper.DOWN
+                        val swipe = if (isLeft) ItemTouchHelper.RIGHT else ItemTouchHelper.LEFT
+                        return makeMovementFlags(drag, swipe)
+                    }
+                    override fun onMove(rv: RecyclerView, source: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
+                        adapter.onItemMove(source.adapterPosition, target.adapterPosition)
+                        return true
+                    }
+                    override fun onSwiped(vh: RecyclerView.ViewHolder, direction: Int) {
+                        val pos = vh.adapterPosition
+                        if (pos == RecyclerView.NO_POSITION || pos >= items.size) return
+                        val item = items.removeAt(pos)
+                        adapter.notifyItemRemoved(pos)
+                        otherItems.add(item)
+                        saveTopBarOrder()
+                        rebuildRows()
+                    }
+                    override fun clearView(rv: RecyclerView, vh: RecyclerView.ViewHolder) {
+                        super.clearView(rv, vh)
+                        vh.itemView.alpha = 1f
+                        saveTopBarOrder()
+                    }
+                    override fun onSelectedChanged(vh: RecyclerView.ViewHolder?, actionState: Int) {
+                        super.onSelectedChanged(vh, actionState)
+                        if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) vh?.itemView?.alpha = 0.7f
                     }
                 }
+                val ith = ItemTouchHelper(touchCallback)
+                ith.attachToRecyclerView(rv)
+                adapter.dragStartListener = { vh -> ith.startDrag(vh) }
+                return rv
             }
-            val topItemTouchHelper = androidx.recyclerview.widget.ItemTouchHelper(topTouchCallback)
-            topItemTouchHelper.attachToRecyclerView(topRv)
-            topAdapter.dragStartListener = { vh -> topItemTouchHelper.startDrag(vh) }
-            container.addView(topRv)
+
+            fun addSectionLabel(text: String, hint: String) {
+                val row = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        topMargin = (8 * dp).toInt()
+                        bottomMargin = (4 * dp).toInt()
+                    }
+                }
+                row.addView(TextView(requireContext()).apply {
+                    this.text = text
+                    setTextColor(0xFF888888.toInt())
+                    textSize = 11f
+                    letterSpacing = 0.1f
+                })
+                row.addView(TextView(requireContext()).apply {
+                    this.text = "  $hint"
+                    setTextColor(0xFF555555.toInt())
+                    textSize = 10f
+                })
+                container.addView(row)
+            }
+
+            addSectionLabel("◀ ЛЕВАЯ ЧАСТЬ", "свайп → переместить вправо")
+            container.addView(makeTopBarRv(leftItems, rightItems, isLeft = true))
+
+            addSectionLabel("ПРАВАЯ ЧАСТЬ ▶", "свайп ← переместить влево")
+            container.addView(makeTopBarRv(rightItems, leftItems, isLeft = false))
 
             // ── Map switch settings (only shown when map switch button is enabled) ──
             if (prefs.getBoolean(MapFragment.PREF_BTN_MAP_SWITCH, false)) {

@@ -63,7 +63,7 @@ class TraccarService : Service() {
             ACTION_START -> startTraccar()
             ACTION_STOP  -> stopTraccar()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startTraccar() {
@@ -143,11 +143,16 @@ class TraccarService : Service() {
         })
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopTraccar()
+    }
+
     override fun onDestroy() {
-        isRunning = false
+        if (isRunning) stopTraccar()
         serviceScope.cancel()
-        traccarSender?.stop()
-        traccarDb?.close()
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         super.onDestroy()
     }
 

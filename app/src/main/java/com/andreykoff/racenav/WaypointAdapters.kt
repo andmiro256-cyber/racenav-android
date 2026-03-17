@@ -213,7 +213,7 @@ class RouteItemTouchCallback(private val adapter: RouteEditorAdapter) : ItemTouc
     }
 }
 
-/** Adapter for widget order settings with drag & drop + toggle */
+/** Adapter for widget order settings with drag & drop + toggle + optional move button */
 class WidgetOrderAdapter(
     val items: MutableList<Triple<String, String, Boolean>>, // key, label, enabled
     private val dp: Float,
@@ -221,7 +221,6 @@ class WidgetOrderAdapter(
 ) : RecyclerView.Adapter<WidgetOrderAdapter.VH>() {
 
     var dragStartListener: ((RecyclerView.ViewHolder) -> Unit)? = null
-
     class VH(row: LinearLayout) : RecyclerView.ViewHolder(row) {
         val dragHandle: TextView = row.findViewWithTag("drag")
         val label: TextView = row.findViewWithTag("label")

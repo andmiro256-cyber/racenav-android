@@ -181,7 +181,7 @@ class MapFragment : Fragment() {
     private var lastGpsLon = 0.0
     private var lastGpsSpeedMs = 0f
     private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
-    private var lastGpsTimeNanos = 0L     // SystemClock.elapsedRealtimeNanos at GPS fix
+    private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
     private var cameraLoopRunning = false
     private var tileServer: TileServer? = null
@@ -5949,7 +5949,7 @@ class MapFragment : Fragment() {
     private val cameraFrameCallback = object : android.view.Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!cameraLoopRunning || _binding == null || !isAdded) return
-            moveCameraSmooth(frameTimeNanos)
+            moveCameraSmooth(System.nanoTime())  // not frameTimeNanos — Samsung OEMs may use different clock base
             android.view.Choreographer.getInstance().postFrameCallback(this)
         }
     }
@@ -5973,8 +5973,8 @@ class MapFragment : Fragment() {
         // dt since last GPS fix, clamped to 2s to avoid runaway extrapolation
         val dtSec = ((frameTimeNanos - lastGpsTimeNanos) / 1_000_000_000.0).coerceIn(0.0, 2.0)
 
-        // Dead reckoning: extrapolate position along bearing
-        val speedMs = lastGpsSpeedMs.toDouble()
+        // If GPS stale (>= 2s), don't extrapolate — use last known position
+        val speedMs = if (dtSec >= 2.0) 0.0 else lastGpsSpeedMs.toDouble()
         val bearingRad = Math.toRadians(lastGpsBearing.toDouble())
         // Approximate meters → degrees conversion
         val metersPerDegLat = 111_320.0

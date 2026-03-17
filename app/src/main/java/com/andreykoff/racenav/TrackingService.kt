@@ -152,7 +152,12 @@ class TrackingService : Service() {
             ACTION_RESUME -> startTracking(clearPoints = false)
             ACTION_STOP   -> stopTracking()
         }
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        if (isRunning) stopTracking()
+        super.onDestroy()
     }
 
     private fun startTracking(clearPoints: Boolean) {
@@ -211,17 +216,13 @@ class TrackingService : Service() {
         stopSelf()
     }
 
-    /** Save current track to temp file (survives app restart) */
+    /** Save current track to temp file (survives app restart). Synchronous — must complete before stopSelf. */
     private fun autoSaveTrack() {
         if (trackPoints.isEmpty()) return
-        val pointsCopy = trackPoints.toList()
-        val dir = filesDir
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            try {
-                val file = java.io.File(dir, MapFragment.TRACK_TMP_FILENAME)
-                file.writeText(GpxParser.writeGpx(pointsCopy, "Текущий трек"))
-            } catch (_: Exception) {}
-        }
+        try {
+            val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
+            file.writeText(GpxParser.writeGpx(trackPoints.toList(), "Текущий трек"))
+        } catch (_: Exception) {}
     }
 
     private fun updateNotification() {
@@ -236,6 +237,11 @@ class TrackingService : Service() {
         val dLat = lat2 - lat1;              val dLon = Math.toRadians(b.second - a.second)
         val x    = sin(dLat / 2).pow(2) + cos(lat1) * cos(lat2) * sin(dLon / 2).pow(2)
         return 2 * R * asin(sqrt(x))
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopTracking()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
