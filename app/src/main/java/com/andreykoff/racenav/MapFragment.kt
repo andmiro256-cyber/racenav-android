@@ -679,10 +679,12 @@ class MapFragment : Fragment() {
                 handleLiveUserClick(map, latLng)
             }
             // Long press on map toggles UI bars
+            // When bars are hidden — show emergency settings button so user can always reach settings
             map.addOnMapLongClickListener {
                 val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
                 _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
                 _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                _binding?.btnEmergencySettings?.visibility = if (topVisible) android.view.View.VISIBLE else android.view.View.GONE
                 true
             }
         }
@@ -1920,6 +1922,18 @@ class MapFragment : Fragment() {
             showDownloadDetailsDialog()
         }
         binding.btnSettings.setOnClickListener {
+            parentFragmentManager.beginTransaction()
+                .add(R.id.container, SettingsFragment())
+                .addToBackStack(null)
+                .commit()
+        }
+        // Emergency settings button — visible when all panels are hidden (long press on map)
+        // Allows user to reach settings even if settings button was pushed off-screen
+        binding.btnEmergencySettings.setOnClickListener {
+            // Restore bars before opening settings
+            _binding?.topBar?.visibility = android.view.View.VISIBLE
+            _binding?.bottomBar?.visibility = android.view.View.VISIBLE
+            _binding?.btnEmergencySettings?.visibility = android.view.View.GONE
             parentFragmentManager.beginTransaction()
                 .add(R.id.container, SettingsFragment())
                 .addToBackStack(null)

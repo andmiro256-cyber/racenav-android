@@ -692,4 +692,21 @@
         </LinearLayout>
     </FrameLayout>
 
+    <!-- Emergency settings button — shown when all panels are hidden (long press on map) -->
+    <ImageButton
+        android:id="@+id/btnEmergencySettings"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:src="@drawable/ic_settings"
+        android:background="@drawable/rounded_bg_dark"
+        android:tint="#FFFFFF"
+        android:padding="10dp"
+        android:visibility="gone"
+        android:contentDescription="Настройки"
+        android:elevation="10dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="16dp" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>
