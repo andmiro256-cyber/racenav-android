@@ -57,6 +57,10 @@ class TrackingService : Service() {
     }
 
     private fun handleLocation(loc: Location) {
+        // Re-acquire WakeLock on each location update (Vivo/Samsung kill GPS after timeout)
+        // acquire() with timeout is legal to call repeatedly — just resets the timeout
+        wakeLock?.acquire(30 * 60 * 1000L)
+
         // Read filter settings
         val prefs = getSharedPreferences(MapFragment.PREFS_NAME, android.content.Context.MODE_PRIVATE)
         val minAccuracy = prefs.getInt(MapFragment.PREF_TRACK_MIN_ACCURACY, 50).toFloat()

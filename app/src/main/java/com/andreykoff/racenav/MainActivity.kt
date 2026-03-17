@@ -417,19 +417,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        val mapFrag = supportFragmentManager.findFragmentById(R.id.container) as? MapFragment
+        val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
         val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
         val volumeZoom = prefs.getBoolean(MapFragment.PREF_VOLUME_ZOOM, true)
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP -> {
                 event.startTracking() // needed for long-press detection
-                // Zoom only on first press, ignore repeats from holding
                 if (event.repeatCount == 0 && volumeZoom) mapFrag?.zoomIn()
                 return true
             }
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 event.startTracking() // needed for long-press detection
-                // Zoom only on first press, ignore repeats from holding
                 if (event.repeatCount == 0 && volumeZoom) mapFrag?.zoomOut()
                 return true
             }
@@ -518,7 +516,7 @@ class MainActivity : AppCompatActivity() {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
             val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             if (!prefs.getBoolean(MapFragment.PREF_VOLUME_LOCK, true)) return super.onKeyLongPress(keyCode, event)
-            val mapFrag = supportFragmentManager.findFragmentById(R.id.container) as? MapFragment
+            val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
             if (mapFrag != null) {
                 if (mapFrag.isScreenLocked) {
                     mapFrag.unlockScreen()

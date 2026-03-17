@@ -78,9 +78,6 @@ class MapFragment : Fragment() {
         .map { LatLng(it.first, it.second) }
         .toMutableList()
     private val isRecording get() = TrackingService.isRunning
-    private var lastArrowLat = 0.0
-    private var lastArrowLon = 0.0
-    private val arrowPoints = mutableListOf<Pair<LatLng, Float>>()
     private val trackLengthM get() = TrackingService.trackLengthM
     private val recordingStartMs get() = TrackingService.startTimeMs
     private var autoRecordDone = false  // prevent repeated auto-start on style change
@@ -184,6 +181,9 @@ class MapFragment : Fragment() {
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
     private var cameraLoopRunning = false
+    private var locationTrackingStarted = false  // prevent duplicate GPS listeners on style reload
+    private var activeLocationCallback: com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult>? = null
+    private var locationEngine: com.mapbox.mapboxsdk.location.engine.LocationEngine? = null
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
@@ -216,7 +216,6 @@ class MapFragment : Fragment() {
 
     companion object {
         const val TRACK_SOURCE_ID = "track-source"
-        const val TRACK_ARROWS_SOURCE_ID = "track-arrows-source"
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
         const val TRACK_ARROW_ICON = "track-arrow-icon"
@@ -230,7 +229,6 @@ class MapFragment : Fragment() {
         const val GPS_ACCURACY_SOURCE_ID = "gps-accuracy-source"
         const val GPS_ACCURACY_LAYER_ID = "gps-accuracy-layer"
         const val GPS_ARROW_ICON = "gps-arrow-icon"
-        const val ARROW_DISTANCE_M = 80.0
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
         const val PREF_VOLUME_LOCK = "volume_lock_enabled"
@@ -505,7 +503,13 @@ class MapFragment : Fragment() {
             "https://b.tiles.nakarte.me/topo001m/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/topo001m/{z}/{x}/{y}"), tms = true, maxZoom = 13),
         "topomapper"   to TileSource("Topomapper 1км", listOf(
-            "http://88.99.52.156/tmg/{z}/{x}/{y}"), maxZoom = 13)
+            "http://88.99.52.156/tmg/{z}/{x}/{y}"), maxZoom = 13),
+        "yandex_map"   to TileSource("Яндекс Карта", listOf(
+            "https://vec01.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec02.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec03.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec04.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
+        "here_hybrid"  to TileSource("HERE Гибрид", emptyList(), maxZoom = 20)
     )
 
     // Overlay sources (transparent, shown on top of base)
@@ -540,7 +544,12 @@ class MapFragment : Fragment() {
         "voyager_labels" to OverlaySource("Подписи (цветные)", listOf(
             "https://a.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png",
             "https://b.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png",
-            "https://c.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png"), opacity = 1.0f)
+            "https://c.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png"), opacity = 1.0f),
+        "yandex_hybrid" to OverlaySource("Яндекс Гибрид", listOf(
+            "https://vec01.maps.yandex.net/tiles?l=skl&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec02.maps.yandex.net/tiles?l=skl&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec03.maps.yandex.net/tiles?l=skl&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec04.maps.yandex.net/tiles?l=skl&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), opacity = 1.0f)
     )
 
     private var currentTileKey = "osm"
@@ -568,6 +577,23 @@ class MapFragment : Fragment() {
                 tileSources[key] = TileSource(name, listOf(url), tms)
             }
         }
+    }
+
+    /**
+     * Apply server catalog: overwrite built-in tile/overlay sources with proxy URLs.
+     * Preserves offline and custom sources (they are not in the catalog).
+     */
+    private fun applyCatalog(catalog: TileCatalogManager.Catalog?) {
+        if (catalog == null) return
+        for (entry in catalog.base) {
+            val proxyUrl = TileCatalogManager.buildProxyUrl(entry.proxyPath)
+            tileSources[entry.key] = TileSource(entry.label, listOf(proxyUrl), entry.tms, entry.maxZoom)
+        }
+        for (entry in catalog.overlays) {
+            val proxyUrl = TileCatalogManager.buildProxyUrl(entry.proxyPath)
+            overlaySources[entry.key] = OverlaySource(entry.label, listOf(proxyUrl), entry.tms, entry.opacity, entry.maxZoom)
+        }
+        Log.d("TileCatalog", "Applied catalog v${catalog.version}: ${catalog.base.size} base + ${catalog.overlays.size} overlays")
     }
 
     // Public method to load waypoints from SettingsFragment
@@ -661,7 +687,20 @@ class MapFragment : Fragment() {
             // Load custom and offline maps BEFORE loadTileStyle so tile sources are ready
             reloadCustomSources()
             loadOfflineMapsFromPrefs()
+            // Apply cached catalog instantly (no network), then load style
+            val ctx = context ?: return@getMapAsync
+            val cachedCatalog = TileCatalogManager.loadCachedCatalog(ctx)
+            applyCatalog(cachedCatalog)
             loadTileStyle(savedTile, savedOverlays)
+            // Async fetch fresh catalog from server
+            val cachedVersion = cachedCatalog?.version ?: -1
+            TileCatalogManager.fetchCatalog(ctx) { catalog ->
+                if (catalog != null && catalog.version != cachedVersion && isAdded && _binding != null) {
+                    applyCatalog(catalog)
+                    // Reload current style with updated proxy URLs
+                    loadTileStyle(currentTileKey, currentOverlayKeys)
+                }
+            }
 
             // Restore camera position if saved
             val savedLat = tilePrefs?.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE) ?: Float.MIN_VALUE
@@ -1046,15 +1085,17 @@ class MapFragment : Fragment() {
             .accuracyAnimationEnabled(false)
             .elevation(0f)
             .build()
-        val lc = mapboxMap?.locationComponent ?: return
-        lc.activateLocationComponent(LocationComponentActivationOptions.builder(ctx, style)
-            .locationComponentOptions(options).build())
-        lc.isLocationComponentEnabled = true
+        // LocationComponent is NOT activated — CameraMode.NONE + transparent icons = no visible output.
+        // Activating it registers 2 internal GPS listeners we don't need.
+        // We get the engine directly from LocationEngineDefault (1 listener total).
         applyFollowMode()
         applyCursorOffset()
 
-        // Start location tracking AFTER component is activated
-        mapboxMap?.let { setupLocationTracking(it) }
+        // Start location tracking only once per lifecycle
+        if (!locationTrackingStarted) {
+            locationTrackingStarted = true
+            setupLocationTrackingDirect(ctx)
+        }
 
         // Auto-start track recording if enabled (default: true) — only once per fragment lifecycle
         if (!autoRecordDone) {
@@ -1486,20 +1527,29 @@ class MapFragment : Fragment() {
             style.addImage(TRACK_ARROW_ICON, it.toBitmap(32, 32))
         }
         style.addSource(GeoJsonSource(TRACK_SOURCE_ID))
-        style.addSource(GeoJsonSource(TRACK_ARROWS_SOURCE_ID))
-        style.addLayer(LineLayer(TRACK_LAYER_ID, TRACK_SOURCE_ID).withProperties(
-            PropertyFactory.lineColor("#FF2200"),
-            PropertyFactory.lineWidth(4f),
+        // Casing (dark outline under the track line)
+        style.addLayer(LineLayer("track-casing", TRACK_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#AA1100"),
+            PropertyFactory.lineWidth(9f),
             PropertyFactory.lineCap("round"),
             PropertyFactory.lineJoin("round")
         ))
-        style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_ARROWS_SOURCE_ID).withProperties(
+        // Main track line
+        style.addLayer(LineLayer(TRACK_LAYER_ID, TRACK_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#FF3322"),
+            PropertyFactory.lineWidth(6f),
+            PropertyFactory.lineCap("round"),
+            PropertyFactory.lineJoin("round")
+        ))
+        // Chevrons — Mapbox places & rotates them along the line automatically
+        style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(TRACK_ARROW_ICON),
-            PropertyFactory.iconRotationAlignment("map"),
+            PropertyFactory.symbolPlacement("line"),
+            PropertyFactory.symbolSpacing(50f),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconRotate(com.mapbox.mapboxsdk.style.expressions.Expression.get("bearing")),
-            PropertyFactory.iconSize(0.8f)
+            PropertyFactory.iconRotationAlignment("map"),
+            PropertyFactory.iconSize(0.7f)
         ))
         // Loaded track layer (color/width from prefs, default blue)
         style.addSource(GeoJsonSource(LOADED_TRACK_SOURCE_ID))
@@ -2177,6 +2227,15 @@ class MapFragment : Fragment() {
         val width = prefs.getFloat(PREF_TRACK_WIDTH, DEFAULT_TRACK_WIDTH)
         mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_LAYER_ID)
             ?.setProperties(PropertyFactory.lineColor(color), PropertyFactory.lineWidth(width))
+        // Casing: darker shade, wider than main line
+        val casingColor = try {
+            val c = Color.parseColor(color)
+            val hsv = FloatArray(3); Color.colorToHSV(c, hsv)
+            hsv[2] = if (hsv[2] < 0.2f) (hsv[2] + 0.25f).coerceIn(0f, 1f) else (hsv[2] * 0.6f)
+            String.format("#%06X", 0xFFFFFF and Color.HSVToColor(hsv))
+        } catch (_: Exception) { "#AA1100" }
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>("track-casing")
+            ?.setProperties(PropertyFactory.lineColor(casingColor), PropertyFactory.lineWidth(width + 3f))
     }
 
     fun applyLoadedTrackStyle() {
@@ -4000,17 +4059,15 @@ class MapFragment : Fragment() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun setupLocationTracking(map: MapboxMap) {
-        val engine = map.locationComponent.locationEngine ?: return
+    private fun setupLocationTrackingDirect(ctx: Context) {
+        val engine = com.mapbox.mapboxsdk.location.engine.LocationEngineDefault.getDefaultLocationEngine(ctx)
+        locationEngine = engine
+        // Unsubscribe previous callback to prevent duplicate location listeners
+        activeLocationCallback?.let { engine.removeLocationUpdates(it) }
         val intervalSec = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.getInt(PREF_TRACK_INTERVAL, 1) ?: 1
         val intervalMs = (intervalSec.coerceIn(1, 60) * 1000L)
-        engine.requestLocationUpdates(
-            com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.Builder(intervalMs)
-                .setPriority(com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
-                .setMaxWaitTime(intervalMs * 2)
-                .build(),
-            object : com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult> {
+        val callback = object : com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult> {
                 override fun onSuccess(result: com.mapbox.mapboxsdk.location.engine.LocationEngineResult) {
                     val loc = result.lastLocation ?: return
                     // Skip very inaccurate fixes
@@ -4155,24 +4212,22 @@ class MapFragment : Fragment() {
                     updateNavLine()
 
                     // Запись трека — выполняется в TrackingService (фоновая служба)
-                    // Здесь синхронно обновляем трек и стрелки направления на карте
+                    // Обновляем трек на карте (шевроны расставляются автоматически через symbolPlacement)
                     if (isRecording) {
-                        val svcPoints = TrackingService.trackPoints
-                        if (svcPoints.size >= 2) {
-                            val last = LatLng(svcPoints.last().first, svcPoints.last().second)
-                            if (lastArrowLat == 0.0 || distanceM(LatLng(lastArrowLat, lastArrowLon), last) >= ARROW_DISTANCE_M) {
-                                val prev = LatLng(svcPoints[svcPoints.size - 2].first, svcPoints[svcPoints.size - 2].second)
-                                arrowPoints.add(Pair(last, bearingBetween(prev, last).toFloat()))
-                                lastArrowLat = svcPoints.last().first; lastArrowLon = svcPoints.last().second
-                            }
-                        }
                         updateTrackOnMap()
                     }
                 }
                 override fun onFailure(exception: Exception) {
                     Log.e("RaceNav", "Location error: ${exception.message}")
                 }
-            },
+            }
+        activeLocationCallback = callback
+        engine.requestLocationUpdates(
+            com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.Builder(intervalMs)
+                .setPriority(com.mapbox.mapboxsdk.location.engine.LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
+                .setMaxWaitTime(intervalMs * 2)
+                .build(),
+            callback,
             android.os.Looper.getMainLooper()
         )
     }
@@ -4181,7 +4236,6 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         if (!isRecording) {
             // Старт — запускаем foreground service
-            arrowPoints.clear(); lastArrowLat = 0.0; lastArrowLon = 0.0
             val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_START }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
             else ctx.startService(intent)
@@ -4194,7 +4248,6 @@ class MapFragment : Fragment() {
             // Стоп — останавливаем сервис (он сделает финальный авто-сейв в tmp файл)
             ctx.startService(Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_STOP })
             stopChronoTicker()
-            arrowPoints.clear()
             updateTrackOnMap()
             binding.btnRec.setImageResource(R.drawable.ic_rec_start)
             // Показываем диалог сохранения
@@ -4396,14 +4449,8 @@ class MapFragment : Fragment() {
     fun clearRecordedTrack() {
         TrackingService.trackPoints.clear()
         TrackingService.trackLengthM = 0.0
-        arrowPoints.clear()
         // Clear track line on map
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(
-            org.json.JSONObject().put("type", "FeatureCollection")
-                .put("features", org.json.JSONArray()).toString()
-        )
-        // Clear arrows
-        mapboxMap?.style?.getSourceAs<GeoJsonSource>("arrow-source")?.setGeoJson(
             org.json.JSONObject().put("type", "FeatureCollection")
                 .put("features", org.json.JSONArray()).toString()
         )
@@ -4469,15 +4516,6 @@ class MapFragment : Fragment() {
                     .put("properties", JSONObject()).toString()
             )
         }
-        val features = JSONArray()
-        arrowPoints.forEach { (pt, bearing) ->
-            features.put(JSONObject().put("type", "Feature")
-                .put("geometry", JSONObject().put("type", "Point")
-                    .put("coordinates", JSONArray().put(pt.longitude).put(pt.latitude)))
-                .put("properties", JSONObject().put("bearing", bearing)))
-        }
-        style.getSourceAs<GeoJsonSource>(TRACK_ARROWS_SOURCE_ID)
-            ?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
     }
 
     fun applyFollowMode() {
@@ -6023,6 +6061,13 @@ class MapFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         stopCameraLoop()
+        // Unsubscribe GPS callback to prevent leak and ghost updates after destroy
+        activeLocationCallback?.let { cb ->
+            locationEngine?.removeLocationUpdates(cb)
+        }
+        activeLocationCallback = null
+        locationEngine = null
+        locationTrackingStarted = false
         liveUsersPoller?.stop(); liveUsersPoller = null
         stopChronoTicker(); stopTimeTicker()
         tileServer?.cleanup(); tileServer = null

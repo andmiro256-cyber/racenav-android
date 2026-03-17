@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="16dp"
-    android:height="16dp"
-    android:viewportWidth="16"
-    android:viewportHeight="16">
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Chevron pointing RIGHT — Mapbox rotates along line direction -->
     <path
-        android:fillColor="#FF6600"
-        android:pathData="M8,1 L14,12 L8,9 L2,12 Z"/>
+        android:fillColor="#FFFFFF"
+        android:pathData="M7,3 L19,12 L7,21 L10,21 L21,12 L10,3 Z"/>
 </vector>
