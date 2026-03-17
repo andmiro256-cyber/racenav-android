@@ -736,6 +736,25 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Taken radius
+        val txtTakenRadius = view.findViewById<TextView>(R.id.txtTakenRadius)
+        var takenRadius = prefs.getInt(MapFragment.PREF_WP_TAKEN_RADIUS, MapFragment.DEFAULT_WP_TAKEN_RADIUS).coerceIn(1, 100)
+        txtTakenRadius.text = takenRadius.toString()
+        view.findViewById<ImageButton>(R.id.btnTakenRadiusMinus).setOnClickListener {
+            if (takenRadius > 1) {
+                takenRadius--
+                txtTakenRadius.text = takenRadius.toString()
+                prefs.edit().putInt(MapFragment.PREF_WP_TAKEN_RADIUS, takenRadius).apply()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnTakenRadiusPlus).setOnClickListener {
+            if (takenRadius < 100) {
+                takenRadius++
+                txtTakenRadius.text = takenRadius.toString()
+                prefs.edit().putInt(MapFragment.PREF_WP_TAKEN_RADIUS, takenRadius).apply()
+            }
+        }
+
         // Nav line color — color swatch
         val viewNavLineColor = view.findViewById<View>(R.id.viewNavLineColor)
         val savedNavColor = prefs.getString(PREF_NAV_LINE_COLOR, "#FF6F00") ?: "#FF6F00"

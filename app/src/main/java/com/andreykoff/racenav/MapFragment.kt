@@ -287,8 +287,10 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_TRIPMASTER = "widget_tripmaster"
         const val PREF_WIDGET_ORDER = "widget_order"
         const val PREF_NAV_ACTIVE = "nav_active"
-        const val PREF_WP_APPROACH_RADIUS = "wp_approach_radius"  // metres, default 25
-        const val DEFAULT_WP_APPROACH_RADIUS = 25
+        const val PREF_WP_APPROACH_RADIUS = "wp_approach_radius"  // metres, default 30 (approach/warning)
+        const val DEFAULT_WP_APPROACH_RADIUS = 30
+        const val PREF_WP_TAKEN_RADIUS = "wp_taken_radius"    // metres, default 20 (taken/auto-advance)
+        const val DEFAULT_WP_TAKEN_RADIUS = 20
         const val PREF_SYNC_API_KEY = "sync_api_key"
         const val SYNC_BASE_URL = "http://87.120.84.254:9222"
 
@@ -1432,27 +1434,27 @@ class MapFragment : Fragment() {
         ))
 
         // Approach radius circles (behind waypoint dots)
+        // Approach radius (outer circle — blue, warning/approach)
         style.addSource(GeoJsonSource(WP_RADIUS_SOURCE_ID))
         style.addLayer(FillLayer(WP_RADIUS_LAYER_ID, WP_RADIUS_SOURCE_ID).withProperties(
             PropertyFactory.fillColor("#00BFFF"),
-            PropertyFactory.fillOpacity(0.12f)
+            PropertyFactory.fillOpacity(0.10f)
         ))
-        // White outline for approach radius circles — visible on any background
         style.addLayer(LineLayer(WP_RADIUS_OUTLINE_LAYER_ID, WP_RADIUS_SOURCE_ID).withProperties(
-            PropertyFactory.lineColor("#FFFFFF"),
-            PropertyFactory.lineWidth(3.0f),
-            PropertyFactory.lineOpacity(0.7f)
+            PropertyFactory.lineColor("#00BFFF"),
+            PropertyFactory.lineWidth(2.5f),
+            PropertyFactory.lineOpacity(0.8f)
         ))
-        // Proximity circles from waypoint properties (blue, different from approach radius)
+        // Taken radius (inner circle — orange, auto-advance)
         style.addSource(GeoJsonSource(WP_PROXIMITY_SOURCE_ID))
         style.addLayer(FillLayer(WP_PROXIMITY_LAYER_ID, WP_PROXIMITY_SOURCE_ID).withProperties(
-            PropertyFactory.fillColor("#3b82f6"),
-            PropertyFactory.fillOpacity(0.08f)
+            PropertyFactory.fillColor("#FF6F00"),
+            PropertyFactory.fillOpacity(0.15f)
         ))
         style.addLayer(LineLayer(WP_PROXIMITY_OUTLINE_LAYER_ID, WP_PROXIMITY_SOURCE_ID).withProperties(
-            PropertyFactory.lineColor("#3b82f6"),
-            PropertyFactory.lineWidth(2.0f),
-            PropertyFactory.lineOpacity(0.6f)
+            PropertyFactory.lineColor("#FF6F00"),
+            PropertyFactory.lineWidth(2.5f),
+            PropertyFactory.lineOpacity(0.9f)
         ))
         // Navigation line: GPS → active waypoint
         style.addSource(GeoJsonSource(NAV_LINE_SOURCE_ID))
@@ -1666,23 +1668,24 @@ class MapFragment : Fragment() {
         val style = mapboxMap?.style ?: return
         val approachSource = style.getSourceAs<GeoJsonSource>(WP_RADIUS_SOURCE_ID) ?: return
         val proximitySource = style.getSourceAs<GeoJsonSource>(WP_PROXIMITY_SOURCE_ID)
-        val globalRadiusM = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val globalApproachM = prefs?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
             ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
-        // Approach radius circles (orange) — global setting, same for all
+        val globalTakenM = prefs?.getInt(PREF_WP_TAKEN_RADIUS, DEFAULT_WP_TAKEN_RADIUS)?.toDouble()
+            ?: DEFAULT_WP_TAKEN_RADIUS.toDouble()
+        // Approach radius circles (outer, blue) — approach/warning
         val approachFeatures = JSONArray()
         waypoints.forEach { wp ->
-            approachFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalRadiusM))
+            val r = if (wp.proximity > 0) wp.proximity else globalApproachM
+            approachFeatures.put(buildCirclePolygon(wp.lat, wp.lon, r))
         }
         approachSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", approachFeatures).toString())
-        // Proximity circles (blue) — per-waypoint from file properties
-        val proxFeatures = JSONArray()
+        // Taken radius circles (inner, orange) — auto-advance
+        val takenFeatures = JSONArray()
         waypoints.forEach { wp ->
-            if (wp.proximity > 0) {
-                proxFeatures.put(buildCirclePolygon(wp.lat, wp.lon, wp.proximity))
-            }
+            takenFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalTakenM))
         }
-        proximitySource?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", proxFeatures).toString())
+        proximitySource?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", takenFeatures).toString())
     }
 
     private fun buildCirclePolygon(lat: Double, lon: Double, radiusM: Double): JSONObject {
@@ -4009,19 +4012,23 @@ class MapFragment : Fragment() {
                         b.widgetNextCpName.text = wp.name.takeIf { it.isNotBlank() } ?: "WP${activeWpIndex + 1}"
                         val remKm = calcRemainingKm(newPoint)
                         b.widgetRemainKm.text = if (remKm < 10) String.format("%.1f", remKm) else remKm.toInt().toString()
-                        // Auto-advance when within approach radius (only during active navigation)
+                        // Two radii: approach (warning sound) and taken (auto-advance)
                         val ctx = context
                         val prefs = ctx?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
                         val globalApproachRadius = prefs?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
                             ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
+                        val globalTakenRadius = prefs?.getInt(PREF_WP_TAKEN_RADIUS, DEFAULT_WP_TAKEN_RADIUS)?.toDouble()
+                            ?: DEFAULT_WP_TAKEN_RADIUS.toDouble()
                         val approachRadius = if (wp.proximity > 0) wp.proximity else globalApproachRadius
-                        val inRadius = distM <= approachRadius
-                        // Sound: entering radius (fire once per waypoint)
-                        if (inRadius && !wasInApproachRadius) {
+                        val takenRadius = globalTakenRadius.coerceAtMost(approachRadius)
+                        val inApproach = distM <= approachRadius
+                        val inTaken = distM <= takenRadius
+                        // Sound: entering approach radius (fire once per waypoint)
+                        if (inApproach && !wasInApproachRadius) {
                             if (prefs?.getBoolean(PREF_SOUND_APPROACH, true) == true) playApproachSound()
                         }
-                        wasInApproachRadius = inRadius
-                        if (navActive && inRadius) {
+                        wasInApproachRadius = inApproach
+                        if (navActive && inTaken) {
                             val nextIndex = activeWpIndex + 1
                             if (nextIndex < waypoints.size) {
                                 advanceWaypoint()
@@ -4452,11 +4459,17 @@ class MapFragment : Fragment() {
     }
 
     private fun playApproachSound() {
-        try {
-            val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 90)
-            tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 400)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ tg.release() }, 500)
-        } catch (e: Exception) { /* ignore if audio unavailable */ }
+        // 2 loud high-pitched beeps on ALARM stream — distinct from taken sound
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        for (i in 0 until 2) {
+            handler.postDelayed({
+                try {
+                    val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_ALARM, 100)
+                    tg.startTone(android.media.ToneGenerator.TONE_CDMA_HIGH_SS, 250)
+                    handler.postDelayed({ tg.release() }, 300)
+                } catch (_: Exception) {}
+            }, i * 350L)
+        }
     }
 
     private fun playWaypointTakenSound() {

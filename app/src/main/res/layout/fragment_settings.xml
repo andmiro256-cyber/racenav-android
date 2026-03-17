@@ -1402,7 +1402,7 @@
                 android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp" />
 
-            <!-- Approach radius for auto-advance -->
+            <!-- Approach radius (outer — warning sound) -->
             <LinearLayout
                 android:id="@+id/rowApproachRadius"
                 android:layout_width="match_parent"
@@ -1420,7 +1420,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Радиус взятия точки (м)"
+                    android:text="Радиус сближения по умолч. (м)"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <ImageButton
@@ -1440,6 +1440,50 @@
                     android:gravity="center" />
                 <ImageButton
                     android:id="@+id/btnApproachRadiusPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+            </LinearLayout>
+            <!-- Taken radius (inner — auto-advance) -->
+            <LinearLayout
+                android:id="@+id/rowTakenRadius"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Радиус взятия (м)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <ImageButton
+                    android:id="@+id/btnTakenRadiusMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@drawable/ic_remove"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:tint="#FFFFFF" />
+                <TextView
+                    android:id="@+id/txtTakenRadius"
+                    android:layout_width="44dp"
+                    android:layout_height="wrap_content"
+                    android:text="20"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <ImageButton
+                    android:id="@+id/btnTakenRadiusPlus"
                     android:layout_width="36dp"
                     android:layout_height="36dp"
                     android:src="@drawable/ic_add"
