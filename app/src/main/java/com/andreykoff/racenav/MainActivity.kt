@@ -30,6 +30,8 @@ class MainActivity : AppCompatActivity() {
 
         applyKeepScreen()
         applyOrientation()
+        // Tell system this app handles volume keys — prevents MIUI/EMUI intercepting them
+        volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -421,14 +423,13 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
         val volumeZoom = prefs.getBoolean(MapFragment.PREF_VOLUME_ZOOM, true)
         when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> {
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 event.startTracking() // needed for long-press detection
-                if (event.repeatCount == 0 && volumeZoom) mapFrag?.zoomIn()
-                return true
-            }
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                event.startTracking() // needed for long-press detection
-                if (event.repeatCount == 0 && volumeZoom) mapFrag?.zoomOut()
+                if (!volumeZoom || mapFrag == null) return super.onKeyDown(keyCode, event)
+                if (event.repeatCount == 0) {
+                    if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mapFrag.zoomIn()
+                    else mapFrag.zoomOut()
+                }
                 return true
             }
         }
