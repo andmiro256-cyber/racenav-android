@@ -442,15 +442,74 @@ class MainActivity : AppCompatActivity() {
         mapFrag.checkForUpdates { latest, current, hasUpdate, apkUrl, changelog ->
             if (!hasUpdate || apkUrl == null) return@checkForUpdates
             try {
-                AlertDialog.Builder(this)
-                    .setTitle("Доступно обновление")
-                    .setMessage("Новая версия: $latest (текущая: $current)\n\n${changelog ?: "Исправления и улучшения"}")
-                    .setPositiveButton("Обновить") { _, _ ->
-                        UpdateManager.downloadAndInstall(this, apkUrl, latest ?: "")
-                    }
-                    .setNegativeButton("Позже", null)
-                    .show()
+                showUpdateDialogWithProgress(latest ?: "", current, apkUrl, changelog)
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun showUpdateDialogWithProgress(latest: String, current: String, apkUrl: String, changelog: String?) {
+        val dp = resources.displayMetrics.density
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (16 * dp).toInt(), (20 * dp).toInt(), (8 * dp).toInt())
+        }
+        root.addView(android.widget.TextView(this).apply {
+            text = "Новая версия: $latest\nТекущая: $current\n\n${changelog ?: "Исправления и улучшения"}"
+            setTextColor(0xFFCCCCCC.toInt()); textSize = 14f
+        })
+        val progressBar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (6 * dp).toInt()).apply { topMargin = (12 * dp).toInt() }
+            max = 100; progress = 0; visibility = android.view.View.GONE
+            progressDrawable.setColorFilter(0xFFFF6F00.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+        }
+        root.addView(progressBar)
+        val progressText = android.widget.TextView(this).apply {
+            setTextColor(0xFF999999.toInt()); textSize = 12f; visibility = android.view.View.GONE
+        }
+        root.addView(progressText)
+
+        val dlg = AlertDialog.Builder(this, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+            .setTitle("Доступно обновление")
+            .setView(root)
+            .setPositiveButton("Скачать", null)
+            .setNegativeButton("Позже", null)
+            .setCancelable(true)
+            .create()
+        dlg.show()
+
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+            dlg.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+            dlg.setCancelable(false)
+            progressBar.visibility = android.view.View.VISIBLE
+            progressText.visibility = android.view.View.VISIBLE
+            progressText.text = "Скачивание..."
+
+            UpdateManager.downloadAndInstall(this, apkUrl, latest,
+                onProgress = { bytesRead, totalBytes ->
+                    if (totalBytes > 0) {
+                        val pct = (bytesRead * 100 / totalBytes).toInt()
+                        progressBar.progress = pct
+                        progressText.text = "Скачано ${"%.1f".format(bytesRead / 1048576.0)} / ${"%.1f".format(totalBytes / 1048576.0)} МБ ($pct%)"
+                    } else {
+                        progressText.text = "Скачано ${"%.1f".format(bytesRead / 1048576.0)} МБ..."
+                        progressBar.isIndeterminate = true
+                    }
+                },
+                onComplete = { success, error ->
+                    if (success) {
+                        progressText.text = "✓ Скачано! Установка..."
+                        progressBar.progress = 100
+                        progressText.postDelayed({ dlg.dismiss() }, 1500)
+                    } else {
+                        progressText.text = "Ошибка: $error"
+                        progressText.setTextColor(0xFFEF4444.toInt())
+                        dlg.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                        dlg.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                        dlg.setCancelable(true)
+                    }
+                }
+            )
         }
     }
 
