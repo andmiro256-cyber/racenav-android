@@ -17,11 +17,9 @@ object UpdateManager {
 
     const val UPDATE_URL = "http://87.120.84.254/updates/latest.json"
 
-    /**
-     * Download APK with progress callback.
-     * @param onProgress (bytesRead, totalBytes) — called on Main thread; totalBytes = -1 if unknown
-     * @param onComplete called on Main thread when download finishes (success or error)
-     */
+    // Pending APK path for retry after permission grant
+    var pendingApkFile: File? = null
+
     fun downloadAndInstall(
         context: Context,
         apkUrl: String,
@@ -37,7 +35,7 @@ object UpdateManager {
                 conn.connectTimeout = 15_000
                 conn.readTimeout = 30_000
                 conn.connect()
-                val totalBytes = conn.contentLengthLong  // -1 if unknown
+                val totalBytes = conn.contentLengthLong
                 var bytesRead = 0L
 
                 conn.inputStream.use { input ->
@@ -64,7 +62,6 @@ object UpdateManager {
                 withContext(Dispatchers.Main) {
                     onComplete?.invoke(false, e.message)
                     Toast.makeText(context, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
-                    // Fallback to browser
                     val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(apkUrl))
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(intent)
@@ -73,7 +70,6 @@ object UpdateManager {
         }
     }
 
-    /** Compare version strings like "2.0.39" > "2.0.8" */
     fun isNewer(remote: String, local: String): Boolean {
         val r = remote.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
         val l = local.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
@@ -88,16 +84,35 @@ object UpdateManager {
     }
 
     private fun installApk(context: Context, apkFile: File) {
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.provider",
-            apkFile
-        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            // Save pending APK for retry in onResume
+            pendingApkFile = apkFile
+            Toast.makeText(context, "Разрешите установку, затем вернитесь в приложение", Toast.LENGTH_LONG).show()
+            val settingsIntent = Intent(
+                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                android.net.Uri.parse("package:${context.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(settingsIntent)
+            return
+        }
+
+        pendingApkFile = null
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", apkFile)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
+    }
+
+    /** Call from Activity.onResume to retry install after permission grant */
+    fun retryPendingInstall(context: Context) {
+        val apk = pendingApkFile ?: return
+        if (apk.exists() && context.packageManager.canRequestPackageInstalls()) {
+            installApk(context, apk)
+        }
     }
 }

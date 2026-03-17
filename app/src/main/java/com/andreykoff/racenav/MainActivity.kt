@@ -355,6 +355,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        UpdateManager.retryPendingInstall(this)
+    }
+
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         // If we're in a sub-fragment (Settings etc.) — go back normally

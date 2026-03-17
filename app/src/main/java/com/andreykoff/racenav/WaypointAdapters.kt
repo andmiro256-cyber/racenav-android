@@ -69,7 +69,7 @@ class WaypointListAdapter(
         } else {
             holder.symText.visibility = View.GONE
         }
-        holder.nameText.text = wp.name.ifBlank { "КП ${position + 1}" }
+        holder.nameText.text = wp.name.ifBlank { "WP%02d".format(position + 1) }
         holder.coordText.text = "%.5f, %.5f".format(wp.lat, wp.lon)
         holder.itemView.setBackgroundColor(if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT)
         holder.itemView.setOnClickListener { v ->
@@ -149,7 +149,7 @@ class RouteEditorAdapter(
     override fun onBindViewHolder(holder: VH, position: Int) {
         val wp = items[position]
         holder.numText.text = "${position + 1}."
-        holder.nameText.text = wp.name.ifBlank { "КП ${position + 1}" }
+        holder.nameText.text = wp.name.ifBlank { "WP%02d".format(position + 1) }
         holder.coordText.text = "%.5f, %.5f".format(wp.lat, wp.lon)
 
         if (position < items.size - 1) {

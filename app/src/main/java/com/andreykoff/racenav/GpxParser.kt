@@ -69,7 +69,7 @@ object GpxParser {
                         "wpt" -> {
                             if (lat != 0.0 || lon != 0.0) {
                                 wptList.add(Waypoint(
-                                    name = name.ifBlank { "КП ${wptList.size + 1}" },
+                                    name = name.ifBlank { "WP%02d".format(wptList.size + 1) },
                                     lat = lat, lon = lon,
                                     index = wptList.size + 1, description = desc,
                                     proximity = proximity, color = color, symbol = symbol
@@ -80,7 +80,7 @@ object GpxParser {
                         "rtept" -> {
                             if (lat != 0.0 || lon != 0.0) {
                                 rteptList.add(Waypoint(
-                                    name = name.ifBlank { "КП ${rteptList.size + 1}" },
+                                    name = name.ifBlank { "WP%02d".format(rteptList.size + 1) },
                                     lat = lat, lon = lon,
                                     index = rteptList.size + 1, description = desc,
                                     proximity = proximity, color = color, symbol = symbol
@@ -137,7 +137,7 @@ object GpxParser {
                     if (parser.name == "wpt" || parser.name == "rtept") {
                         if (lat != 0.0 || lon != 0.0) {
                             waypoints.add(Waypoint(
-                                name = name.ifBlank { "КП ${waypoints.size + 1}" },
+                                name = name.ifBlank { "WP%02d".format(waypoints.size + 1) },
                                 lat = lat, lon = lon,
                                 index = waypoints.size + 1,
                                 description = desc,
@@ -174,7 +174,7 @@ object GpxParser {
                 if (lat == 0.0 && lon == 0.0) continue
                 val proximity = parts.getOrNull(14)?.trim()?.toDoubleOrNull() ?: 0.0
                 waypoints.add(Waypoint(
-                    name = name.ifBlank { "КП ${waypoints.size + 1}" },
+                    name = name.ifBlank { "WP%02d".format(waypoints.size + 1) },
                     lat = lat, lon = lon,
                     index = waypoints.size + 1,
                     proximity = proximity
@@ -269,7 +269,7 @@ object GpxParser {
                 if (lat == 0.0 && lon == 0.0) continue
                 // Name is usually at index 10 or 8, try both
                 val name = (parts.getOrNull(10) ?: parts.getOrNull(8) ?: "").trim()
-                    .ifBlank { "КП ${waypoints.size + 1}" }
+                    .ifBlank { "WP%02d".format(waypoints.size + 1) }
                 waypoints.add(Waypoint(
                     name = name, lat = lat, lon = lon,
                     index = waypoints.size + 1

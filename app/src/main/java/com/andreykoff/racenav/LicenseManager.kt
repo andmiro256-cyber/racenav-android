@@ -263,7 +263,10 @@ object LicenseManager {
             val until = prefs.getString(KEY_LICENSE_UNTIL, "") ?: ""
             if (until.isNotEmpty()) {
                 try {
-                    val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).parse(until)
+                    val clean = until.substringBefore('.').substringBefore('Z')
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
+                    fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    val date = fmt.parse(clean)
                     if (date != null && date.time > System.currentTimeMillis()) return true
                 } catch (_: Exception) {}
             }
@@ -290,7 +293,11 @@ object LicenseManager {
         val until = prefs.getString(KEY_SERVER_UNTIL, "") ?: ""
         if (until.isEmpty()) return false
         try {
-            val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).parse(until)
+            // Server returns ISO 8601 with ms and Z, e.g. "2026-04-16T20:25:23.012Z"
+            val clean = until.substringBefore('.').substringBefore('Z')
+            val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
+            fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+            val date = fmt.parse(clean)
             return date != null && date.time > System.currentTimeMillis()
         } catch (_: Exception) { return false }
     }
