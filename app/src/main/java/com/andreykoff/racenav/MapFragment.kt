@@ -5949,7 +5949,7 @@ class MapFragment : Fragment() {
     private val cameraFrameCallback = object : android.view.Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!cameraLoopRunning || _binding == null || !isAdded) return
-            moveCameraSmooth(System.nanoTime())  // not frameTimeNanos — Samsung OEMs may use different clock base
+            try { moveCameraSmooth(System.nanoTime()) } catch (_: Exception) {}
             android.view.Choreographer.getInstance().postFrameCallback(this)
         }
     }

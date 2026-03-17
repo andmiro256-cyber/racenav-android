@@ -143,10 +143,8 @@ class TraccarService : Service() {
         })
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
-        stopTraccar()
-    }
+    // onTaskRemoved NOT overridden — Samsung/Vivo call it aggressively
+    // even when switching apps. Service stops via ACTION_STOP or onDestroy.
 
     override fun onDestroy() {
         if (isRunning) stopTraccar()
