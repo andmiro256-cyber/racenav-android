@@ -309,6 +309,9 @@ class MapFragment : Fragment() {
 
         val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status","battery")
 
+        const val PREF_TOP_BAR_ORDER = "top_bar_order"
+        val ALL_TOP_BAR_KEYS = listOf("compass","zoom","waypoint","quick","stop","spacer","go","battery","layers","rec","lock","map_switch","server_dot","settings")
+
         // Top bar button visibility prefs
         const val PREF_BTN_COMPASS = "btn_compass"
         const val PREF_BTN_ZOOM = "btn_zoom"
@@ -835,10 +838,9 @@ class MapFragment : Fragment() {
             level > 20 -> 0xFFFFEB3B.toInt()  // yellow
             else -> 0xFFFF4444.toInt()         // red
         }
-        val icon = if (isCharging) "⚡" else ""
         b.widgetBattery.text = "$level"
         b.widgetBattery.setTextColor(color)
-        b.btnBatteryIndicator.text = "$icon$level%"
+        b.btnBatteryIndicator.text = "$level%"
         b.btnBatteryIndicator.setTextColor(color)
     }
 
@@ -861,6 +863,8 @@ class MapFragment : Fragment() {
         b.btnLock.visibility = if (prefs.getBoolean(PREF_BTN_LOCK, true)) View.VISIBLE else View.GONE
         b.btnMapSwitch.visibility = if (prefs.getBoolean(PREF_BTN_MAP_SWITCH, false)) View.VISIBLE else View.GONE
         b.topBarServerDot.visibility = if (prefs.getBoolean(PREF_BTN_SERVER_DOT, false)) View.VISIBLE else View.GONE
+        b.btnBatteryIndicator.visibility = if (prefs.getBoolean(PREF_BTN_BATTERY, false)) View.VISIBLE else View.GONE
+        if (prefs.getBoolean(PREF_BTN_BATTERY, false)) updateBatteryLevel()
         // Update server dot color
         if (TraccarService.isRunning) {
             b.topBarServerDot.background?.setTint(0xFF4CAF50.toInt())
@@ -868,6 +872,66 @@ class MapFragment : Fragment() {
             b.topBarServerDot.background?.setTint(0xFF888888.toInt())
         }
         // btnSettings always visible — user needs access to settings
+
+        // Reorder top bar buttons according to saved order
+        applyTopBarOrder()
+    }
+
+    fun applyTopBarOrder() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val b = _binding ?: return
+        val topBar = b.topBar
+
+        val defaultOrder = ALL_TOP_BAR_KEYS.joinToString(",")
+        val savedOrder = prefs.getString(PREF_TOP_BAR_ORDER, defaultOrder) ?: defaultOrder
+        val orderedKeys = savedOrder.split(",").toMutableList()
+        // Add any new keys that may have been added in updates
+        ALL_TOP_BAR_KEYS.forEach { k -> if (k !in orderedKeys) orderedKeys.add(k) }
+
+        // Map key -> view(s). "zoom" maps to two buttons (in/out).
+        fun viewsForKey(key: String): List<android.view.View> = when (key) {
+            "compass"    -> listOf(b.compassView)
+            "zoom"       -> listOf(b.btnZoomIn, b.btnZoomOut)
+            "waypoint"   -> listOf(b.btnAddWaypoint)
+            "quick"      -> listOf(b.btnQuickAction)
+            "stop"       -> listOf(b.btnWidgetStop)
+            "go"         -> listOf(b.btnWidgetGo)
+            "battery"    -> listOf(b.btnBatteryIndicator)
+            "layers"     -> listOf(b.btnLayers)
+            "rec"        -> listOf(b.btnRec)
+            "lock"       -> listOf(b.btnLock)
+            "map_switch" -> listOf(b.btnMapSwitch)
+            "server_dot" -> listOf(b.topBarServerDot)
+            "settings"   -> listOf(b.btnSettings)
+            else         -> emptyList()
+        }
+
+        // Detach all children from topBar (without destroying them)
+        topBar.removeAllViews()
+
+        for (key in orderedKeys) {
+            if (key == "spacer") {
+                // Spacer: flexible space between left and right groups
+                val spacer = android.view.View(requireContext()).apply {
+                    layoutParams = android.widget.LinearLayout.LayoutParams(0, 1, 1f)
+                }
+                topBar.addView(spacer)
+                continue
+            }
+
+            val views = viewsForKey(key)
+            if (views.isEmpty()) continue
+
+            // Skip entirely hidden (disabled) buttons — they remain GONE
+            val allGone = views.all { it.visibility == View.GONE }
+            if (allGone) continue
+
+            for (v in views) {
+                // Detach from parent if still attached somewhere
+                (v.parent as? android.view.ViewGroup)?.removeView(v)
+                topBar.addView(v)
+            }
+        }
     }
 
     private fun startTimeTicker() {
@@ -3318,8 +3382,8 @@ class MapFragment : Fragment() {
             .setView(root)
             .setPositiveButton("OK") { _, _ ->
                 val name = inputName.text.toString().trim().ifBlank { "WP${index + 1}" }
-                val lat = inputLat.text.toString().toDoubleOrNull() ?: wp.lat
-                val lon = inputLon.text.toString().toDoubleOrNull() ?: wp.lon
+                val lat = parseDM(inputLat.text.toString(), wp.lat)
+                val lon = parseDM(inputLon.text.toString(), wp.lon)
                 val desc = inputDesc.text.toString().trim()
                 wps[index] = wp.copy(name = name, lat = lat, lon = lon, index = index + 1, description = desc)
                 onDone()
@@ -3376,30 +3440,24 @@ class MapFragment : Fragment() {
         }
         root.addView(inputDesc)
 
-        // Coordinates
-        val coordRow = android.widget.LinearLayout(ctx).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-        }
+        // Coordinates (WGS84 degrees-minutes, editable)
         root.addView(label("Координаты (WGS84)"))
-        root.addView(android.widget.TextView(ctx).apply {
-            text = "${formatDM(wp.lat, true)}  ${formatDM(wp.lon, false)}"
-            setTextColor(android.graphics.Color.parseColor("#FF6F00")); textSize = 13f
-            setPadding(0, 0, 0, 4)
-        })
         val inputLat = android.widget.EditText(ctx).apply {
-            hint = "Широта"; setText(wp.lat.toString()); setTextColor(android.graphics.Color.WHITE)
+            hint = "N 59°52.123'"
+            setText(formatDM(wp.lat, true))
+            setTextColor(android.graphics.Color.WHITE)
             setHintTextColor(android.graphics.Color.parseColor("#666666"))
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
-            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            textSize = 14f
         }
+        root.addView(inputLat)
         val inputLon = android.widget.EditText(ctx).apply {
-            hint = "Долгота"; setText(wp.lon.toString()); setTextColor(android.graphics.Color.WHITE)
+            hint = "E 29°45.678'"
+            setText(formatDM(wp.lon, false))
+            setTextColor(android.graphics.Color.WHITE)
             setHintTextColor(android.graphics.Color.parseColor("#666666"))
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
-            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            textSize = 14f
         }
-        coordRow.addView(inputLat); coordRow.addView(inputLon)
-        root.addView(coordRow)
+        root.addView(inputLon)
 
         // Symbol selector
         root.addView(label("Символ"))
@@ -3490,8 +3548,8 @@ class MapFragment : Fragment() {
             .setView(scroll)
             .setPositiveButton("OK") { _, _ ->
                 val name = inputName.text.toString().trim().ifBlank { "WP${index + 1}" }
-                val lat = inputLat.text.toString().toDoubleOrNull() ?: wp.lat
-                val lon = inputLon.text.toString().toDoubleOrNull() ?: wp.lon
+                val lat = parseDM(inputLat.text.toString(), wp.lat)
+                val lon = parseDM(inputLon.text.toString(), wp.lon)
                 val desc = inputDesc.text.toString().trim()
                 val prox = inputProx.text.toString().toDoubleOrNull() ?: 0.0
                 val newColor = if (selectedColor == "#FF6F00") "" else selectedColor
@@ -3776,6 +3834,7 @@ class MapFragment : Fragment() {
                 saveUserPoints()
                 wpBitmapCache.clear()
             }
+            showQuickActionMenu()
         }
     }
 
@@ -4614,6 +4673,24 @@ class MapFragment : Fragment() {
         return "$dir $deg°${"%.3f".format(min)}'"
     }
 
+    /** Parse "N 59°52.123'" or "59°52.123'" back to decimal degrees */
+    private fun parseDM(text: String, fallback: Double): Double {
+        try {
+            val s = text.trim().uppercase()
+            val negative = s.startsWith("S") || s.startsWith("W")
+            val clean = s.removePrefix("N").removePrefix("S").removePrefix("E").removePrefix("W").trim()
+            val degEnd = clean.indexOf('°')
+            if (degEnd < 0) return text.toDoubleOrNull() ?: fallback  // fallback to decimal
+            val deg = clean.substring(0, degEnd).trim().toInt()
+            val minStr = clean.substring(degEnd + 1).replace("'", "").replace("′", "").trim()
+            val min = minStr.toDouble()
+            val result = deg + min / 60.0
+            return if (negative) -result else result
+        } catch (_: Exception) {
+            return text.toDoubleOrNull() ?: fallback
+        }
+    }
+
     private var crosshairHideRunnable: Runnable? = null
     private val crosshairHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -5145,9 +5222,10 @@ class MapFragment : Fragment() {
                 }
             }
         }
-        // Update top bar server dot based on TraccarService running state
-        _binding?.topBarServerDot?.visibility =
-            if (TraccarService.isRunning) View.VISIBLE else View.GONE
+        // Update top bar server dot based on TraccarService + user pref
+        val showServerDot = TraccarService.isRunning &&
+            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_BTN_SERVER_DOT, false) == true
+        _binding?.topBarServerDot?.visibility = if (showServerDot) View.VISIBLE else View.GONE
         // Синхронизируем UI если сервис пишет трек в фоне
         if (isRecording) {
             binding.btnRec.setImageResource(R.drawable.ic_rec)

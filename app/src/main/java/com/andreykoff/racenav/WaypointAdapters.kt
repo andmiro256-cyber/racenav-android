@@ -213,6 +213,83 @@ class RouteItemTouchCallback(private val adapter: RouteEditorAdapter) : ItemTouc
     }
 }
 
+/** Adapter for widget order settings with drag & drop + toggle */
+class WidgetOrderAdapter(
+    val items: MutableList<Triple<String, String, Boolean>>, // key, label, enabled
+    private val dp: Float,
+    private val onToggle: (Int, Boolean) -> Unit
+) : RecyclerView.Adapter<WidgetOrderAdapter.VH>() {
+
+    var dragStartListener: ((RecyclerView.ViewHolder) -> Unit)? = null
+
+    class VH(row: LinearLayout) : RecyclerView.ViewHolder(row) {
+        val dragHandle: TextView = row.findViewWithTag("drag")
+        val label: TextView = row.findViewWithTag("label")
+        val toggle: androidx.appcompat.widget.SwitchCompat = row.findViewWithTag("toggle")
+    }
+
+    fun onItemMove(from: Int, to: Int) {
+        if (from < 0 || from >= items.size || to < 0 || to >= items.size) return
+        val item = items.removeAt(from)
+        items.add(to, item)
+        notifyItemMoved(from, to)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+        val ctx = parent.context
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = RecyclerView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (48 * dp + 0.5f).toInt()
+            )
+            setPadding((4 * dp).toInt(), 0, (16 * dp).toInt(), 0)
+        }
+        row.addView(TextView(ctx).apply {
+            tag = "drag"; text = "≡"; textSize = 20f; setTextColor(Color.parseColor("#666666"))
+            setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
+        })
+        row.addView(TextView(ctx).apply {
+            tag = "label"; textSize = 15f; setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(androidx.appcompat.widget.SwitchCompat(ctx).apply {
+            tag = "toggle"
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        })
+        return VH(row)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onBindViewHolder(holder: VH, position: Int) {
+        val (_, label, enabled) = items[position]
+        holder.label.text = label
+        holder.toggle.setOnCheckedChangeListener(null)
+        holder.toggle.isChecked = enabled
+        holder.toggle.setOnCheckedChangeListener { _, checked ->
+            val pos = holder.adapterPosition
+            if (pos != RecyclerView.NO_POSITION) {
+                items[pos] = items[pos].copy(third = checked)
+                onToggle(pos, checked)
+            }
+        }
+        holder.itemView.setBackgroundColor(
+            if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT
+        )
+        holder.dragHandle.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) dragStartListener?.invoke(holder)
+            false
+        }
+    }
+
+    override fun getItemCount() = items.size
+}
+
 private fun symbolChar(symbol: String): String = when (symbol.lowercase()) {
     "triangle" -> "△"; "flag" -> "⚑"; "star" -> "★"; "cross" -> "✚"
     "square" -> "■"; "diamond" -> "◆"; "pin" -> "📍"; else -> "⊕"

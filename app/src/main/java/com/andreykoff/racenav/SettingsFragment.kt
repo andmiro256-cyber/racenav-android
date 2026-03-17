@@ -72,6 +72,9 @@ import android.widget.ImageButton
 import android.widget.ProgressBar
 import com.andreykoff.racenav.MapFragment.Companion.PREF_ORIENTATION
 import androidx.appcompat.app.AlertDialog
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -2356,35 +2359,54 @@ class SettingsFragment : Fragment() {
                 BtnInfo("Батарея",         MapFragment.PREF_BTN_BATTERY, false),
             )
             val dp = resources.displayMetrics.density
-            for (btn in topButtons) {
-                val row = LinearLayout(requireContext()).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setBackgroundColor(0xFF1E1E1E.toInt())
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        (48 * dp + 0.5f).toInt()
-                    ).apply { topMargin = (1 * dp + 0.5f).toInt() }
-                    setPadding((16 * dp + 0.5f).toInt(), 0, (16 * dp + 0.5f).toInt(), 0)
+            // Build top bar items for drag & drop — use prefKey as key directly
+            val topBtnKeys = topButtons.map { btn ->
+                Triple(btn.prefKey, btn.label, prefs.getBoolean(btn.prefKey, btn.defaultOn))
+            }.toMutableList()
+
+            val topRv = androidx.recyclerview.widget.RecyclerView(requireContext()).apply {
+                layoutManager = androidx.recyclerview.widget.LinearLayoutManager(requireContext())
+                isNestedScrollingEnabled = false
+                // Fixed height for all items to prevent RecyclerView clipping inside ScrollView
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    ((49 * dp) * topButtons.size).toInt()
+                )
+            }
+            val topAdapter = WidgetOrderAdapter(topBtnKeys, dp) { pos, checked ->
+                val prefKey = topBtnKeys.getOrNull(pos)?.first ?: return@WidgetOrderAdapter
+                prefs.edit().putBoolean(prefKey, checked).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyTopBarPrefs()
+            }
+            topRv.adapter = topAdapter
+            val topTouchCallback = object : androidx.recyclerview.widget.ItemTouchHelper.Callback() {
+                override fun isLongPressDragEnabled() = false
+                override fun isItemViewSwipeEnabled() = false
+                override fun getMovementFlags(rv: androidx.recyclerview.widget.RecyclerView, vh: androidx.recyclerview.widget.RecyclerView.ViewHolder) =
+                    makeMovementFlags(androidx.recyclerview.widget.ItemTouchHelper.UP or androidx.recyclerview.widget.ItemTouchHelper.DOWN, 0)
+                override fun onMove(rv: androidx.recyclerview.widget.RecyclerView, source: androidx.recyclerview.widget.RecyclerView.ViewHolder, target: androidx.recyclerview.widget.RecyclerView.ViewHolder): Boolean {
+                    topAdapter.onItemMove(source.adapterPosition, target.adapterPosition)
+                    return true
                 }
-                val label = TextView(requireContext()).apply {
-                    text = btn.label
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 15f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                override fun onSwiped(vh: androidx.recyclerview.widget.RecyclerView.ViewHolder, dir: Int) {}
+                override fun clearView(rv: androidx.recyclerview.widget.RecyclerView, vh: androidx.recyclerview.widget.RecyclerView.ViewHolder) {
+                    super.clearView(rv, vh)
+                    vh.itemView.alpha = 1f
+                    val newOrder = topAdapter.items.map { it.first }.joinToString(",")
+                    prefs.edit().putString(MapFragment.PREF_TOP_BAR_ORDER, newOrder).apply()
+                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyTopBarPrefs()
                 }
-                val sw = SwitchCompat(requireContext()).apply {
-                    isChecked = prefs.getBoolean(btn.prefKey, btn.defaultOn)
-                    setOnCheckedChangeListener { _, checked ->
-                        prefs.edit().putBoolean(btn.prefKey, checked).apply()
-                        parentFragmentManager.fragments.filterIsInstance<MapFragment>()
-                            .firstOrNull()?.applyTopBarPrefs()
+                override fun onSelectedChanged(vh: androidx.recyclerview.widget.RecyclerView.ViewHolder?, actionState: Int) {
+                    super.onSelectedChanged(vh, actionState)
+                    if (actionState == androidx.recyclerview.widget.ItemTouchHelper.ACTION_STATE_DRAG) {
+                        vh?.itemView?.alpha = 0.7f
                     }
                 }
-                row.addView(label)
-                row.addView(sw)
-                container.addView(row)
             }
+            val topItemTouchHelper = androidx.recyclerview.widget.ItemTouchHelper(topTouchCallback)
+            topItemTouchHelper.attachToRecyclerView(topRv)
+            topAdapter.dragStartListener = { vh -> topItemTouchHelper.startDrag(vh) }
+            container.addView(topRv)
 
             // ── Map switch settings (only shown when map switch button is enabled) ──
             if (prefs.getBoolean(MapFragment.PREF_BTN_MAP_SWITCH, false)) {
@@ -2447,7 +2469,7 @@ class SettingsFragment : Fragment() {
                 addMapRow("  Карта 2", MapFragment.PREF_MAP_SWITCH_B, "google")
             }
 
-            // ── Bottom widgets subsection ──
+            // ── Bottom widgets subsection (RecyclerView with drag & drop) ──
             val bottomLabel = TextView(requireContext()).apply {
                 text = "НИЖНЯЯ ПАНЕЛЬ"
                 setTextColor(0xFF888888.toInt())
@@ -2463,78 +2485,70 @@ class SettingsFragment : Fragment() {
             }
             container.addView(bottomLabel)
 
-            orderedKeys.forEachIndexed { idx, key ->
-                val info = allWidgets.find { it.key == key } ?: return@forEachIndexed
-                val row = LinearLayout(requireContext()).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setBackgroundColor(0xFF1E1E1E.toInt())
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        (52 * dp + 0.5f).toInt()
-                    ).apply { topMargin = (1 * dp + 0.5f).toInt() }
-                    setPadding((16 * dp + 0.5f).toInt(), 0, (8 * dp + 0.5f).toInt(), 0)
-                }
+            val orderedWidgets = orderedKeys.mapNotNull { key -> allWidgets.find { it.key == key } } +
+                allWidgets.filter { w -> w.key !in orderedKeys }
+            val widgetItems = orderedWidgets.map {
+                Triple(it.key, it.label, prefs.getBoolean(it.prefKey, it.defaultOn))
+            }.toMutableList()
 
-                val sw = SwitchCompat(requireContext()).apply {
-                    isChecked = prefs.getBoolean(info.prefKey, info.defaultOn)
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                    setOnCheckedChangeListener { _, checked ->
-                        prefs.edit().putBoolean(info.prefKey, checked).apply()
-                        parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
-                    }
-                }
-
-                val label = TextView(requireContext()).apply {
-                    text = info.label
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 15f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                }
-
-                val btnSize = (32 * dp + 0.5f).toInt()
-
-                val btnUp = ImageButton(requireContext()).apply {
-                    setImageResource(android.R.drawable.arrow_up_float)
-                    background = null
-                    layoutParams = LinearLayout.LayoutParams(btnSize, btnSize)
-                    isEnabled = idx > 0
-                    alpha = if (idx > 0) 1f else 0.3f
-                    setOnClickListener {
-                        if (idx > 0) {
-                            orderedKeys.removeAt(idx); orderedKeys.add(idx - 1, key)
-                            prefs.edit().putString(PREF_WIDGET_ORDER, orderedKeys.joinToString(",")).apply()
-                            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
-                            rebuildRows()
-                        }
-                    }
-                }
-
-                val btnDown = ImageButton(requireContext()).apply {
-                    setImageResource(android.R.drawable.arrow_down_float)
-                    background = null
-                    layoutParams = LinearLayout.LayoutParams(btnSize, btnSize)
-                    isEnabled = idx < orderedKeys.size - 1
-                    alpha = if (idx < orderedKeys.size - 1) 1f else 0.3f
-                    setOnClickListener {
-                        if (idx < orderedKeys.size - 1) {
-                            orderedKeys.removeAt(idx); orderedKeys.add(idx + 1, key)
-                            prefs.edit().putString(PREF_WIDGET_ORDER, orderedKeys.joinToString(",")).apply()
-                            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetPrefs()
-                            rebuildRows()
-                        }
-                    }
-                }
-
-                row.addView(sw)
-                row.addView(label)
-                row.addView(btnUp)
-                row.addView(btnDown)
-                container.addView(row)
+            val mapFragRef = {
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
             }
+
+            val widgetAdapter = WidgetOrderAdapter(widgetItems, dp) { pos, checked ->
+                val key = widgetItems.getOrNull(pos)?.first ?: return@WidgetOrderAdapter
+                val w = allWidgets.find { it.key == key } ?: return@WidgetOrderAdapter
+                prefs.edit().putBoolean(w.prefKey, checked).apply()
+                mapFragRef()?.applyWidgetPrefs()
+            }
+
+            val widgetRecyclerView = RecyclerView(requireContext()).apply {
+                layoutManager = LinearLayoutManager(requireContext())
+                adapter = widgetAdapter
+                isNestedScrollingEnabled = false
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+
+            val touchCallback = object : ItemTouchHelper.Callback() {
+                override fun isLongPressDragEnabled() = false
+                override fun isItemViewSwipeEnabled() = false
+                override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder) =
+                    makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0)
+                override fun onMove(rv: RecyclerView, source: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
+                    val from = source.adapterPosition
+                    val to = target.adapterPosition
+                    if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                    widgetAdapter.onItemMove(from, to)
+                    return true
+                }
+                override fun onSwiped(vh: RecyclerView.ViewHolder, dir: Int) {}
+                override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
+                    super.onSelectedChanged(viewHolder, actionState)
+                    if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
+                        viewHolder?.itemView?.alpha = 0.7f
+                        viewHolder?.itemView?.setBackgroundColor(0xFF333333.toInt())
+                    }
+                }
+                override fun clearView(rv: RecyclerView, vh: RecyclerView.ViewHolder) {
+                    super.clearView(rv, vh)
+                    vh.itemView.alpha = 1f
+                    // Save new order
+                    val newOrder = widgetAdapter.items.map { it.first }.joinToString(",")
+                    orderedKeys.clear()
+                    orderedKeys.addAll(widgetAdapter.items.map { it.first })
+                    prefs.edit().putString(PREF_WIDGET_ORDER, newOrder).apply()
+                    mapFragRef()?.applyWidgetPrefs()
+                    widgetAdapter.notifyDataSetChanged()
+                }
+            }
+            val itemTouchHelper = ItemTouchHelper(touchCallback)
+            itemTouchHelper.attachToRecyclerView(widgetRecyclerView)
+            widgetAdapter.dragStartListener = { vh -> itemTouchHelper.startDrag(vh) }
+
+            container.addView(widgetRecyclerView)
         }
         rebuildRows()
     }
