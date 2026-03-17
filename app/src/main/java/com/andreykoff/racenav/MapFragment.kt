@@ -425,10 +425,10 @@ class MapFragment : Fragment() {
             "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"), maxZoom = 20),
         "yandex_sat"   to TileSource("Яндекс Спутник", listOf(
-            "https://sat01.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU",
-            "https://sat02.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU",
-            "https://sat03.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU",
-            "https://sat04.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU"), maxZoom = 19),
+            "https://sat01.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat02.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat03.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat04.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
         "yandex_sat_proxy" to TileSource("Яндекс Спутник", listOf(
             "http://93.77.180.15:8080/yandex-sat/{z}/{x}/{y}"), maxZoom = 19),
         "kosmosnimki_relief" to TileSource("Космоснимки рельеф", listOf(
