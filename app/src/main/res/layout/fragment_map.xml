@@ -118,6 +118,18 @@
             android:textColor="#666666"
             android:background="?attr/selectableItemBackgroundBorderless" />
 
+        <!-- Battery indicator (top bar) -->
+        <TextView
+            android:id="@+id/btnBatteryIndicator"
+            android:layout_width="40dp"
+            android:layout_height="36dp"
+            android:gravity="center"
+            android:text="--"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:textColor="#888888"
+            android:visibility="gone" />
+
         <View
             android:layout_width="1dp"
             android:layout_height="24dp"
@@ -537,6 +549,31 @@
 
         <!-- GO navigation button (shown when waypoints loaded) -->
         <!-- GO moved to waypointNavBar -->
+
+        <!-- Battery -->
+        <LinearLayout
+            android:id="@+id/widgetBatteryContainer"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone">
+            <TextView
+                android:id="@+id/widgetBattery"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="--"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="% бат."
+                android:textColor="#888888"
+                android:textSize="10sp" />
+        </LinearLayout>
 
     </LinearLayout>
 

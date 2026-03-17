@@ -35,6 +35,7 @@ import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TIME
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_REMAIN_KM
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_NEXTCP_NAME
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_TRIPMASTER
+import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_BATTERY
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WIDGET_ORDER
 import com.andreykoff.racenav.MapFragment.Companion.ALL_WIDGET_KEYS
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_RECENTER
@@ -2313,6 +2314,7 @@ class SettingsFragment : Fragment() {
             WInfo("nextcp_name",   "Имя след. WP",      PREF_WIDGET_NEXTCP_NAME,   true),
             WInfo("tripmaster",    "Триппмастер",       PREF_WIDGET_TRIPMASTER,    false),
             WInfo("server_status", "Статус сервера",    MapFragment.PREF_WIDGET_SERVER_STATUS, false),
+            WInfo("battery",       "Батарея",           PREF_WIDGET_BATTERY,       false),
         )
 
         val savedOrder = prefs.getString(PREF_WIDGET_ORDER, ALL_WIDGET_KEYS.joinToString(",")) ?: ALL_WIDGET_KEYS.joinToString(",")
@@ -2351,6 +2353,7 @@ class SettingsFragment : Fragment() {
                 BtnInfo("Блокировка",      MapFragment.PREF_BTN_LOCK,     true),
                 BtnInfo("Смена карты ⇄",   MapFragment.PREF_BTN_MAP_SWITCH, false),
                 BtnInfo("Статус сервера",  MapFragment.PREF_BTN_SERVER_DOT, false),
+                BtnInfo("Батарея",         MapFragment.PREF_BTN_BATTERY, false),
             )
             val dp = resources.displayMetrics.density
             for (btn in topButtons) {

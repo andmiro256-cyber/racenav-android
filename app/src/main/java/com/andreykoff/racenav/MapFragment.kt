@@ -128,6 +128,9 @@ class MapFragment : Fragment() {
         tripmasterLastPoint = gpsPoint
         val tripKm = tripmasterDistM / 1000.0
         b.widgetTripmaster.text = if (tripKm < 10) String.format("%.1f", tripKm) else tripKm.toInt().toString()
+
+        // Battery
+        updateBatteryLevel()
     }
     // BroadcastReceiver для статуса синхронизации с сервером
     private val traccarStatusReceiver = object : BroadcastReceiver() {
@@ -285,6 +288,7 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_REMAIN_KM = "widget_remain_km"
         const val PREF_WIDGET_NEXTCP_NAME = "widget_nextcp_name"
         const val PREF_WIDGET_TRIPMASTER = "widget_tripmaster"
+        const val PREF_WIDGET_BATTERY = "widget_battery"
         const val PREF_WIDGET_ORDER = "widget_order"
         const val PREF_NAV_ACTIVE = "nav_active"
         const val PREF_WP_APPROACH_RADIUS = "wp_approach_radius"  // metres, default 30 (approach/warning)
@@ -303,7 +307,7 @@ class MapFragment : Fragment() {
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
 
-        val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status")
+        val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status","battery")
 
         // Top bar button visibility prefs
         const val PREF_BTN_COMPASS = "btn_compass"
@@ -349,6 +353,7 @@ class MapFragment : Fragment() {
         const val PREF_WIDGET_SERVER_STATUS = "widget_server_status"
         const val PREF_BTN_MAP_SWITCH = "btn_map_switch"
         const val PREF_BTN_SERVER_DOT = "btn_server_dot"
+        const val PREF_BTN_BATTERY = "btn_battery"
         const val PREF_MAP_SWITCH_A = "map_switch_a"  // first map key
         const val PREF_MAP_SWITCH_B = "map_switch_b"  // second map key
 
@@ -734,6 +739,7 @@ class MapFragment : Fragment() {
             "nextcp_name" -> b.widgetNextCpNameContainer
             "tripmaster"  -> b.widgetTripmasterContainer
             "server_status" -> b.widgetServerStatusContainer
+            "battery"     -> b.widgetBatteryContainer
             else -> null
         }
     }
@@ -765,6 +771,7 @@ class MapFragment : Fragment() {
             WidgetDef("nextcp_name", PREF_WIDGET_NEXTCP_NAME, true),
             WidgetDef("tripmaster",  PREF_WIDGET_TRIPMASTER,  false),
             WidgetDef("server_status", PREF_WIDGET_SERVER_STATUS, false),
+            WidgetDef("battery",       PREF_WIDGET_BATTERY,       false),
         )
 
         val defaultOrder = ALL_WIDGET_KEYS.joinToString(",")
@@ -808,6 +815,31 @@ class MapFragment : Fragment() {
                 text.setTextColor(0xFF888888.toInt())
             }
         }
+
+        // Battery: bottom widget + top bar indicator (separate prefs)
+        updateBatteryLevel()
+        b.btnBatteryIndicator.visibility = if (prefs.getBoolean(PREF_BTN_BATTERY, false)) View.VISIBLE else View.GONE
+    }
+
+    private fun updateBatteryLevel() {
+        val ctx = context ?: return
+        val b = _binding ?: return
+        val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
+        val level = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val batteryIntent = ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val plugged = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        val isCharging = plugged != 0
+        val color = when {
+            isCharging -> 0xFF4CAF50.toInt()  // green when charging
+            level > 50 -> 0xFFFFFFFF.toInt()  // white
+            level > 20 -> 0xFFFFEB3B.toInt()  // yellow
+            else -> 0xFFFF4444.toInt()         // red
+        }
+        val icon = if (isCharging) "⚡" else ""
+        b.widgetBattery.text = "$level"
+        b.widgetBattery.setTextColor(color)
+        b.btnBatteryIndicator.text = "$icon$level%"
+        b.btnBatteryIndicator.setTextColor(color)
     }
 
     fun applyCrosshairAndDistancePrefs() {
