@@ -189,7 +189,7 @@ class MapFragment : Fragment() {
     private val visitedMarkerIndices = mutableSetOf<Int>()  // user marker approach fired once per index
 
     // User points — placed on map, editable name
-    data class UserPoint(var name: String, val position: LatLng)
+    data class UserPoint(var name: String, val position: LatLng, var color: String = "#1565C0", var symbol: String = "", var proximity: Double = 0.0)
     private val userMarkers = mutableListOf<UserPoint>()
 
     // Tripmaster — resettable distance counter
@@ -2159,7 +2159,8 @@ class MapFragment : Fragment() {
         val features = JSONArray()
         userMarkers.forEachIndexed { i, pt ->
             val iconId = "um-icon-$i"
-            val bmp = createMarkerBitmap(pt.name.ifBlank { "${i + 1}" })
+            val tempWp = Waypoint(name = pt.name.ifBlank { "WP%02d".format(i + 1) }, lat = 0.0, lon = 0.0, index = 0, color = pt.color, symbol = pt.symbol)
+            val bmp = createWaypointBitmap(tempWp)
             style.addImage(iconId, bmp)
             features.put(JSONObject()
                 .put("type", "Feature")
@@ -2212,7 +2213,10 @@ class MapFragment : Fragment() {
             arr.put(JSONObject()
                 .put("name", p.name)
                 .put("lat", p.position.latitude)
-                .put("lon", p.position.longitude))
+                .put("lon", p.position.longitude)
+                .put("color", p.color)
+                .put("symbol", p.symbol)
+                .put("proximity", p.proximity))
         }
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putString(PREF_USER_POINTS_JSON, arr.toString())?.apply()
@@ -2227,12 +2231,34 @@ class MapFragment : Fragment() {
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 userMarkers.add(UserPoint(
-                    o.getString("name"),
-                    LatLng(o.getDouble("lat"), o.getDouble("lon"))
+                    o.optString("name", "WP%02d".format(i + 1)),
+                    LatLng(o.getDouble("lat"), o.getDouble("lon")),
+                    color = o.optString("color", "#1565C0"),
+                    symbol = o.optString("symbol", ""),
+                    proximity = o.optDouble("proximity", 0.0)
                 ))
             }
-            if (userMarkers.isNotEmpty()) updateUserMarkersOnMap()
+            if (userMarkers.isNotEmpty()) {
+                updateUserMarkersOnMap()
+                updateUserMarkerRadiusCircles()
+            }
         } catch (_: Exception) {}
+    }
+
+    /** Draw proximity circles for user markers */
+    private fun updateUserMarkerRadiusCircles() {
+        val style = mapboxMap?.style ?: return
+        val proximitySource = style.getSourceAs<GeoJsonSource>(WP_PROXIMITY_SOURCE_ID) ?: return
+        val features = JSONArray()
+        // Add waypoint proximity circles
+        waypoints.forEach { wp ->
+            if (wp.proximity > 0) features.put(buildCirclePolygon(wp.lat, wp.lon, wp.proximity))
+        }
+        // Add user marker proximity circles
+        userMarkers.forEach { pt ->
+            if (pt.proximity > 0) features.put(buildCirclePolygon(pt.position.latitude, pt.position.longitude, pt.proximity))
+        }
+        proximitySource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
     }
 
     /** Blue circle bitmap with text label for user points (uses КП size settings) */
@@ -3704,11 +3730,14 @@ class MapFragment : Fragment() {
     /** Properties dialog for user markers — same UI as showEnhancedEditWpDialog */
     private fun showUserMarkerPropertiesDialog(markerIndex: Int) {
         val pt = userMarkers.getOrNull(markerIndex) ?: return
-        val wp = Waypoint(pt.name, pt.position.latitude, pt.position.longitude, markerIndex + 1, color = "#1565C0")
+        val wp = Waypoint(pt.name, pt.position.latitude, pt.position.longitude, markerIndex + 1,
+            color = pt.color, symbol = pt.symbol, proximity = pt.proximity)
         showEnhancedEditWpDialogInternal(wp, markerIndex) { edited ->
             if (markerIndex < userMarkers.size) {
-                userMarkers[markerIndex] = UserPoint(edited.name, LatLng(edited.lat, edited.lon))
+                userMarkers[markerIndex] = UserPoint(edited.name, LatLng(edited.lat, edited.lon),
+                    color = edited.color.ifBlank { "#1565C0" }, symbol = edited.symbol, proximity = edited.proximity)
                 updateUserMarkersOnMap()
+                updateUserMarkerRadiusCircles()
                 saveUserPoints()
                 wpBitmapCache.clear()
             }
