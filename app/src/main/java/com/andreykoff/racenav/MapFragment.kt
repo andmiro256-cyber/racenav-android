@@ -4023,8 +4023,20 @@ class MapFragment : Fragment() {
                     // Smooth bearing via EMA — eliminates GPS bearing jitter
                     val bearing = smoothBearing(loc.bearing).toFloat()
 
-                    // Update custom GPS arrow with smoothed bearing
-                    updateGpsArrow(loc.latitude, loc.longitude, bearing)
+                    // Bearing freeze with hysteresis — applied globally for all follow modes
+                    // Freeze at < 1 km/h, unfreeze at > 3 km/h
+                    // Prevents cursor spinning from GPS noise when stopped
+                    val speedKmhForBearing = loc.speed * 3.6
+                    if (bearingFrozen) {
+                        if (speedKmhForBearing > 3.0) { bearingFrozen = false; lastValidBearing = bearing }
+                    } else {
+                        if (speedKmhForBearing < 1.0) bearingFrozen = true
+                        else lastValidBearing = bearing
+                    }
+                    val effectiveBearing = if (bearingFrozen) lastValidBearing else bearing
+
+                    // Update custom GPS arrow with freeze-corrected bearing
+                    updateGpsArrow(loc.latitude, loc.longitude, effectiveBearing)
                     // Update heading line from GPS
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
@@ -4070,30 +4082,11 @@ class MapFragment : Fragment() {
                                     CameraUpdateFactory.newCameraPosition(builder.build()), 300)
                             }
                             FollowMode.FOLLOW_COURSE -> {
-                                val speedKmhCourse = loc.speed * 3.6
                                 val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
                                     .target(newPoint)
                                     .tilt(tilt)
+                                    .bearing(effectiveBearing.toDouble())
                                     .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
-                                // Bearing freeze with hysteresis:
-                                // Freeze at < 1 km/h (0.3 m/s), unfreeze at > 3 km/h (0.8 m/s)
-                                // Prevents map spinning from GPS noise on stops
-                                if (bearingFrozen) {
-                                    if (speedKmhCourse > 3.0) {
-                                        bearingFrozen = false
-                                        lastValidBearing = bearing
-                                        builder.bearing(bearing.toDouble())
-                                    } else {
-                                        builder.bearing(lastValidBearing.toDouble())
-                                    }
-                                } else {
-                                    if (speedKmhCourse < 1.0) {
-                                        bearingFrozen = true
-                                    } else {
-                                        lastValidBearing = bearing
-                                        builder.bearing(bearing.toDouble())
-                                    }
-                                }
                                 if (targetZoom != null) builder.zoom(targetZoom)
                                 mapboxMap?.easeCamera(
                                     CameraUpdateFactory.newCameraPosition(builder.build()), 300)
@@ -4105,8 +4098,8 @@ class MapFragment : Fragment() {
                     // Update widgets
                     val speedKmhInt = (loc.speed * 3.6).toInt()
                     b.widgetSpeed.text = if (loc.speed > 0.5f) speedKmhInt.toString() else "--"
-                    b.widgetBearing.text = "${bearing.toInt()}°"
-                    b.widgetDirectionArrow.rotation = bearing
+                    b.widgetBearing.text = "${effectiveBearing.toInt()}°"
+                    b.widgetDirectionArrow.rotation = effectiveBearing
                     if (loc.hasAltitude()) b.widgetAltitude.text = loc.altitude.toInt().toString()
 
                     // Next CP distance + name + remaining km + auto-advance
