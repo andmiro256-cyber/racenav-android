@@ -25,7 +25,7 @@ object NotificationHelper {
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Сервисы Trophy Navigator в фоне"
-            setShowBadge(false)
+            setShowBadge(true)
         }
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .createNotificationChannel(channel)

@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "base": [
+    { "key": "google", "label": "Google Спутник", "maxZoom": 20, "tms": false, "proxy": "/tiles/google/{z}/{x}/{y}.png" },
+    { "key": "google_hybrid", "label": "Google Гибрид", "maxZoom": 20, "tms": false, "proxy": "/tiles/google_hybrid/{z}/{x}/{y}.png" },
+    { "key": "yandex_sat", "label": "Яндекс Спутник", "maxZoom": 19, "tms": false, "proxy": "/tiles/yandex_sat/{z}/{x}/{y}.png" },
+    { "key": "satellite", "label": "ESRI Спутник", "maxZoom": 18, "tms": false, "proxy": "/tiles/satellite/{z}/{x}/{y}.png" },
+    { "key": "esri_clarity", "label": "ESRI Clarity", "maxZoom": 19, "tms": false, "proxy": "/tiles/esri_clarity/{z}/{x}/{y}.png" },
+
+    { "key": "osm", "label": "OpenStreetMap", "maxZoom": 19, "tms": false, "proxy": "/tiles/osm/{z}/{x}/{y}.png" },
+    { "key": "google_maps", "label": "Google Карта", "maxZoom": 20, "tms": false, "proxy": "/tiles/google_maps/{z}/{x}/{y}.png" },
+    { "key": "yandex_map", "label": "Яндекс Карта", "maxZoom": 19, "tms": false, "proxy": "/tiles/yandex_map/{z}/{x}/{y}.png" },
+    { "key": "2gis", "label": "2ГИС", "maxZoom": 19, "tms": false, "proxy": "/tiles/2gis/{z}/{x}/{y}.png" },
+    { "key": "osm_hot", "label": "OSM HOT", "maxZoom": 19, "tms": false, "proxy": "/tiles/osm_hot/{z}/{x}/{y}.png" },
+
+    { "key": "topo", "label": "OpenTopo", "maxZoom": 17, "tms": false, "proxy": "/tiles/topo/{z}/{x}/{y}.png" },
+    { "key": "google_terrain", "label": "Google Рельеф", "maxZoom": 20, "tms": false, "proxy": "/tiles/google_terrain/{z}/{x}/{y}.png" },
+    { "key": "kosmosnimki_relief", "label": "Космоснимки", "maxZoom": 13, "tms": false, "proxy": "/tiles/kosmosnimki_relief/{z}/{x}/{y}.png" },
+
+    { "key": "ggc250", "label": "Генштаб 250м", "maxZoom": 15, "tms": true, "proxy": "/tiles/ggc250/{z}/{x}/{y}.png" },
+    { "key": "ggc500", "label": "Генштаб 500м", "maxZoom": 14, "tms": true, "proxy": "/tiles/ggc500/{z}/{x}/{y}.png" },
+    { "key": "ggc2000", "label": "Генштаб 2км", "maxZoom": 12, "tms": true, "proxy": "/tiles/ggc2000/{z}/{x}/{y}.png" },
+    { "key": "topo250", "label": "Топо 250м", "maxZoom": 15, "tms": true, "proxy": "/tiles/topo250/{z}/{x}/{y}.png" },
+    { "key": "topo001m", "label": "Топо 1:1М", "maxZoom": 13, "tms": true, "proxy": "/tiles/topo001m/{z}/{x}/{y}.png" },
+    { "key": "topomapper", "label": "Topomapper", "maxZoom": 13, "tms": false, "proxy": "/tiles/topomapper/{z}/{x}/{y}.png" },
+
+    { "key": "tf_outdoors", "label": "TF Outdoors", "maxZoom": 22, "tms": false, "proxy": "/tiles/tf_outdoors/{z}/{x}/{y}.png" },
+    { "key": "lomaps", "label": "LoMaps", "maxZoom": 22, "tms": false, "proxy": "/tiles/lomaps/{z}/{x}/{y}.png" },
+    { "key": "cyclosm", "label": "CyclOSM", "maxZoom": 19, "tms": false, "proxy": "/tiles/cyclosm/{z}/{x}/{y}.png" },
+    { "key": "tf_transport", "label": "TF Transport", "maxZoom": 22, "tms": false, "proxy": "/tiles/tf_transport/{z}/{x}/{y}.png" },
+    { "key": "tf_cycle", "label": "TF Cycle", "maxZoom": 22, "tms": false, "proxy": "/tiles/tf_cycle/{z}/{x}/{y}.png" },
+    { "key": "mtbmap", "label": "MTB Map", "maxZoom": 18, "tms": false, "proxy": "/tiles/mtbmap/{z}/{x}/{y}.png" },
+    { "key": "michelin", "label": "Michelin", "maxZoom": 18, "tms": false, "proxy": "/tiles/michelin/{z}/{x}/{y}.png" }
+  ],
+  "overlays": [
+    { "key": "osm_gps", "label": "OSM GPS треки", "maxZoom": 19, "tms": false, "opacity": 0.7, "proxy": "/tiles/osm_gps/{z}/{x}/{y}.png" },
+    { "key": "hiking", "label": "Пешие маршруты", "maxZoom": 19, "tms": false, "opacity": 0.7, "proxy": "/tiles/hiking/{z}/{x}/{y}.png" },
+    { "key": "cycling", "label": "Велотреки", "maxZoom": 19, "tms": false, "opacity": 0.7, "proxy": "/tiles/cycling/{z}/{x}/{y}.png" },
+    { "key": "osm_ov", "label": "OSM дороги", "maxZoom": 19, "tms": false, "opacity": 0.5, "proxy": "/tiles/osm_ov/{z}/{x}/{y}.png" },
+    { "key": "windy_relief", "label": "Windy рельеф", "maxZoom": 19, "tms": false, "opacity": 0.5, "proxy": "/tiles/windy_relief/{z}/{x}/{y}.png" },
+    { "key": "snowmap", "label": "Горнолыжные трассы", "maxZoom": 19, "tms": false, "opacity": 0.7, "proxy": "/tiles/snowmap/{z}/{x}/{y}.png" },
+    { "key": "labels_light", "label": "Подписи (светлые)", "maxZoom": 19, "tms": false, "opacity": 1.0, "proxy": "/tiles/labels_light/{z}/{x}/{y}.png" },
+    { "key": "labels_dark", "label": "Подписи (тёмные)", "maxZoom": 19, "tms": false, "opacity": 1.0, "proxy": "/tiles/labels_dark/{z}/{x}/{y}.png" },
+    { "key": "voyager_labels", "label": "Подписи (цветные)", "maxZoom": 19, "tms": false, "opacity": 1.0, "proxy": "/tiles/voyager_labels/{z}/{x}/{y}.png" },
+    { "key": "yandex_hybrid", "label": "Яндекс Гибрид", "maxZoom": 19, "tms": false, "opacity": 1.0, "proxy": "/tiles/yandex_hybrid/{z}/{x}/{y}.png" }
+  ]
+}

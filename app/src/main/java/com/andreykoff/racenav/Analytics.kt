@@ -18,7 +18,7 @@ object Analytics {
 
     private const val ENDPOINT = "http://87.120.84.254:8090/ping"
 
-    fun sendEvent(context: Context, action: String = "launch") {
+    fun sendEvent(context: Context, action: String = "launch", extra: JSONObject? = null) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val deviceId = LicenseManager.getRawDeviceId(context)
@@ -33,6 +33,14 @@ object Analytics {
                     put("os_version", "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
                     put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("locale", Locale.getDefault().language)
+                    extra?.let { e ->
+                        val skip = setOf("device_id","version","action","os_version","device_model","locale")
+                        val keys = e.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            if (k !in skip) put(k, e.get(k))
+                        }
+                    }
                 }
 
                 val conn = URL(ENDPOINT).openConnection() as HttpURLConnection

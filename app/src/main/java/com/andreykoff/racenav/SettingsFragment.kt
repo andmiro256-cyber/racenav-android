@@ -537,6 +537,156 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // ── Navigation compass settings (programmatic) ──
+        run {
+            val fontPlusBtn = view.findViewById<ImageButton>(R.id.btnWidgetFontPlus)
+            val fontRow = fontPlusBtn?.parent as? ViewGroup
+            val widgetParent = fontRow?.parent as? ViewGroup
+            if (widgetParent != null && fontRow != null) {
+                val dp = resources.displayMetrics.density
+                val insertIdx = widgetParent.indexOfChild(fontRow) + 1
+
+                val compassContainer = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setPadding((16 * dp).toInt(), (8 * dp).toInt(), (16 * dp).toInt(), (12 * dp).toInt())
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = (8 * dp).toInt() }
+                }
+
+                fun mapFrag() = parentFragmentManager.fragments
+                    .filterIsInstance<MapFragment>().firstOrNull()
+
+                // 1) Toggle — Компас навигации
+                val switchRow = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                switchRow.addView(TextView(requireContext()).apply {
+                    text = "Компас навигации"
+                    setTextColor(0xFFFFFFFF.toInt()); textSize = 15f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                val compassSwitch = SwitchCompat(requireContext()).apply {
+                    isChecked = prefs.getBoolean(MapFragment.PREF_NAV_COMPASS_ENABLED, false)
+                    setOnCheckedChangeListener { _, checked ->
+                        prefs.edit().putBoolean(MapFragment.PREF_NAV_COMPASS_ENABLED, checked).apply()
+                        mapFrag()?.refreshNavCompass()
+                    }
+                }
+                switchRow.addView(compassSwitch)
+                compassContainer.addView(switchRow)
+
+                // 2) Position — 4 radio buttons in one row
+                val posRow = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, (6 * dp).toInt(), 0, 0)
+                }
+                posRow.addView(TextView(requireContext()).apply {
+                    text = "Позиция:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    setPadding(0, 0, (8 * dp).toInt(), 0)
+                })
+                val posRg = RadioGroup(requireContext()).apply {
+                    orientation = RadioGroup.HORIZONTAL
+                }
+                val posOptions = listOf(
+                    "top-right" to "Верх-П", "top-left" to "Верх-Л",
+                    "bottom-right" to "Низ-П", "bottom-left" to "Низ-Л"
+                )
+                val currentPos = prefs.getString(MapFragment.PREF_NAV_COMPASS_POSITION, "top-right") ?: "top-right"
+                posOptions.forEach { (value, label) ->
+                    posRg.addView(RadioButton(requireContext()).apply {
+                        text = label; tag = value
+                        setTextColor(0xFFCCCCCC.toInt()); textSize = 12f
+                        id = View.generateViewId()
+                        isChecked = (value == currentPos)
+                        setPadding((4 * dp).toInt(), 0, (4 * dp).toInt(), 0)
+                    })
+                }
+                posRg.setOnCheckedChangeListener { group, checkedId ->
+                    val rb = group.findViewById<RadioButton>(checkedId)
+                    val value = rb?.tag as? String ?: return@setOnCheckedChangeListener
+                    prefs.edit().putString(MapFragment.PREF_NAV_COMPASS_POSITION, value).apply()
+                    mapFrag()?.refreshNavCompass()
+                }
+                posRow.addView(posRg)
+                compassContainer.addView(posRow)
+
+                // 3) Size — SeekBar 60..200 dp (step 10)
+                val sizeRow = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, (4 * dp).toInt(), 0, 0)
+                }
+                sizeRow.addView(TextView(requireContext()).apply {
+                    text = "Размер:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    setPadding(0, 0, (8 * dp).toInt(), 0)
+                })
+                val currentSize = prefs.getInt(MapFragment.PREF_NAV_COMPASS_SIZE, 100)
+                val sizeLabel = TextView(requireContext()).apply {
+                    text = "${currentSize}dp"; setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+                    setPadding(0, 0, (8 * dp).toInt(), 0)
+                }
+                sizeRow.addView(sizeLabel)
+                sizeRow.addView(SeekBar(requireContext()).apply {
+                    max = 14  // 0..14 maps to 60..200 (step 10)
+                    progress = (currentSize - 60) / 10
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(sb: SeekBar, p: Int, u: Boolean) {
+                            val v = p * 10 + 60
+                            sizeLabel.text = "${v}dp"
+                            prefs.edit().putInt(MapFragment.PREF_NAV_COMPASS_SIZE, v).apply()
+                        }
+                        override fun onStartTrackingTouch(sb: SeekBar) {}
+                        override fun onStopTrackingTouch(sb: SeekBar) {
+                            mapFrag()?.refreshNavCompass()
+                        }
+                    })
+                })
+                compassContainer.addView(sizeRow)
+
+                // 4) Opacity — SeekBar 3..10
+                val alphaRow = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, (4 * dp).toInt(), 0, 0)
+                }
+                alphaRow.addView(TextView(requireContext()).apply {
+                    text = "Прозрачность:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    setPadding(0, 0, (8 * dp).toInt(), 0)
+                })
+                val alphaValue = TextView(requireContext()).apply {
+                    val cur = prefs.getInt(MapFragment.PREF_NAV_COMPASS_ALPHA, 7)
+                    text = "${cur * 10}%"; setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+                    setPadding(0, 0, (8 * dp).toInt(), 0)
+                }
+                alphaRow.addView(alphaValue)
+                alphaRow.addView(SeekBar(requireContext()).apply {
+                    max = 7  // 0..7 maps to 3..10
+                    progress = prefs.getInt(MapFragment.PREF_NAV_COMPASS_ALPHA, 7) - 3
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(sb: SeekBar, p: Int, u: Boolean) {
+                            val v = p + 3
+                            alphaValue.text = "${v * 10}%"
+                            prefs.edit().putInt(MapFragment.PREF_NAV_COMPASS_ALPHA, v).apply()
+                        }
+                        override fun onStartTrackingTouch(sb: SeekBar) {}
+                        override fun onStopTrackingTouch(sb: SeekBar) {
+                            mapFrag()?.refreshNavCompass()
+                        }
+                    })
+                })
+                compassContainer.addView(alphaRow)
+
+                widgetParent.addView(compassContainer, insertIdx)
+            }
+        }
+
         // Build current map selector
         val mapContainer = view.findViewById<LinearLayout>(R.id.currentMapContainer)
         if (mapContainer != null) {

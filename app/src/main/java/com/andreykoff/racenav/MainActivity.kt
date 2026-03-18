@@ -32,6 +32,8 @@ class MainActivity : AppCompatActivity() {
         applyOrientation()
         // Tell system this app handles volume keys — prevents MIUI/EMUI intercepting them
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
+        // Show notification badge on app icon while running
+        showAppRunningNotification()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -370,6 +372,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val mapFrag = supportFragmentManager.findFragmentById(R.id.container) as? MapFragment
+        // Block Back when screen is locked — exit only after unlock
+        if (mapFrag?.isScreenLocked == true) return
         if (TrackingService.isRunning) {
             // Recording active — offer to save before exit
             AlertDialog.Builder(this)
@@ -403,6 +407,69 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private companion object {
+        const val APP_RUNNING_NOTIF_ID = 1002
+        const val APP_RUNNING_CHANNEL = "app_running_channel"
+    }
+
+    private fun showAppRunningNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        // Only delete channel once to update importance from MIN to LOW
+        val existingChannel = nm.getNotificationChannel(APP_RUNNING_CHANNEL)
+        if (existingChannel != null && existingChannel.importance < android.app.NotificationManager.IMPORTANCE_LOW) {
+            nm.deleteNotificationChannel(APP_RUNNING_CHANNEL)
+        }
+        val channel = android.app.NotificationChannel(
+            APP_RUNNING_CHANNEL, "RaceNav активен",
+            android.app.NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Показывает что приложение запущено"
+            setShowBadge(true)
+        }
+        nm.createNotificationChannel(channel)
+        val openIntent = android.app.PendingIntent.getActivity(
+            this, 0, android.content.Intent(this, MainActivity::class.java),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val notif = androidx.core.app.NotificationCompat.Builder(this, APP_RUNNING_CHANNEL)
+            .setContentTitle("RaceNav")
+            .setContentText("Навигатор работает")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setOngoing(true)
+            .setSilent(true)
+            .setNumber(1)
+            .setBadgeIconType(androidx.core.app.NotificationCompat.BADGE_ICON_SMALL)
+            .setContentIntent(openIntent)
+            .build()
+        nm.notify(APP_RUNNING_NOTIF_ID, notif)
+        // MIUI/HyperOS badge — send explicit broadcast
+        try {
+            val badgeIntent = android.content.Intent("android.intent.action.APPLICATION_MESSAGE_UPDATE")
+            badgeIntent.putExtra("android.intent.extra.update_application_component_name",
+                "${packageName}/${packageName}.MainActivity")
+            badgeIntent.putExtra("android.intent.extra.update_application_message_text", 1)
+            sendBroadcast(badgeIntent)
+        } catch (_: Exception) {}
+    }
+
+    private fun hideAppRunningNotification() {
+        (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
+            .cancel(APP_RUNNING_NOTIF_ID)
+        // Clear MIUI badge
+        try {
+            val badgeIntent = android.content.Intent("android.intent.action.APPLICATION_MESSAGE_UPDATE")
+            badgeIntent.putExtra("android.intent.extra.update_application_component_name",
+                "${packageName}/${packageName}.MainActivity")
+            badgeIntent.putExtra("android.intent.extra.update_application_message_text", 0)
+            sendBroadcast(badgeIntent)
+        } catch (_: Exception) {}
+    }
+
+    override fun onDestroy() {
+        hideAppRunningNotification()
+        super.onDestroy()
+    }
+
     private fun stopAllServices() {
         if (TrackingService.isRunning) {
             startService(
@@ -430,6 +497,12 @@ class MainActivity : AppCompatActivity() {
                     if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) mapFrag.zoomIn()
                     else mapFrag.zoomOut()
                 }
+                return true
+            }
+            252 -> { // Samsung XCover Key (keycode 0xFC)
+                val action = prefs.getString(MapFragment.PREF_XCOVER_KEY_ACTION, "none") ?: "none"
+                if (action == "none" || mapFrag == null) return super.onKeyDown(keyCode, event)
+                mapFrag.handleXCoverAction(action)
                 return true
             }
         }

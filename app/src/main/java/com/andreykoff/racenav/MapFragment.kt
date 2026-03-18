@@ -20,6 +20,8 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.constraintlayout.widget.ConstraintSet
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.ViewCompat
@@ -172,6 +174,43 @@ class MapFragment : Fragment() {
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
     private var bearingFrozen = true      // true = курсор заморожен (стоим)
     private var lastValidBearing = 0f     // последний валидный bearing для freeze
+    private var prevFreezeCheckLat = 0.0
+    private var prevFreezeCheckLon = 0.0
+    private var prevFreezeCheckTime = 0L
+
+    // Magnetometer compass — provides heading when stopped
+    private var sensorManager: android.hardware.SensorManager? = null
+    @Volatile private var magneticHeading = -1f  // last magnetic heading (true north, 0-360, -1 = no data)
+    private var magneticDeclination = 0f          // magnetic → true north correction
+    private var smoothedMagHeading = -1.0         // EMA-smoothed magnetic heading
+    private val sensorListener = object : android.hardware.SensorEventListener {
+        private val rotMatrix = FloatArray(9)
+        private val orient = FloatArray(3)
+        private var accel: FloatArray? = null
+        private var mag: FloatArray? = null
+        override fun onSensorChanged(event: android.hardware.SensorEvent) {
+            when (event.sensor.type) {
+                android.hardware.Sensor.TYPE_ACCELEROMETER -> accel = event.values.clone()
+                android.hardware.Sensor.TYPE_MAGNETIC_FIELD -> mag = event.values.clone()
+            }
+            val a = accel ?: return
+            val m = mag ?: return
+            if (android.hardware.SensorManager.getRotationMatrix(rotMatrix, null, a, m)) {
+                android.hardware.SensorManager.getOrientation(rotMatrix, orient)
+                val rawMag = ((Math.toDegrees(orient[0].toDouble()) + 360) % 360).toFloat()
+                // Apply declination to get true north + smooth with EMA
+                val trueHeading = (rawMag + magneticDeclination + 360) % 360
+                smoothedMagHeading = if (smoothedMagHeading < 0) trueHeading.toDouble()
+                else {
+                    var d = trueHeading - smoothedMagHeading
+                    while (d > 180) d -= 360; while (d < -180) d += 360
+                    (smoothedMagHeading + 0.06 * d + 360) % 360
+                }
+                magneticHeading = smoothedMagHeading.toFloat()
+            }
+        }
+        override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) {}
+    }
 
     // Smooth camera loop state (Choreographer-driven, 60 FPS)
     private var lastGpsLat = 0.0
@@ -181,6 +220,7 @@ class MapFragment : Fragment() {
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
     private var cameraLoopRunning = false
+    private var lastTelemetrySentMs = 0L   // throttle telemetry to every 5s
     private var locationTrackingStarted = false  // prevent duplicate GPS listeners on style reload
     private var activeLocationCallback: com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult>? = null
     private var locationEngine: com.mapbox.mapboxsdk.location.engine.LocationEngine? = null
@@ -199,7 +239,9 @@ class MapFragment : Fragment() {
     var navActive = false           // waypoint navigation bar visible
     private var cameraTopPadding = 0  // px; updated by applyCursorOffset(), applied in every camera move
     private var wasInApproachRadius = false  // track radius entry to fire sound once
-    private val warnedWrongWpIndices = mutableSetOf<Int>()  // wrong WP warning fired once per index
+    private val warnedWrongWpIndices = mutableSetOf<Int>()  // wrong WP toast fired once per index
+    private val wrongWpSoundPlayed = mutableSetOf<Int>()  // wrong WP sound fired once per radius entry
+    private var justTakenWpIndex = -1  // WP index just taken — suppress wrong sound while still in radius
     private val visitedMarkerIndices = mutableSetOf<Int>()  // user marker approach fired once per index
 
     // User points — placed on map, editable name
@@ -330,6 +372,8 @@ class MapFragment : Fragment() {
         const val PREF_BTN_REC = "btn_rec"
         const val PREF_BTN_LOCK = "btn_lock"
 
+        const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
+
         const val PREF_LIVE_USERS_ENABLED = "live_users_enabled"
         const val PREF_LIVE_USERS_ONLINE_ONLY = "live_users_online_only" // show only online devices
         const val PREF_LIVE_USERS_URL = "live_users_url"
@@ -345,6 +389,10 @@ class MapFragment : Fragment() {
         fun labelScaleToSp(scale: Int): Float = scale * 1.5f + 6.5f
         const val PREF_CROSSHAIR_ENABLED = "crosshair_enabled"
         const val PREF_CROSSHAIR_SIZE = "crosshair_size"       // dp, default 60
+        const val PREF_NAV_COMPASS_ENABLED = "nav_compass_enabled"
+        const val PREF_NAV_COMPASS_POSITION = "nav_compass_position"
+        const val PREF_NAV_COMPASS_SIZE = "nav_compass_size"
+        const val PREF_NAV_COMPASS_ALPHA = "nav_compass_alpha"
         const val PREF_USER_POINTS_JSON = "user_points_json"   // persisted user points
         const val PREF_UI_SCALE = "ui_scale"                   // 1-10, default 5 (normal)
         const val PREF_COORDS_ENABLED = "coords_label_enabled"
@@ -412,87 +460,70 @@ class MapFragment : Fragment() {
     data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
 
     private val tileSources = linkedMapOf(
-        "osm"          to TileSource("OpenStreetMap", listOf(
-            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"), maxZoom = 19),
-        "satellite"    to TileSource("Спутник ESRI", listOf(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"), maxZoom = 18),
-        "topo"         to TileSource("OpenTopoMap", listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png"), maxZoom = 17),
+        // === Спутники ===
         "google"       to TileSource("Google Спутник", listOf(
             "https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"), maxZoom = 20),
-        "yandex_sat"   to TileSource("Яндекс Спутник", listOf(
-            "https://sat01.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://sat02.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://sat03.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://sat04.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
-        "yandex_sat_proxy" to TileSource("Яндекс Спутник", listOf(
-            "http://93.77.180.15:8080/yandex-sat/{z}/{x}/{y}"), maxZoom = 19),
-        "kosmosnimki_relief" to TileSource("Космоснимки рельеф", listOf(
-            "https://atilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
-            "https://btilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
-            "https://ctilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
-            "https://dtilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png"), maxZoom = 13),
-        "lomaps"        to TileSource("LoMaps (Thunderforest)", listOf(
-            "https://a.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d",
-            "https://b.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d",
-            "https://c.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d"), maxZoom = 22),
-        "cyclosm"       to TileSource("CyclOSM", listOf(
-            "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
-            "https://b.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
-            "https://c.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png"), maxZoom = 19),
-        "tf_outdoors"   to TileSource("Thunderforest Outdoors", listOf(
-            "https://a.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://b.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://c.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
-        "esri_clarity"  to TileSource("ESRI Clarity (спутник)", listOf(
-            "https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}?blankTile=false"), maxZoom = 19),
-        "google_maps"   to TileSource("Google Карты", listOf(
-            "https://mt0.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt1.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt2.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt3.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}"), maxZoom = 20),
-        "google_terrain" to TileSource("Google Рельеф", listOf(
-            "https://mt0.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt1.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt2.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
-            "https://mt3.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}"), maxZoom = 20),
         "google_hybrid" to TileSource("Google Гибрид", listOf(
             "https://mt0.google.com/vt/lyrs=y&hl=ru&x={x}&y={y}&z={z}",
             "https://mt1.google.com/vt/lyrs=y&hl=ru&x={x}&y={y}&z={z}",
             "https://mt2.google.com/vt/lyrs=y&hl=ru&x={x}&y={y}&z={z}",
             "https://mt3.google.com/vt/lyrs=y&hl=ru&x={x}&y={y}&z={z}"), maxZoom = 20),
-        "tf_transport"  to TileSource("TF Transport", listOf(
-            "https://a.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://b.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://c.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
-        "tf_cycle"      to TileSource("TF Велосипед", listOf(
-            "https://a.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://b.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
-            "https://c.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
-        "osm_hot"       to TileSource("OSM Humanitarian", listOf(
-            "https://tile-a.openstreetmap.fr/hot/{z}/{x}/{y}.png",
-            "https://tile-b.openstreetmap.fr/hot/{z}/{x}/{y}.png"), maxZoom = 19),
-        "mtbmap"        to TileSource("MTB Map", listOf(
-            "http://tile.mtbmap.cz/mtbmap_tiles/{z}/{x}/{y}.png"), maxZoom = 18),
-        "2gis"          to TileSource("2GIS", listOf(
+        "yandex_sat"   to TileSource("Яндекс Спутник", listOf(
+            "https://sat01.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat02.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat03.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://sat04.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
+        "satellite"    to TileSource("ESRI Спутник", listOf(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"), maxZoom = 18),
+        "esri_clarity"  to TileSource("ESRI Clarity", listOf(
+            "https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}?blankTile=false"), maxZoom = 19),
+        // === Карты ===
+        "osm"          to TileSource("OpenStreetMap", listOf(
+            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"), maxZoom = 19),
+        "google_maps"   to TileSource("Google Карта", listOf(
+            "https://mt0.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt1.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt2.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt3.google.com/vt/lyrs=m&hl=ru&x={x}&y={y}&z={z}"), maxZoom = 20),
+        "yandex_map"   to TileSource("Яндекс Карта", listOf(
+            "https://vec01.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec02.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec03.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
+            "https://vec04.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
+        "2gis"          to TileSource("2ГИС", listOf(
             "https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&r=g&ts=online_1",
             "https://tile1.maps.2gis.com/tiles?x={x}&y={y}&z={z}&r=g&ts=online_1",
             "https://tile2.maps.2gis.com/tiles?x={x}&y={y}&z={z}&r=g&ts=online_1"), maxZoom = 19),
-        "michelin"      to TileSource("Michelin", listOf(
-            "https://map1.viamichelin.com/map/mapdirect?map=viamichelin&z={z}&x={x}&y={y}&format=png&version=201901161110&layer=background&locale=default&cs=1&protocol=https"), maxZoom = 18),
-        "ggc250"       to TileSource("ГосГисЦентр 250м", listOf(
+        "osm_hot"       to TileSource("OSM HOT", listOf(
+            "https://tile-a.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+            "https://tile-b.openstreetmap.fr/hot/{z}/{x}/{y}.png"), maxZoom = 19),
+        // === Рельеф и топо ===
+        "topo"         to TileSource("OpenTopo", listOf("https://tile.opentopomap.org/{z}/{x}/{y}.png"), maxZoom = 17),
+        "google_terrain" to TileSource("Google Рельеф", listOf(
+            "https://mt0.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt1.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt2.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}",
+            "https://mt3.google.com/vt/lyrs=t&hl=ru&x={x}&y={y}&z={z}"), maxZoom = 20),
+        "kosmosnimki_relief" to TileSource("Космоснимки", listOf(
+            "https://atilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
+            "https://btilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
+            "https://ctilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
+            "https://dtilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png"), maxZoom = 13),
+        // === Генштаб ===
+        "ggc250"       to TileSource("Генштаб 250м", listOf(
             "https://a.tiles.nakarte.me/ggc250/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc250/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc250/{z}/{x}/{y}"), tms = true, maxZoom = 15),
-        "ggc500"       to TileSource("ГосГисЦентр 500м", listOf(
+        "ggc500"       to TileSource("Генштаб 500м", listOf(
             "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"), tms = true, maxZoom = 14),
-        "ggc2000"      to TileSource("ГосГисЦентр 2км", listOf(
+        "ggc2000"      to TileSource("Генштаб 2км", listOf(
             "https://a.tiles.nakarte.me/ggc2000/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc2000/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc2000/{z}/{x}/{y}"), tms = true, maxZoom = 12),
@@ -504,14 +535,33 @@ class MapFragment : Fragment() {
             "https://a.tiles.nakarte.me/topo001m/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/topo001m/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/topo001m/{z}/{x}/{y}"), tms = true, maxZoom = 13),
-        "topomapper"   to TileSource("Topomapper 1км", listOf(
+        "topomapper"   to TileSource("Topomapper", listOf(
             "http://88.99.52.156/tmg/{z}/{x}/{y}"), maxZoom = 13),
-        "yandex_map"   to TileSource("Яндекс Карта", listOf(
-            "https://vec01.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://vec02.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://vec03.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator",
-            "https://vec04.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&lang=ru_RU&projection=web_mercator"), maxZoom = 19),
-        "here_hybrid"  to TileSource("HERE Гибрид", emptyList(), maxZoom = 20)
+        // === Туристические ===
+        "tf_outdoors"   to TileSource("TF Outdoors", listOf(
+            "https://a.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://b.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://c.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
+        "lomaps"        to TileSource("LoMaps", listOf(
+            "https://a.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d",
+            "https://b.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d",
+            "https://c.tile.thunderforest.com/locus-4za/{z}/{x}/{y}.png?apikey=7c352c8ff1244dd8b732e349e0b0fe8d"), maxZoom = 22),
+        "cyclosm"       to TileSource("CyclOSM", listOf(
+            "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
+            "https://b.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
+            "https://c.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png"), maxZoom = 19),
+        "tf_transport"  to TileSource("TF Transport", listOf(
+            "https://a.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://b.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://c.tile.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
+        "tf_cycle"      to TileSource("TF Cycle", listOf(
+            "https://a.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://b.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38",
+            "https://c.tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"), maxZoom = 22),
+        "mtbmap"        to TileSource("MTB Map", listOf(
+            "http://tile.mtbmap.cz/mtbmap_tiles/{z}/{x}/{y}.png"), maxZoom = 18),
+        "michelin"      to TileSource("Michelin", listOf(
+            "https://map1.viamichelin.com/map/mapdirect?map=viamichelin&z={z}&x={x}&y={y}&format=png&version=201901161110&layer=background&locale=default&cs=1&protocol=https"), maxZoom = 18)
     )
 
     // Overlay sources (transparent, shown on top of base)
@@ -612,6 +662,7 @@ class MapFragment : Fragment() {
         updateNavLine()
         updateRadiusCircles()
         updateNextCpWidget()
+        updateNavCompass()
         if (wps.isNotEmpty()) {
             Toast.makeText(context, "Загружено ${wps.size} точек", Toast.LENGTH_SHORT).show()
         }
@@ -625,7 +676,6 @@ class MapFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
 
         // Migrate size prefs from old dp/sp values to 1-10 scale
         migrateSizePrefs()
@@ -718,6 +768,7 @@ class MapFragment : Fragment() {
             autoZoomLevel = tilePrefs?.getInt(PREF_AUTO_ZOOM, 0) ?: 0
 
             setupButtons(map)
+            applyNavCompassPrefs()
             // Check if app was closed while recording — offer resume/save
             if (!isRecording) checkForUnfinishedTrack()
             // Tap on live user marker → show info card
@@ -731,7 +782,7 @@ class MapFragment : Fragment() {
             // Long press on map: 2s → toggle UI bars, 4s → show emergency gear icon
             var touchDownX = 0f; var touchDownY = 0f
             val density = context?.resources?.displayMetrics?.density ?: 3f
-            val moveThr = (20 * density).let { it * it }
+            val moveThr = (30 * density).let { it * it }
             var panelRunnable: Runnable? = null
             binding.mapView.setOnTouchListener { _, event ->
                 when (event.actionMasked) {
@@ -739,18 +790,20 @@ class MapFragment : Fragment() {
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         touchDownX = event.x; touchDownY = event.y
-                        // 2s: toggle bars
+                        // 2s: toggle bars (compass stays visible in widget-free mode)
                         panelRunnable = Runnable {
                             val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
                             _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
                             _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                            // Re-apply compass prefs so it stays visible & re-anchors
+                            applyNavCompassPrefs()
                         }
-                        emergencyHandler.postDelayed(panelRunnable!!, 2000L)
-                        // 4s: show gear icon
+                        emergencyHandler.postDelayed(panelRunnable!!, 1500L)
+                        // 3.5s: show gear icon
                         emergencyRunnable = Runnable {
                             _binding?.btnEmergencySettings?.visibility = android.view.View.VISIBLE
                         }
-                        emergencyHandler.postDelayed(emergencyRunnable!!, 4000L)
+                        emergencyHandler.postDelayed(emergencyRunnable!!, 3500L)
                     }
                     android.view.MotionEvent.ACTION_MOVE -> {
                         val dx = event.x - touchDownX; val dy = event.y - touchDownY
@@ -1045,7 +1098,7 @@ class MapFragment : Fragment() {
     }
 
     private fun buildStyleJson(baseKey: String, overlayKeys: Set<String>): String {
-        val base = tileSources[baseKey] ?: return ""
+        val base = tileSources[baseKey] ?: tileSources["osm"] ?: return ""
         val baseTiles = base.urls.joinToString(",") { "\"$it\"" }
         val baseScheme = if (base.tms) ",\"scheme\":\"tms\"" else ""
 
@@ -1085,7 +1138,11 @@ class MapFragment : Fragment() {
             ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
             ?.apply()
         val json = buildStyleJson(baseKey, overlayKeys)
+        // Save camera position before style reload (setStyle resets camera)
+        val savedCamera = mapboxMap?.cameraPosition
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
+            // Restore camera position after style change
+            savedCamera?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
             enableLocation(style)
             setupTrackLayers(style)
             setupWaypointLayers(style)
@@ -1503,6 +1560,23 @@ class MapFragment : Fragment() {
         return smoothedBearing
     }
 
+    private fun startMagnetometer() {
+        val ctx = context ?: return
+        val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager ?: return
+        sensorManager = sm
+        val accel = sm.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)
+        val mag = sm.getDefaultSensor(android.hardware.Sensor.TYPE_MAGNETIC_FIELD)
+        if (accel != null && mag != null) {
+            sm.registerListener(sensorListener, accel, android.hardware.SensorManager.SENSOR_DELAY_UI)
+            sm.registerListener(sensorListener, mag, android.hardware.SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    private fun stopMagnetometer() {
+        sensorManager?.unregisterListener(sensorListener)
+        sensorManager = null
+    }
+
     private fun updateGpsArrow(lat: Double, lon: Double, bearing: Float, persist: Boolean = true) {
         val style = mapboxMap?.style ?: return
         val geoJson = JSONObject()
@@ -1576,11 +1650,11 @@ class MapFragment : Fragment() {
         style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(TRACK_ARROW_ICON),
             PropertyFactory.symbolPlacement("line"),
-            PropertyFactory.symbolSpacing(10f),
+            PropertyFactory.symbolSpacing(3f),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
             PropertyFactory.iconRotationAlignment("map"),
-            PropertyFactory.iconSize(0.45f)
+            PropertyFactory.iconSize(0.22f)
         ))
         // Loaded track layer (color/width from prefs, default blue)
         style.addSource(GeoJsonSource(LOADED_TRACK_SOURCE_ID))
@@ -1839,7 +1913,7 @@ class MapFragment : Fragment() {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(NAV_LINE_SOURCE_ID) ?: return
         val gps = lastKnownGpsPoint
-        if (gps == null || waypoints.isEmpty() || activeWpIndex >= waypoints.size) {
+        if (!navActive || gps == null || waypoints.isEmpty() || activeWpIndex >= waypoints.size) {
             source.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
             return
         }
@@ -1870,10 +1944,12 @@ class MapFragment : Fragment() {
             approachFeatures.put(buildCirclePolygon(wp.lat, wp.lon, r))
         }
         approachSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", approachFeatures).toString())
-        // Taken radius circles (inner, orange) — auto-advance
+        // Taken radius circles (inner, orange) — ONLY when navigation active
         val takenFeatures = JSONArray()
-        waypoints.forEach { wp ->
-            takenFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalTakenM))
+        if (navActive) {
+            waypoints.forEach { wp ->
+                takenFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalTakenM))
+            }
         }
         proximitySource?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", takenFeatures).toString())
     }
@@ -1950,6 +2026,106 @@ class MapFragment : Fragment() {
             return
         }
         // Distance will be updated on next GPS fix
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        val density = context?.resources?.displayMetrics?.density ?: 3f
+        return (dp * density).toInt()
+    }
+
+    private fun applyNavCompassPrefs() {
+        val b = _binding ?: return
+        val compass = b.navCompass
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean(PREF_NAV_COMPASS_ENABLED, false)
+        compass.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) return
+
+        // Size
+        val sizeVal = try { prefs.getInt(PREF_NAV_COMPASS_SIZE, 100) } catch (_: Exception) {
+            prefs.edit().remove(PREF_NAV_COMPASS_SIZE).apply(); 100
+        }
+        val sizeDp = dpToPx(sizeVal)
+        compass.layoutParams = compass.layoutParams.apply {
+            width = sizeDp
+            height = sizeDp
+        }
+
+        // Alpha
+        val alpha = prefs.getInt(PREF_NAV_COMPASS_ALPHA, 7)
+        compass.compassAlpha = alpha / 10f
+
+        // Position
+        val position = prefs.getString(PREF_NAV_COMPASS_POSITION, "top-right") ?: "top-right"
+        val cs = ConstraintSet()
+        cs.clone(b.root as ConstraintLayout)
+        val id = R.id.navCompass
+        cs.clear(id, ConstraintSet.TOP)
+        cs.clear(id, ConstraintSet.BOTTOM)
+        cs.clear(id, ConstraintSet.START)
+        cs.clear(id, ConstraintSet.END)
+        val m8 = dpToPx(8); val m12 = dpToPx(12)
+        when (position) {
+            "top-left" -> {
+                cs.connect(id, ConstraintSet.TOP, R.id.topBar, ConstraintSet.BOTTOM, m8)
+                cs.connect(id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START, m12)
+            }
+            "top-right" -> {
+                cs.connect(id, ConstraintSet.TOP, R.id.topBar, ConstraintSet.BOTTOM, m8)
+                cs.connect(id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END, m12)
+            }
+            "bottom-left" -> {
+                cs.connect(id, ConstraintSet.BOTTOM, R.id.bottomBar, ConstraintSet.TOP, m8)
+                cs.connect(id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START, m12)
+            }
+            "bottom-right" -> {
+                cs.connect(id, ConstraintSet.BOTTOM, R.id.bottomBar, ConstraintSet.TOP, m8)
+                cs.connect(id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END, m12)
+            }
+        }
+        cs.applyTo(b.root as ConstraintLayout)
+    }
+
+    fun refreshNavCompass() {
+        applyNavCompassPrefs()
+    }
+
+    private fun updateNavCompass() {
+        val compass = _binding?.navCompass ?: return
+        if (compass.visibility != View.VISIBLE) return
+        val cameraBearing = mapboxMap?.cameraPosition?.bearing?.toFloat() ?: lastGpsBearing
+        // No GPS fix yet
+        if (lastGpsLat == 0.0 && lastGpsLon == 0.0) {
+            compass.isNavActive = false
+            compass.mapBearing = cameraBearing
+            return
+        }
+        // No waypoints or nav not active — show as regular compass (arrow = north)
+        if (waypoints.isEmpty() || activeWpIndex >= waypoints.size || !navActive) {
+            compass.isNavActive = false
+            compass.relativeBearing = 0f  // arrow points to top = north direction on ring
+            compass.mapBearing = cameraBearing
+            compass.distanceText = ""
+            return
+        }
+        compass.isNavActive = true
+        val wp = waypoints[activeWpIndex]
+        val bearingToWp = bearingToPoint(lastGpsLat, lastGpsLon, wp.lat, wp.lon)
+        // Arrow points relative to screen-up (camera bearing), not GPS course
+        val relative = ((bearingToWp - cameraBearing) % 360 + 360) % 360
+        compass.relativeBearing = relative
+        compass.mapBearing = cameraBearing
+        val distM = distanceM(LatLng(lastGpsLat, lastGpsLon), LatLng(wp.lat, wp.lon))
+        compass.distanceText = if (distM < 1000) "${distM.toInt()} м" else String.format("%.1f км", distM / 1000)
+    }
+
+    private fun bearingToPoint(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
+        val dLon = Math.toRadians(lon2 - lon1)
+        val la1 = Math.toRadians(lat1); val la2 = Math.toRadians(lat2)
+        val y = Math.sin(dLon) * Math.cos(la2)
+        val x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon)
+        return ((Math.toDegrees(Math.atan2(y, x)) + 360) % 360).toFloat()
     }
 
     private fun setupButtons(map: MapboxMap) {
@@ -2124,15 +2300,17 @@ class MapFragment : Fragment() {
 
         fun lockScreen() {
         isScreenLocked = true
-        _binding?.lockOverlay?.visibility = View.VISIBLE  // Always show overlay (blocks touches)
-        // Show lock icon only when bottom bar is hidden
-        val bottomBarVisible = _binding?.bottomBar?.visibility == View.VISIBLE
-        val lockIcon = _binding?.lockOverlay?.getChildAt(0) as? android.widget.ImageView
-        lockIcon?.visibility = if (bottomBarVisible) View.GONE else View.VISIBLE
+        val b = _binding ?: return
+        b.lockOverlay.visibility = View.VISIBLE  // Always show overlay (blocks touches)
+        // Always show small yellow lock icon in top-right corner
+        val lockIcon = b.lockOverlay.getChildAt(0) as? android.widget.ImageView
+        lockIcon?.visibility = View.VISIBLE
         ImageViewCompat.setImageTintList(
-            _binding!!.btnLock,
+            b.btnLock,
             android.content.res.ColorStateList.valueOf(Color.parseColor("#FFD600"))
         )
+        // Flash yellow border to confirm lock activation
+        flashScreenBorder(Color.parseColor("#FFD600"))
     }
 
     /** Add an offline map and return its key. Returns null on failure. */
@@ -2288,6 +2466,67 @@ class MapFragment : Fragment() {
             b.btnLock,
             android.content.res.ColorStateList.valueOf(Color.WHITE)
         )
+        // Flash green border to confirm unlock
+        flashScreenBorder(Color.parseColor("#4CAF50"))
+    }
+
+    private fun flashScreenBorder(color: Int) {
+        val b = _binding ?: return
+        val border = b.lockFlashBorder
+        val gd = (border.background as? android.graphics.drawable.GradientDrawable)
+            ?: android.graphics.drawable.GradientDrawable().also {
+                it.shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                it.cornerRadius = 4f * (context?.resources?.displayMetrics?.density ?: 3f)
+                border.background = it
+            }
+        gd.setStroke((4 * (context?.resources?.displayMetrics?.density ?: 3f)).toInt(), color)
+        gd.setColor(Color.TRANSPARENT)
+        border.visibility = View.VISIBLE
+        border.alpha = 1f
+        border.animate().alpha(0f).setDuration(600).withEndAction {
+            border.visibility = View.GONE
+        }.start()
+    }
+
+    /** Handle Samsung XCover Key programmable button action */
+    fun handleXCoverAction(action: String) {
+        when (action) {
+            "camera_mode" -> {
+                // Cycle FREE → FOLLOW_NORTH → FOLLOW_COURSE → FREE
+                when (followMode) {
+                    FollowMode.FREE -> {
+                        followMode = FollowMode.FOLLOW_NORTH
+                        applyFollowMode()
+                        showHint("🧭 Следование: север вверху")
+                    }
+                    FollowMode.FOLLOW_NORTH -> {
+                        followMode = FollowMode.FOLLOW_COURSE
+                        applyFollowMode()
+                        showHint("🧭 Следование: по курсу движения")
+                    }
+                    FollowMode.FOLLOW_COURSE -> {
+                        followMode = FollowMode.FREE
+                        applyFollowMode()
+                        mapboxMap?.animateCamera(CameraUpdateFactory.bearingTo(0.0))
+                        showHint("🧭 Свободный режим карты")
+                    }
+                }
+            }
+            "add_point" -> {
+                // Add waypoint at current GPS position
+                if (lastGpsLat != 0.0 || lastGpsLon != 0.0) {
+                    val num = userMarkers.size + 1
+                    val wpName = "WP%02d".format(num)
+                    userMarkers.add(UserPoint(wpName, LatLng(lastGpsLat, lastGpsLon)))
+                    updateUserMarkersOnMap()
+                    Toast.makeText(context, "$wpName поставлена (GPS)", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Нет GPS-координат", Toast.LENGTH_SHORT).show()
+                }
+            }
+            "toggle_track" -> toggleRecording()
+            "screen_lock" -> if (isScreenLocked) unlockScreen() else lockScreen()
+        }
     }
 
     fun loadTrack(points: List<Pair<Double, Double>>) {
@@ -2334,6 +2573,20 @@ class MapFragment : Fragment() {
         }
         updateNavLine()
         updateWaypointNavBar()
+        updateNavCompass()
+        _binding?.navCompass?.flashOnWaypointReached()
+        // Send telemetry on waypoint advance
+        context?.let { ctx ->
+            val extra = org.json.JSONObject().apply {
+                put("wp_index", activeWpIndex)
+                put("wp_total", waypoints.size)
+                put("lat", lastGpsLat)
+                put("lon", lastGpsLon)
+                put("bearing", lastGpsBearing)
+                put("speed_kmh", lastGpsSpeedKmh)
+            }
+            Analytics.sendEvent(ctx, "wp_advance", extra)
+        }
         // Toast removed — nav bar shows current WP, no need to overlap
         // Immediately refresh distance widget with new target
         val b = _binding ?: return
@@ -3687,6 +3940,7 @@ class MapFragment : Fragment() {
             ?.edit()?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)?.apply()
         updateNavLine()
         updateWaypointNavBar()
+        updateNavCompass()
         // Toast removed — nav bar shows current WP, no need to overlap
         // Immediately refresh distance widget with new target
         val b = _binding ?: return
@@ -3833,6 +4087,7 @@ class MapFragment : Fragment() {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putBoolean(PREF_NAV_ACTIVE, true)?.apply()
         updateNavLine()
+        updateRadiusCircles()
         updateWaypointNavBar()
     }
 
@@ -3855,6 +4110,8 @@ class MapFragment : Fragment() {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putBoolean(PREF_NAV_ACTIVE, false)?.apply()
         updateNavLine()
+        updateNavCompass()
+        updateRadiusCircles()
         updateWaypointNavBar()
     }
 
@@ -3895,6 +4152,7 @@ class MapFragment : Fragment() {
             ?.putInt(PREF_ACTIVE_WP_INDEX, activeWpIndex)
             ?.apply()
         updateNavLine()
+        updateRadiusCircles()
         updateWaypointNavBar()
         val wp = waypoints[index]
         Toast.makeText(context, "Навигация к: ${wp.name}", Toast.LENGTH_SHORT).show()
@@ -4113,33 +4371,96 @@ class MapFragment : Fragment() {
                     // Первый GPS-фикс — прыгаем на зум 12
                     if (!initialZoomDone) {
                         initialZoomDone = true
+                        // Compute magnetic declination for magnetometer → true north
+                        try {
+                            val geoField = android.hardware.GeomagneticField(
+                                loc.latitude.toFloat(), loc.longitude.toFloat(),
+                                loc.altitude.toFloat(), System.currentTimeMillis())
+                            magneticDeclination = geoField.declination
+                        } catch (_: Exception) {}
                         context?.let { DiagnosticsCollector.logEvent(it, "GPS fix: acc=${loc.accuracy}m") }
                         mapboxMap?.animateCamera(
                             CameraUpdateFactory.newLatLngZoom(newPoint, 12.0), 1000
                         )
                     }
 
-                    // Smooth bearing via EMA — eliminates GPS bearing jitter
-                    val bearing = smoothBearing(loc.bearing).toFloat()
+                    // Compute speed & bearing from coordinate delta (reliable on ALL devices)
+                    val nowMs = System.currentTimeMillis()
+                    val dtSec = if (prevFreezeCheckTime > 0) (nowMs - prevFreezeCheckTime) / 1000.0 else 0.0
+                    val hasPrevPoint = prevFreezeCheckLat != 0.0 || prevFreezeCheckLon != 0.0
+                    val movedM = if (hasPrevPoint) distanceM(LatLng(prevFreezeCheckLat, prevFreezeCheckLon), newPoint) else 0.0
+                    val computedSpeedKmh = if (dtSec > 0.5 && hasPrevPoint) (movedM / dtSec) * 3.6 else 0.0
+                    val computedBearing = if (hasPrevPoint && movedM > 1.0) bearingToPoint(
+                        prevFreezeCheckLat, prevFreezeCheckLon, loc.latitude, loc.longitude
+                    ) else -1f  // -1 = no reliable bearing from movement
 
-                    // Bearing freeze with hysteresis — applied globally for all follow modes
-                    // Freeze at < 1 km/h, unfreeze at > 3 km/h
-                    // Prevents cursor spinning from GPS noise when stopped
-                    val speedKmhForBearing = loc.speed * 3.6
-                    if (bearingFrozen) {
-                        if (speedKmhForBearing > 3.0) { bearingFrozen = false; lastValidBearing = bearing }
-                    } else {
-                        if (speedKmhForBearing < 1.0) bearingFrozen = true
-                        else lastValidBearing = bearing
+                    // Use computed speed (works on Samsung where loc.speed=0 while moving)
+                    // Fallback to loc.speed if computed is 0 but loc has speed (Xiaomi cache case handled by position check)
+                    val speedKmh = if (computedSpeedKmh > 1.0) computedSpeedKmh
+                        else if (loc.hasSpeed()) (loc.speed * 3.6).toDouble() else 0.0
+
+                    // Use computed bearing if available, else loc.bearing
+                    val rawBearing = if (computedBearing >= 0) computedBearing
+                        else if (loc.hasBearing()) loc.bearing else -1f
+
+                    // Update position checkpoint
+                    prevFreezeCheckLat = loc.latitude
+                    prevFreezeCheckLon = loc.longitude
+                    prevFreezeCheckTime = nowMs
+
+                    // Freeze logic: stopped = speed < 2 km/h AND moved < 2m
+                    val wasFrozen = bearingFrozen
+                    if (speedKmh < 2.0 && movedM < 2.0) {
+                        bearingFrozen = true
+                    } else if (speedKmh > 3.0 && movedM > 1.0) {
+                        bearingFrozen = false
                     }
-                    val effectiveBearing = if (bearingFrozen) lastValidBearing else bearing
+
+                    // Bearing selection: frozen → keep last GPS bearing (stable), moving → computed bearing
+                    // Magnetometer is unreliable in vehicles (metal), so we DON'T use it while driving
+                    val effectiveBearing: Float
+                    if (bearingFrozen) {
+                        effectiveBearing = lastValidBearing  // keep last known direction, don't jump to magnetometer
+                    } else {
+                        if (wasFrozen && rawBearing >= 0) {
+                            smoothedBearing = rawBearing.toDouble()
+                        }
+                        val bearing = if (rawBearing >= 0) smoothBearing(rawBearing).toFloat() else lastValidBearing
+                        lastValidBearing = bearing
+                        effectiveBearing = bearing
+                    }
+
+                    // Diagnostic log
+                    Log.w("BearingDebug", "cSpd=%.1f cBear=%.0f moved=%.1f frz=%b gpsBear=%.0f magH=%.0f eff=%.0f".format(
+                        speedKmh, computedBearing, movedM, bearingFrozen, loc.bearing,
+                        magneticHeading, effectiveBearing))
+                    // Send telemetry to server every 5 seconds
+                    val now = System.currentTimeMillis()
+                    if (now - lastTelemetrySentMs > 5000L) {
+                        lastTelemetrySentMs = now
+                        context?.let { ctx ->
+                            val extra = org.json.JSONObject().apply {
+                                put("cSpd", "%.1f".format(speedKmh))
+                                put("cBear", "%.0f".format(computedBearing))
+                                put("moved", "%.1f".format(movedM))
+                                put("frozen", bearingFrozen)
+                                put("gpsBear", "%.0f".format(loc.bearing))
+                                put("gpsSpd", "%.1f".format(loc.speed * 3.6))
+                                put("magHead", "%.0f".format(magneticHeading))
+                                put("effBear", "%.0f".format(effectiveBearing))
+                                put("lat", "%.6f".format(loc.latitude))
+                                put("lon", "%.6f".format(loc.longitude))
+                            }
+                            Analytics.sendEvent(ctx, "telemetry", extra)
+                        }
+                    }
 
                     // Update custom GPS arrow with freeze-corrected bearing
                     updateGpsArrow(loc.latitude, loc.longitude, effectiveBearing)
-                    // Update heading line from GPS
+                    // Update heading line from GPS — use same filtered bearing as cursor
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
-                        updateHeadingLine(LatLng(loc.latitude, loc.longitude))
+                        updateHeadingLine(LatLng(loc.latitude, loc.longitude), effectiveBearing)
                     }
 
                     // Update accuracy circle — shrinks as GPS locks on, hides when < 10m
@@ -4153,17 +4474,18 @@ class MapFragment : Fragment() {
                     lastGpsSpeedMs = loc.speed
                     lastGpsBearing = effectiveBearing
                     lastGpsTimeNanos = System.nanoTime()
-                    lastGpsSpeedKmh = loc.speed * 3.6
+                    lastGpsSpeedKmh = if (speedKmh > 1.0) speedKmh else loc.speed * 3.6
 
                     // Start camera loop if not running
                     if (!cameraLoopRunning && initialZoomDone) startCameraLoop()
 
-                    // Update widgets
-                    val speedKmhInt = (loc.speed * 3.6).toInt()
-                    b.widgetSpeed.text = if (loc.speed > 0.5f) speedKmhInt.toString() else "--"
+                    // Update widgets (use computed speed — works on Samsung where loc.speed=0)
+                    val speedKmhInt = speedKmh.toInt()
+                    b.widgetSpeed.text = if (speedKmh > 1.0) speedKmhInt.toString() else "--"
                     b.widgetBearing.text = "${effectiveBearing.toInt()}°"
                     b.widgetDirectionArrow.rotation = effectiveBearing
                     if (loc.hasAltitude()) b.widgetAltitude.text = loc.altitude.toInt().toString()
+                    updateNavCompass()
 
                     // Next CP distance + name + remaining km + auto-advance
                     if (waypoints.isNotEmpty() && activeWpIndex < waypoints.size) {
@@ -4184,16 +4506,18 @@ class MapFragment : Fragment() {
                         val takenRadius = globalTakenRadius.coerceAtMost(approachRadius)
                         val inApproach = distM <= approachRadius
                         val inTaken = distM <= takenRadius
-                        // Sound: entering approach radius (fire once per waypoint)
-                        if (inApproach && !wasInApproachRadius) {
+                        // Sound: entering approach radius (fire once per waypoint, only when nav active)
+                        if (navActive && inApproach && !wasInApproachRadius) {
                             if (prefs?.getBoolean(PREF_SOUND_APPROACH, true) == true) playApproachSound()
                         }
                         wasInApproachRadius = inApproach
                         if (navActive && inTaken) {
                             val nextIndex = activeWpIndex + 1
                             if (nextIndex < waypoints.size) {
+                                justTakenWpIndex = activeWpIndex  // remember taken WP to suppress wrong sound
                                 advanceWaypoint()
-                                warnedWrongWpIndices.clear()  // reset wrong WP warnings after advance
+                                warnedWrongWpIndices.clear()
+                                wrongWpSoundPlayed.clear()
                             } else {
                                 stopNavigation()
                                 playFinishSound()
@@ -4201,21 +4525,35 @@ class MapFragment : Fragment() {
                             }
                         }
 
-                        // Check ALL waypoints for wrong-order entry — sound repeats while in radius
+                        // Check ALL waypoints for wrong-order entry (only when nav is active)
                         if (navActive) {
+                            // Clear justTaken flag when we leave that WP's radius
+                            if (justTakenWpIndex >= 0) {
+                                val jtWp = waypoints.getOrNull(justTakenWpIndex)
+                                if (jtWp != null) {
+                                    val jtDist = distanceM(newPoint, LatLng(jtWp.lat, jtWp.lon))
+                                    val jtRadius = if (jtWp.proximity > 0) jtWp.proximity else globalApproachRadius
+                                    if (jtDist > jtRadius) justTakenWpIndex = -1
+                                }
+                            }
                             waypoints.forEachIndexed { idx, otherWp ->
-                                if (idx != activeWpIndex) {
+                                if (idx != activeWpIndex && idx != justTakenWpIndex) {
                                     val otherDist = distanceM(newPoint, LatLng(otherWp.lat, otherWp.lon))
                                     val otherRadius = if (otherWp.proximity > 0) otherWp.proximity else globalApproachRadius
                                     if (otherDist <= otherRadius) {
-                                        playWrongWpSound()
+                                        // Sound once per radius entry
+                                        if (idx !in wrongWpSoundPlayed) {
+                                            playWrongWpSound()
+                                            wrongWpSoundPlayed.add(idx)
+                                        }
                                         if (idx !in warnedWrongWpIndices) {
                                             warnedWrongWpIndices.add(idx)
-                                            Toast.makeText(ctx, "⚠\uFE0F Это WP${idx + 1}, а нужна WP${activeWpIndex + 1}!", Toast.LENGTH_LONG).show()
+                                            Toast.makeText(ctx, "⚠\uFE0F Это WP${idx + 1}, след. WP${activeWpIndex + 1}", Toast.LENGTH_LONG).show()
                                         }
                                         return@forEachIndexed
                                     } else {
                                         warnedWrongWpIndices.remove(idx)
+                                        wrongWpSoundPlayed.remove(idx)  // reset when leaving — sound again on re-entry
                                     }
                                 }
                             }
@@ -4789,9 +5127,9 @@ class MapFragment : Fragment() {
             clearDistanceLine()
         }
 
-        // Heading line (predicted direction from GPS bearing)
+        // Heading line (predicted direction from GPS bearing — use filtered bearing)
         if (prefs.getBoolean(PREF_HEADING_LINE_ENABLED, false) && gps != null) {
-            updateHeadingLine(gps)
+            updateHeadingLine(gps, lastGpsBearing)
         } else {
             clearHeadingLine()
         }
@@ -4834,10 +5172,10 @@ class MapFragment : Fragment() {
     }
 
     /** Draw heading line from GPS position to edge of visible map */
-    private fun updateHeadingLine(gps: LatLng) {
+    private fun updateHeadingLine(gps: LatLng, overrideBearing: Float? = null) {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(HEADING_LINE_SOURCE_ID) ?: return
-        val bearingDeg = smoothedBearing
+        val bearingDeg = overrideBearing?.toDouble() ?: smoothedBearing
         if (bearingDeg < 0) { clearHeadingLine(); return }
         // Calculate distance to edge of visible map (diagonal) so line always reaches screen edge
         val bounds = mapboxMap?.projection?.visibleRegion?.latLngBounds
@@ -5248,6 +5586,7 @@ class MapFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         _binding?.mapView?.onResume()
+        startMagnetometer()
         applyFullscreenPref()
         applyWidgetPrefs()
         applyUiScale()
@@ -5310,6 +5649,7 @@ class MapFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        stopMagnetometer()
         stopCameraLoop()
         _binding?.mapView?.onPause()
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
@@ -6104,6 +6444,7 @@ class MapFragment : Fragment() {
         locationTrackingStarted = false
         emergencyHandler.removeCallbacksAndMessages(null)
         emergencyRunnable = null
+        _binding?.lockFlashBorder?.animate()?.cancel()
         liveUsersPoller?.stop(); liveUsersPoller = null
         stopChronoTicker(); stopTimeTicker()
         tileServer?.cleanup(); tileServer = null
