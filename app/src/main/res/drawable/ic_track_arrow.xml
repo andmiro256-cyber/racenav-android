@@ -4,8 +4,8 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- Chevron pointing RIGHT — Mapbox rotates along line direction -->
+    <!-- Chevron pointing RIGHT — fat arms ~50% height, Mapbox rotates along line -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M7,3 L19,12 L7,21 L10,21 L21,12 L10,3 Z"/>
+        android:pathData="M3,4 L21,12 L3,20 L10,20 L20,12 L10,4 Z"/>
 </vector>

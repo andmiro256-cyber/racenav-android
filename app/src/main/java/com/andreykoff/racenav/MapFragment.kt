@@ -184,6 +184,8 @@ class MapFragment : Fragment() {
     private var locationTrackingStarted = false  // prevent duplicate GPS listeners on style reload
     private var activeLocationCallback: com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult>? = null
     private var locationEngine: com.mapbox.mapboxsdk.location.engine.LocationEngine? = null
+    private val emergencyHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var emergencyRunnable: Runnable? = null
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
@@ -726,14 +728,43 @@ class MapFragment : Fragment() {
                 }
                 handleLiveUserClick(map, latLng)
             }
-            // Long press on map toggles UI bars
-            // When bars are hidden — show emergency settings button so user can always reach settings
-            map.addOnMapLongClickListener {
-                val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
-                _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
-                _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
-                _binding?.btnEmergencySettings?.visibility = if (topVisible) android.view.View.VISIBLE else android.view.View.GONE
-                true
+            // Long press on map: 2s → toggle UI bars, 4s → show emergency gear icon
+            var touchDownX = 0f; var touchDownY = 0f
+            val density = context?.resources?.displayMetrics?.density ?: 3f
+            val moveThr = (20 * density).let { it * it }
+            var panelRunnable: Runnable? = null
+            binding.mapView.setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }
+                        panelRunnable?.let { emergencyHandler.removeCallbacks(it) }
+                        touchDownX = event.x; touchDownY = event.y
+                        // 2s: toggle bars
+                        panelRunnable = Runnable {
+                            val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
+                            _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                            _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
+                        }
+                        emergencyHandler.postDelayed(panelRunnable!!, 2000L)
+                        // 4s: show gear icon
+                        emergencyRunnable = Runnable {
+                            _binding?.btnEmergencySettings?.visibility = android.view.View.VISIBLE
+                        }
+                        emergencyHandler.postDelayed(emergencyRunnable!!, 4000L)
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val dx = event.x - touchDownX; val dy = event.y - touchDownY
+                        if (dx * dx + dy * dy > moveThr) {
+                            panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
+                            emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
+                        }
+                    }
+                    android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                        panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
+                        emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
+                    }
+                }
+                false
             }
         }
 
@@ -1524,7 +1555,7 @@ class MapFragment : Fragment() {
     private fun setupTrackLayers(style: Style) {
         val ctx = context ?: return
         ContextCompat.getDrawable(ctx, R.drawable.ic_track_arrow)?.let {
-            style.addImage(TRACK_ARROW_ICON, it.toBitmap(32, 32))
+            style.addImage(TRACK_ARROW_ICON, it.toBitmap(48, 48))
         }
         style.addSource(GeoJsonSource(TRACK_SOURCE_ID))
         // Casing (dark outline under the track line)
@@ -1545,11 +1576,11 @@ class MapFragment : Fragment() {
         style.addLayer(SymbolLayer(TRACK_ARROWS_LAYER_ID, TRACK_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(TRACK_ARROW_ICON),
             PropertyFactory.symbolPlacement("line"),
-            PropertyFactory.symbolSpacing(50f),
+            PropertyFactory.symbolSpacing(10f),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
             PropertyFactory.iconRotationAlignment("map"),
-            PropertyFactory.iconSize(0.7f)
+            PropertyFactory.iconSize(0.45f)
         ))
         // Loaded track layer (color/width from prefs, default blue)
         style.addSource(GeoJsonSource(LOADED_TRACK_SOURCE_ID))
@@ -6036,6 +6067,9 @@ class MapFragment : Fragment() {
             val maxDelta = autoZoomLevel * 0.4
             val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
             (base - delta).coerceIn(base - maxDelta, base)
+        } else if (userBaseZoom > 0) {
+            // Apply volume-key zoom in follow modes — Choreographer overwrites animateCamera every 16ms
+            userBaseZoom
         } else null
 
         val target = LatLng(extLat, extLon)
@@ -6068,6 +6102,8 @@ class MapFragment : Fragment() {
         activeLocationCallback = null
         locationEngine = null
         locationTrackingStarted = false
+        emergencyHandler.removeCallbacksAndMessages(null)
+        emergencyRunnable = null
         liveUsersPoller?.stop(); liveUsersPoller = null
         stopChronoTicker(); stopTimeTicker()
         tileServer?.cleanup(); tileServer = null
