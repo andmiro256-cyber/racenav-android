@@ -223,14 +223,14 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <!-- Row 1: title + save/cancel -->
+        <!-- Row 1: title + save/exit -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="40dp"
+            android:layout_height="38dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:paddingStart="12dp"
-            android:paddingEnd="8dp">
+            android:paddingEnd="4dp">
 
             <TextView
                 android:id="@+id/trackEditorTitle"
@@ -244,90 +244,112 @@
                 android:singleLine="true"
                 android:ellipsize="end" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorSave"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="wrap_content"
                 android:layout_height="32dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:text="✓ Сохранить"
                 android:textSize="12sp"
                 android:textAllCaps="false"
-                android:textColor="#4CAF50"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp" />
+                android:textColor="#A5D6A7"
+                app:backgroundTint="#1B5E20"
+                app:cornerRadius="6dp"
+                android:layout_marginEnd="4dp" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorExit"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="wrap_content"
                 android:layout_height="32dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:text="✕"
                 android:textSize="14sp"
                 android:textAllCaps="false"
-                android:textColor="#888888"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp" />
+                android:textColor="#AAAAAA"
+                app:backgroundTint="#2A2A2A"
+                app:cornerRadius="6dp" />
         </LinearLayout>
 
         <!-- Row 2: tools -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="40dp"
+            android:layout_height="44dp"
             android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:paddingBottom="4dp">
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="4dp"
+            android:gravity="center_vertical">
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorTrim"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="0dp"
-                android:layout_height="34dp"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginEnd="2dp"
                 android:text="✂ Обрезать"
                 android:textSize="11sp"
                 android:textAllCaps="false"
-                android:textColor="#CCCCCC"
-                android:background="@drawable/rounded_bg_dark" />
+                android:textColor="#FFCDD2"
+                app:backgroundTint="#B71C1C"
+                app:cornerRadius="6dp" />
 
-            <View android:layout_width="4dp" android:layout_height="1dp" />
-
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorSimplify"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="0dp"
-                android:layout_height="34dp"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
                 android:text="⎘ Упростить"
                 android:textSize="11sp"
                 android:textAllCaps="false"
                 android:textColor="#CCCCCC"
-                android:background="@drawable/rounded_bg_dark" />
+                app:backgroundTint="#1565C0"
+                app:cornerRadius="6dp" />
 
-            <View android:layout_width="4dp" android:layout_height="1dp" />
-
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorUndo"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="0dp"
-                android:layout_height="34dp"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
-                android:text="↩ Undo"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="↩ Отмена"
                 android:textSize="11sp"
                 android:textAllCaps="false"
-                android:textColor="#888888"
-                android:background="@drawable/rounded_bg_dark" />
+                android:textColor="#FFF9C4"
+                app:backgroundTint="#F57F17"
+                app:cornerRadius="6dp" />
 
-            <View android:layout_width="4dp" android:layout_height="1dp" />
-
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnEditorReverse"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
                 android:layout_width="0dp"
-                android:layout_height="34dp"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginStart="2dp"
                 android:text="⇄ Реверс"
                 android:textSize="11sp"
                 android:textAllCaps="false"
                 android:textColor="#CCCCCC"
-                android:background="@drawable/rounded_bg_dark" />
+                app:backgroundTint="#4A148C"
+                app:cornerRadius="6dp" />
         </LinearLayout>
 
     </LinearLayout>
@@ -437,6 +459,129 @@
             android:textAllCaps="false"
             android:textColor="#FFFFFF"
             android:background="?attr/selectableItemBackgroundBorderless" />
+    </LinearLayout>
+
+    <!-- Draw mode toolbar — shown when drawing a new track -->
+    <LinearLayout
+        android:id="@+id/drawModeBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#E61565C0"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/waypointNavBar"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- Row 1: stats + color swatch + exit -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="38dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="4dp">
+
+            <TextView
+                android:id="@+id/drawModeStats"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="✏ Новый трек · 0 точек"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:singleLine="true" />
+
+            <!-- Color swatch: round dot showing current track color -->
+            <FrameLayout
+                android:id="@+id/btnDrawColor"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginEnd="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="@drawable/circle_dot" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDrawExit"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="✕ Выйти"
+                android:textSize="11sp"
+                android:textAllCaps="false"
+                android:textColor="#AAAAAA"
+                app:backgroundTint="#2A2A2A"
+                app:cornerRadius="6dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp" />
+        </LinearLayout>
+
+        <!-- Row 2: undo + add point + save -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:orientation="horizontal"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="4dp"
+            android:gravity="center_vertical">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDrawUndo"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginEnd="2dp"
+                android:text="↩ Отмена"
+                android:textSize="12sp"
+                android:textAllCaps="false"
+                android:textColor="#FFF9C4"
+                app:backgroundTint="#F57F17"
+                app:cornerRadius="6dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDrawAddPoint"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="2"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="📍 Добавить"
+                android:textSize="13sp"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                app:backgroundTint="#E65100"
+                app:cornerRadius="6dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDrawSave"
+                style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:layout_marginStart="2dp"
+                android:text="✓ Сохранить"
+                android:textSize="12sp"
+                android:textAllCaps="false"
+                android:textColor="#A5D6A7"
+                app:backgroundTint="#1B5E20"
+                app:cornerRadius="6dp" />
+
+        </LinearLayout>
+
     </LinearLayout>
 
     <!-- Waypoint navigation bar (prev/next CP buttons), shown when navigation active -->

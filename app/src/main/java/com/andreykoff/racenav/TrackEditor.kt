@@ -21,6 +21,11 @@ object TrackEditor {
 
     fun canUndo() = undoStack.isNotEmpty()
 
+    /** Call before drag to push undo state. Then update editPoints[index] directly during drag. */
+    fun startDrag(index: Int) {
+        if (index in editPoints.indices) pushUndo()
+    }
+
     private fun pushUndo() {
         undoStack.addLast(editPoints.toList())
         if (undoStack.size > 20) undoStack.removeFirst()

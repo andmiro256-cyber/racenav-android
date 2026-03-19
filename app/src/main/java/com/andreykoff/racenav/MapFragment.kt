@@ -50,6 +50,7 @@ import com.mapbox.mapboxsdk.style.layers.PropertyValue
 import com.mapbox.mapboxsdk.style.layers.SymbolLayer
 import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -170,7 +171,24 @@ class MapFragment : Fragment() {
     private var trackEditorMode = false
     private var editMoveMode = false   // перемещение точки через крестик
 
+    // Drag point state (long-press drag in track editor)
+    private var isDraggingPoint = false
+    private var dragPointIndex = -1
+    private var dragStartRunnable: Runnable? = null
+    private var renderEditorJob: Job? = null
+
+    // Widget-free mode state (long-press on map → hide bars)
+    private var isWidgetFreeMode = false
+
+    // Draw mode state
+    private var drawMode = false
+    private val drawnPoints = mutableListOf<TrackEditor.TrackPoint>()
+
     private var initialZoomDone = false
+    private var waitingForFirstGps = false
+    private var firstGpsAnimDone = false
+    private var flyAnimationActive = false
+    private var pendingNavResumeCheck = false
     var autoRecenterEnabled = false
     var tilt3dEnabled = false       // 3D tilt when driving in FOLLOW_COURSE
     var autoZoomLevel = 0           // 0=off, 1-10; controls zoom amplitude with speed
@@ -743,6 +761,8 @@ class MapFragment : Fragment() {
             map.uiSettings.isCompassEnabled = false
             map.uiSettings.isAttributionEnabled = false
             map.uiSettings.isLogoEnabled = false
+            // Reduce prefetch zoom delta from default 4 → 1 to load fewer adjacent tiles on startup
+            map.setPrefetchZoomDelta(1)
             val tilePrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val savedTile = tilePrefs?.getString(PREF_TILE_KEY, "osm") ?: "osm"
             val savedOverlayStr = tilePrefs?.getString(PREF_OVERLAY_KEY, "") ?: ""
@@ -773,6 +793,20 @@ class MapFragment : Fragment() {
             if (savedLat != Float.MIN_VALUE && savedZoom >= 5f) {
                 map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(savedLat.toDouble(), savedLon.toDouble()), savedZoom.toDouble()))
                 initialZoomDone = true
+            } else {
+                // No valid saved position — try last known location from system to avoid world view
+                val lm = context?.getSystemService(android.content.Context.LOCATION_SERVICE)
+                    as? android.location.LocationManager
+                val lastLoc = try {
+                    lm?.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+                        ?: lm?.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+                        ?: lm?.getLastKnownLocation(android.location.LocationManager.PASSIVE_PROVIDER)
+                } catch (_: SecurityException) { null }
+                if (lastLoc != null) {
+                    map.moveCamera(CameraUpdateFactory.newLatLngZoom(
+                        LatLng(lastLoc.latitude, lastLoc.longitude), 13.0))
+                }
+                waitingForFirstGps = true
             }
 
             autoRecenterEnabled = tilePrefs?.getBoolean(PREF_AUTO_RECENTER, false) ?: false
@@ -795,7 +829,7 @@ class MapFragment : Fragment() {
                 }
                 handleLiveUserClick(map, latLng)
             }
-            // Long press on map: 2s → toggle UI bars, 4s → show emergency gear icon
+            // Long press on map: 1.5s → toggle UI bars / drag editor point; 3.5s → emergency gear icon
             var touchDownX = 0f; var touchDownY = 0f
             val density = context?.resources?.displayMetrics?.density ?: 3f
             val moveThr = (30 * density).let { it * it }
@@ -805,13 +839,37 @@ class MapFragment : Fragment() {
                     android.view.MotionEvent.ACTION_DOWN -> {
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }
+                        dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
                         touchDownX = event.x; touchDownY = event.y
-                        // 2s: toggle bars (compass stays visible in widget-free mode)
+
+                        // In track editor mode: check for long-press on a point → drag it
+                        if (trackEditorMode && !editMoveMode && !drawMode) {
+                            val nearIdx = findNearestEditPointOnScreen(event.x, event.y, 60 * density)
+                            if (nearIdx >= 0) {
+                                dragStartRunnable = Runnable {
+                                    TrackEditor.startDrag(nearIdx)
+                                    dragPointIndex = nearIdx
+                                    isDraggingPoint = true
+                                    mapboxMap?.uiSettings?.isScrollGesturesEnabled = false
+                                    mapboxMap?.uiSettings?.isZoomGesturesEnabled = false
+                                    _binding?.editPointPopup?.visibility = android.view.View.GONE
+                                    // Haptic feedback
+                                    @Suppress("DEPRECATION")
+                                    (context?.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(40)
+                                    renderEditorPoints()
+                                }
+                                emergencyHandler.postDelayed(dragStartRunnable!!, 400L)
+                                // Don't start widget-free timer when near a point
+                                return@setOnTouchListener false
+                            }
+                        }
+
+                        // Widget-free mode toggle (1.5s hold)
                         panelRunnable = Runnable {
-                            val topVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
-                            _binding?.topBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
-                            _binding?.bottomBar?.visibility = if (topVisible) android.view.View.GONE else android.view.View.VISIBLE
-                            // Re-apply compass prefs so it stays visible & re-anchors
+                            val nowVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
+                            isWidgetFreeMode = nowVisible  // bars were visible → now going to widget-free
+                            _binding?.topBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
+                            _binding?.bottomBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
                             applyNavCompassPrefs()
                         }
                         emergencyHandler.postDelayed(panelRunnable!!, 1500L)
@@ -822,15 +880,37 @@ class MapFragment : Fragment() {
                         emergencyHandler.postDelayed(emergencyRunnable!!, 3500L)
                     }
                     android.view.MotionEvent.ACTION_MOVE -> {
+                        // Dragging an editor point
+                        if (isDraggingPoint) {
+                            val latLng = mapboxMap?.projection?.fromScreenLocation(
+                                android.graphics.PointF(event.x, event.y))
+                            if (latLng != null && dragPointIndex in TrackEditor.editPoints.indices) {
+                                TrackEditor.editPoints[dragPointIndex] =
+                                    TrackEditor.TrackPoint(latLng.latitude, latLng.longitude)
+                                renderEditorPoints()
+                            }
+                            return@setOnTouchListener true
+                        }
                         val dx = event.x - touchDownX; val dy = event.y - touchDownY
                         if (dx * dx + dy * dy > moveThr) {
                             panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
                             emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
+                            dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
                         }
                     }
                     android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
+                        dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
+                        if (isDraggingPoint) {
+                            isDraggingPoint = false
+                            dragPointIndex = -1
+                            mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
+                            mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
+                            renderEditorPoints()
+                            updateEditorUi()
+                            return@setOnTouchListener true
+                        }
                     }
                 }
                 false
@@ -840,6 +920,11 @@ class MapFragment : Fragment() {
         // Restore lock state after rotation
         if (savedInstanceState?.getBoolean("screen_locked", false) == true) {
             lockScreen()
+        }
+        if (savedInstanceState?.getBoolean("widget_free_mode", false) == true) {
+            isWidgetFreeMode = true
+            _binding?.topBar?.visibility = View.GONE
+            _binding?.bottomBar?.visibility = View.GONE
         }
     }
 
@@ -872,8 +957,10 @@ class MapFragment : Fragment() {
             }
         }
         // App bars stay visible; use long press on map to temporarily hide them
-        _binding?.topBar?.visibility = View.VISIBLE
-        _binding?.bottomBar?.visibility = View.VISIBLE
+        if (!isWidgetFreeMode) {
+            _binding?.topBar?.visibility = View.VISIBLE
+            _binding?.bottomBar?.visibility = View.VISIBLE
+        }
     }
 
     private data class WidgetDef(val key: String, val prefKey: String, val defaultOn: Boolean)
@@ -1247,7 +1334,7 @@ class MapFragment : Fragment() {
         return try {
             val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
             sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
-            val dt = sdf.parse(isoDate.substringBefore('+').substringBefore('Z')) ?: return "—"
+            val dt = sdf.parse(isoDate.substringBefore('.').substringBefore('+').substringBefore('Z')) ?: return "—"
             val sec = (System.currentTimeMillis() - dt.time) / 1000
             when {
                 sec < 60 -> "${sec} сек"
@@ -1348,60 +1435,80 @@ class MapFragment : Fragment() {
     }
 
     /** Create bitmap: blue arrow (like GPS marker) + name text below */
-    private fun createLiveUserBitmap(name: String, status: String = "online"): Bitmap {
+    /** Determine live user marker color: green=online, yellow=recently active (≤30 min), gray=offline */
+    private fun liveUserMarkerColor(status: String, lastUpdate: String?): Int {
+        if (status == "online") return Color.parseColor("#22C55E")
+        if (lastUpdate != null) {
+            try {
+                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
+                sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                val dt = sdf.parse(lastUpdate.substringBefore('.').substringBefore('+').substringBefore('Z'))
+                if (dt != null && (System.currentTimeMillis() - dt.time) / 60000 <= 30)
+                    return Color.parseColor("#FFD600")
+            } catch (_: Exception) {}
+        }
+        return Color.parseColor("#888888")
+    }
+
+    private fun createLiveUserBitmap(name: String, status: String = "online", lastUpdate: String? = null): Bitmap {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val markerSizeScale = prefs?.getInt(PREF_LIVE_USER_SIZE, DEFAULT_LIVE_USER_SIZE) ?: DEFAULT_LIVE_USER_SIZE
         val density = resources.displayMetrics.density
 
-        // Arrow part (same shape as GPS arrow)
-        val arrowSizePx = (markerScaleToDp(markerSizeScale) * density).toInt().coerceAtLeast(24)
-        val rad = arrowSizePx / 2f * 0.88f
+        val circleSizePx = (markerScaleToDp(markerSizeScale) * density).toInt().coerceAtLeast(28)
+        val cr = circleSizePx / 2f  // circle radius
 
-        // Text part
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        // Label
         val labelSizeScale = prefs?.getInt(PREF_LIVE_USER_LABEL_SIZE, DEFAULT_LIVE_USER_LABEL_SIZE) ?: DEFAULT_LIVE_USER_LABEL_SIZE
-        val textSize = labelScaleToSp(labelSizeScale) * density
-        paint.textSize = textSize
-        paint.isFakeBoldText = true
+        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = labelScaleToSp(labelSizeScale) * density
+            isFakeBoldText = true
+            setShadowLayer(3f * density, 0f, 0f, Color.parseColor("#CC000000"))
+        }
         val displayName = if (name.length > 14) name.take(14) + "…" else name.ifBlank { "?" }
-        val textWidth = paint.measureText(displayName)
-        val textHeight = paint.descent() - paint.ascent()
-        val textGap = 3 * density
+        val textWidth = labelPaint.measureText(displayName)
+        val textHeight = labelPaint.descent() - labelPaint.ascent()
+        val textGap = 4 * density
 
-        // Combined bitmap: arrow + gap + text
-        val bmpW = maxOf(arrowSizePx, (textWidth + 8 * density).toInt())
-        val bmpH = arrowSizePx + textGap.toInt() + textHeight.toInt() + (2 * density).toInt()
+        val markerColor = liveUserMarkerColor(status, lastUpdate)
+        val bmpW = maxOf(circleSizePx, (textWidth + 8 * density).toInt())
+        val bmpH = circleSizePx + textGap.toInt() + textHeight.toInt() + (2 * density).toInt()
         val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         val cx = bmpW / 2f
 
-        // Draw arrow centered at top
-        val arrowCy = arrowSizePx / 2f
-        val arrowPath = Path().apply {
-            moveTo(cx, arrowCy - rad)
-            lineTo(cx + rad * 0.72f, arrowCy + rad)
-            lineTo(cx + rad * 0.18f, arrowCy + rad * 0.70f)
-            lineTo(cx, arrowCy + rad * 0.82f)
-            lineTo(cx - rad * 0.18f, arrowCy + rad * 0.70f)
-            lineTo(cx - rad * 0.72f, arrowCy + rad)
+        // Diamond (rotated square) shape
+        val half = cr * 0.92f
+        val diamondPath = Path().apply {
+            moveTo(cx, cr - half)       // top
+            lineTo(cx + half, cr)       // right
+            lineTo(cx, cr + half)       // bottom
+            lineTo(cx - half, cr)       // left
             close()
         }
+        canvas.drawPath(diamondPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = markerColor; style = Paint.Style.FILL
+        })
         // White border
-        canvas.drawPath(arrowPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        canvas.drawPath(diamondPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE; style = Paint.Style.STROKE
-            strokeWidth = rad * 0.18f; strokeJoin = Paint.Join.ROUND; strokeCap = Paint.Cap.ROUND
+            strokeWidth = 2f * density; strokeJoin = Paint.Join.ROUND
         })
-        // Blue fill
-        canvas.drawPath(arrowPath, Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor(if (status == "online") "#3b82f6" else "#666666"); style = Paint.Style.FILL
-        })
+        // Star symbol ✴ inside
+        val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = circleSizePx * 0.44f
+            textAlign = Paint.Align.CENTER
+            isFakeBoldText = true
+        }
+        val starY = cr - (starPaint.ascent() + starPaint.descent()) / 2f
+        canvas.drawText("\u2734", cx, starY, starPaint)  // ✴ Eight Pointed Black Star
 
-        // Draw name below arrow
-        val textY = arrowSizePx + textGap - paint.ascent()
-        paint.color = Color.WHITE; paint.textAlign = Paint.Align.CENTER; paint.style = Paint.Style.FILL
-        // Text shadow/halo
-        paint.setShadowLayer(3f * density, 0f, 0f, Color.parseColor("#CC000000"))
-        canvas.drawText(displayName, cx, textY, paint)
+        // Name label below circle
+        labelPaint.color = Color.WHITE
+        labelPaint.textAlign = Paint.Align.CENTER
+        labelPaint.style = Paint.Style.FILL
+        canvas.drawText(displayName, cx, circleSizePx + textGap - labelPaint.ascent(), labelPaint)
 
         return bmp
     }
@@ -1444,7 +1551,7 @@ class MapFragment : Fragment() {
                 val features = JSONArray()
                 filtered.forEach { d ->
                     val iconId = "live-user-${d.deviceId}"
-                    style.addImage(iconId, createLiveUserBitmap(d.name, d.status))
+                    style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate))
                     features.put(JSONObject()
                         .put("type", "Feature")
                         .put("geometry", JSONObject().put("type", "Point")
@@ -1857,7 +1964,8 @@ class MapFragment : Fragment() {
         if (pts.isEmpty()) return
         val sel = TrackEditor.selectedIndex
 
-        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+        renderEditorJob?.cancel()
+        renderEditorJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
             // Build JSON off the UI thread
             val coords = JSONArray()
             pts.forEach { coords.put(JSONArray().put(it.lon).put(it.lat)) }
@@ -1889,6 +1997,20 @@ class MapFragment : Fragment() {
                 s.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)?.setGeoJson(pointsJson)
             }
         }
+    }
+
+    private fun findNearestEditPointOnScreen(x: Float, y: Float, thresholdPx: Float): Int {
+        if (TrackEditor.editPoints.isEmpty()) return -1
+        var minDist = Float.MAX_VALUE
+        var minIdx = -1
+        TrackEditor.editPoints.forEachIndexed { idx, pt ->
+            val screenPt = mapboxMap?.projection?.toScreenLocation(
+                com.mapbox.mapboxsdk.geometry.LatLng(pt.lat, pt.lon)) ?: return@forEachIndexed
+            val dx = screenPt.x - x; val dy = screenPt.y - y
+            val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+            if (dist < minDist) { minDist = dist; minIdx = idx }
+        }
+        return if (minDist <= thresholdPx) minIdx else -1
     }
 
     private fun handleEditorTap(map: MapboxMap, latLng: com.mapbox.mapboxsdk.geometry.LatLng) {
@@ -2093,6 +2215,233 @@ class MapFragment : Fragment() {
         }
     }
 
+    // ─── Draw Mode (Режим рисования нового трека) ──────────────────────────────
+
+    private fun showTrackEditorModeDialog(ctx: android.content.Context) {
+        val hasTrack = loadedTrackPoints.isNotEmpty()
+        val editLabel = if (hasTrack) "✏️ Редактировать загруженный трек" else "✏️ Редактировать трек (нет загруженного)"
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Редактор треков")
+            .setItems(arrayOf(editLabel, "🖊 Нарисовать новый трек с нуля")) { _, which ->
+                when (which) {
+                    0 -> if (hasTrack) enterTrackEditMode()
+                         else Toast.makeText(ctx, "Сначала загрузите GPX-трек", Toast.LENGTH_SHORT).show()
+                    1 -> enterDrawMode()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun enterDrawMode() {
+        val ctx = context ?: return
+        if (trackEditorMode) exitTrackEditMode()
+        drawMode = true
+        drawnPoints.clear()
+        _binding?.drawModeBar?.visibility = View.VISIBLE
+        // Force FREE mode so crosshair is visible
+        followMode = FollowMode.FREE
+        _binding?.crosshairView?.visibility = View.VISIBLE
+        // Show editor layers
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+            ?.setProperties(PropertyFactory.lineOpacity(0.9f))
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
+            ?.setProperties(PropertyFactory.visibility("visible"))
+        updateDrawStats()
+        setupDrawModeButtons()
+        Toast.makeText(ctx, "Режим рисования. Наведите крестик и нажмите ＋", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exitDrawMode() {
+        drawMode = false
+        drawnPoints.clear()
+        _binding?.drawModeBar?.visibility = View.GONE
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+            ?.setProperties(PropertyFactory.lineOpacity(0f))
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
+            ?.setProperties(PropertyFactory.visibility("none"))
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)
+            ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)
+            ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+        applyFollowMode()
+    }
+
+    private fun setupDrawModeButtons() {
+        val b = _binding ?: return
+        val ctx = context ?: return
+        b.btnDrawAddPoint.setOnClickListener { addDrawPoint() }
+        b.btnDrawUndo.setOnClickListener { undoDrawPoint() }
+        b.btnDrawSave.setOnClickListener {
+            if (drawnPoints.size < 2) Toast.makeText(ctx, "Нужно минимум 2 точки", Toast.LENGTH_SHORT).show()
+            else saveDrawnTrack()
+        }
+        b.btnDrawExit.setOnClickListener {
+            if (drawnPoints.isEmpty()) {
+                exitDrawMode()
+            } else {
+                android.app.AlertDialog.Builder(ctx)
+                    .setTitle("Выйти из режима рисования?")
+                    .setMessage("Нарисованный трек будет потерян")
+                    .setPositiveButton("Выйти") { _, _ -> exitDrawMode() }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        }
+        // Color picker button — round circle showing current track color
+        val colorView = _binding?.btnDrawColor
+        fun applyCircleColor(hex: String) {
+            colorView?.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(android.graphics.Color.parseColor(hex))
+                setStroke((2 * (ctx.resources.displayMetrics.density)).toInt(), android.graphics.Color.WHITE)
+            }
+        }
+        val initColor = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_COLOR, DEFAULT_TRACK_COLOR) ?: DEFAULT_TRACK_COLOR
+        applyCircleColor(initColor)
+        colorView?.setOnClickListener {
+            showDrawTrackColorPicker(ctx) { hex -> applyCircleColor(hex) }
+        }
+    }
+
+    private fun addDrawPoint() {
+        val center = mapboxMap?.cameraPosition?.target ?: return
+        drawnPoints.add(TrackEditor.TrackPoint(center.latitude, center.longitude))
+        renderDrawnLine()
+        updateDrawStats()
+    }
+
+    private fun undoDrawPoint() {
+        if (drawnPoints.isEmpty()) return
+        drawnPoints.removeAt(drawnPoints.size - 1)
+        renderDrawnLine()
+        updateDrawStats()
+    }
+
+    private fun updateDrawStats() {
+        val n = drawnPoints.size
+        var distKm = 0.0
+        if (n >= 2) {
+            for (i in 1 until n) {
+                val a = drawnPoints[i - 1]; val b = drawnPoints[i]
+                val dLat = Math.toRadians(b.lat - a.lat)
+                val dLon = Math.toRadians(b.lon - a.lon)
+                val sLat = kotlin.math.sin(dLat / 2); val sLon = kotlin.math.sin(dLon / 2)
+                val h = sLat * sLat + kotlin.math.cos(Math.toRadians(a.lat)) *
+                        kotlin.math.cos(Math.toRadians(b.lat)) * sLon * sLon
+                distKm += 6371.0 * 2 * kotlin.math.asin(kotlin.math.sqrt(h))
+            }
+        }
+        val distText = if (distKm >= 1.0) "${"%.1f".format(distKm)} км" else "${(distKm * 1000).toInt()} м"
+        _binding?.drawModeStats?.text = "🖊 Новый трек · $n точек${if (n >= 2) " · $distText" else ""}"
+    }
+
+    private fun renderDrawnLine() {
+        val style = mapboxMap?.style ?: return
+        val snapshot = drawnPoints.toList()  // snapshot on Main thread — no race condition
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+            val lineJson = if (snapshot.size >= 2) {
+                val coords = JSONArray()
+                snapshot.forEach { coords.put(JSONArray().put(it.lon).put(it.lat)) }
+                JSONObject().put("type", "FeatureCollection").put("features", JSONArray().put(
+                    JSONObject().put("type", "Feature").put("properties", JSONObject())
+                        .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+                )).toString()
+            } else "{\"type\":\"FeatureCollection\",\"features\":[]}"
+
+            val ptsJson = if (snapshot.isNotEmpty()) {
+                val features = JSONArray()
+                snapshot.forEachIndexed { idx, pt ->
+                    val role = when { idx == 0 -> "start"; idx == snapshot.size - 1 -> "end"; else -> "normal" }
+                    features.put(JSONObject().put("type", "Feature")
+                        .put("properties", JSONObject().put("index", idx).put("role", role))
+                        .put("geometry", JSONObject().put("type", "Point")
+                            .put("coordinates", JSONArray().put(pt.lon).put(pt.lat))))
+                }
+                JSONObject().put("type", "FeatureCollection").put("features", features).toString()
+            } else "{\"type\":\"FeatureCollection\",\"features\":[]}"
+
+            withContext(Dispatchers.Main) {
+                style.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)?.setGeoJson(lineJson)
+                style.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)?.setGeoJson(ptsJson)
+            }
+        }
+    }
+
+    private fun saveDrawnTrack() {
+        val ctx = context ?: return
+        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())
+        val input = android.widget.EditText(ctx).apply { setText("drawn_$ts"); selectAll() }
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Сохранить трек")
+            .setMessage("Введите название файла:")
+            .setView(input)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val name = input.text.toString().trim().ifBlank { "drawn_$ts" }
+                val pts = drawnPoints.map { Pair(it.lat, it.lon) }
+                val gpx = GpxParser.writeGpx(pts, name)
+                try {
+                    val file = java.io.File(getRaceNavDir(ctx, "tracks"), "$name.gpx")
+                    file.writeText(gpx)
+                    loadTrack(pts)
+                    context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        ?.edit()?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
+                    exitDrawMode()
+                    Toast.makeText(ctx, "Сохранено: $name.gpx (${pts.size} точек)", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "Ошибка сохранения: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showDrawTrackColorPicker(ctx: android.content.Context, onPicked: (String) -> Unit) {
+        val colors = listOf("#FF6F00","#FFFF00","#FFFFFF","#00FF00","#FF4444","#00BFFF",
+            "#FF00FF","#1565C0","#00E676","#FF8A80","#B388FF","#CCCCCC")
+        val currentColor = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_COLOR, DEFAULT_TRACK_COLOR) ?: DEFAULT_TRACK_COLOR
+        val dp = ctx.resources.displayMetrics.density
+        val swatchSize = (48 * dp).toInt()
+        val gap = (8 * dp).toInt()
+        val pad = (16 * dp).toInt()
+        val grid = android.widget.GridLayout(ctx).apply {
+            columnCount = 4
+            setPadding(pad, pad, pad, pad)
+        }
+        val dialog = android.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+            .setTitle("Цвет трека")
+            .setView(grid)
+            .setNegativeButton("Отмена", null)
+            .create()
+        colors.forEach { hex ->
+            val swatch = android.view.View(ctx).apply {
+                layoutParams = android.widget.GridLayout.LayoutParams().apply {
+                    width = swatchSize; height = swatchSize; setMargins(gap, gap, gap, gap)
+                }
+                setBackgroundColor(android.graphics.Color.parseColor(hex))
+                alpha = if (hex == currentColor) 1f else 0.65f
+                if (hex == currentColor) {
+                    foreground = android.graphics.drawable.GradientDrawable().apply {
+                        setStroke((2 * dp).toInt(), android.graphics.Color.WHITE)
+                        cornerRadius = 4 * dp
+                    }
+                }
+                setOnClickListener {
+                    ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                        .edit().putString(PREF_LOADED_TRACK_COLOR, hex).apply()
+                    mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+                        ?.setProperties(com.mapbox.mapboxsdk.style.layers.PropertyFactory.lineColor(hex))
+                    onPicked(hex)
+                    dialog.dismiss()
+                }
+            }
+            grid.addView(swatch)
+        }
+        dialog.show()
+    }
+
     // ─── End Track Editor ──────────────────────────────────────────────────────
 
     private fun setupWaypointLayers(style: Style) {
@@ -2100,6 +2449,22 @@ class MapFragment : Fragment() {
         if (waypoints.isEmpty()) restoreWaypointsFromPrefs()
         val trackWasEmpty = loadedTrackPoints.isEmpty()
         if (trackWasEmpty) restoreTrackFromPrefs()
+
+        // Offer to resume navigation if it was active when app was killed
+        if (pendingNavResumeCheck && waypoints.isNotEmpty()) {
+            pendingNavResumeCheck = false
+            val ctx = context
+            if (ctx != null) {
+                val wpName = waypoints.getOrNull(activeWpIndex)?.name
+                    ?.takeIf { it.isNotBlank() } ?: "WP${activeWpIndex + 1}"
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle("▶ Продолжить навигацию?")
+                    .setMessage("Маршрут: ${waypoints.size} точек\nПоследняя цель: $wpName\n\nПриложение было закрыто во время навигации.")
+                    .setPositiveButton("▶ Продолжить") { _, _ -> startNavigation() }
+                    .setNegativeButton("Нет", null)
+                    .show()
+            }
+        }
 
         // Route polyline: connects all waypoints in order
         val routeLinePrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -2664,9 +3029,13 @@ class MapFragment : Fragment() {
         binding.btnWidgetGo.setTextColor(0xFF666666.toInt())
         binding.btnWidgetStop.setTextColor(0xFF666666.toInt())
 
-        // Restore nav active state
-        val prefs2 = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        navActive = prefs2?.getBoolean(PREF_NAV_ACTIVE, false) ?: false
+        // Nav always starts inactive — offer resume dialog after waypoints are loaded
+        val prevNavActive = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getBoolean(PREF_NAV_ACTIVE, false) ?: false
+        navActive = false
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean(PREF_NAV_ACTIVE, false)?.apply()
+        if (prevNavActive) pendingNavResumeCheck = true
         updateWaypointNavBar()
 
         map.addOnCameraMoveListener { updateCompass(); updateCrosshairInfo() }
@@ -2696,8 +3065,7 @@ class MapFragment : Fragment() {
         recenterRunnable?.let { recenterHandler.removeCallbacks(it) }
         recenterRunnable = Runnable {
             userDragged = false
-            val gps = lastKnownGpsPoint ?: return@Runnable
-            mapboxMap?.animateCamera(CameraUpdateFactory.newLatLng(gps), 800)
+            flyToGps()
         }
         val delaySec = context?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
             ?.getInt(PREF_RECENTER_DELAY, 3) ?: 3
@@ -3664,20 +4032,11 @@ class MapFragment : Fragment() {
             text = "✏️  Редактор треков"
             textSize = 14f; isAllCaps = false
             layoutParams = fullWidthLp
-            if (loadedTrackPoints.isNotEmpty()) {
-                backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0"))
-                setTextColor(android.graphics.Color.WHITE)
-            } else {
-                backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#252525"))
-                setTextColor(android.graphics.Color.parseColor("#555555"))
-            }
+            backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0"))
+            setTextColor(android.graphics.Color.WHITE)
             setOnClickListener {
-                if (loadedTrackPoints.isEmpty()) {
-                    Toast.makeText(ctx, "Сначала загрузите трек через GPX", Toast.LENGTH_SHORT).show()
-                } else {
-                    dialog.dismiss()
-                    enterTrackEditMode()
-                }
+                dialog.dismiss()
+                showTrackEditorModeDialog(ctx)
             }
         })
 
@@ -3741,11 +4100,179 @@ class MapFragment : Fragment() {
             root.addView(actionRow)
         } else {
             root.addView(android.widget.TextView(ctx).apply {
-                text = "Трек не загружен. Откройте GPX файл через вкладку GPX."
+                text = "Трек не загружен."
                 setTextColor(android.graphics.Color.parseColor("#666666"))
                 textSize = 13f
                 setPadding(0, (12 * dp).toInt(), 0, 0)
             })
+        }
+
+        // ── Список сохранённых треков ─────────────────────────────────────────
+        val tracksDir = getRaceNavDir(ctx, "tracks")
+        val gpxFiles = tracksDir.listFiles { f -> f.extension.lowercase() == "gpx" }
+            ?.sortedByDescending { it.lastModified() } ?: emptyList()
+        if (gpxFiles.isNotEmpty()) {
+            root.addView(android.widget.TextView(ctx).apply {
+                text = "📁 Сохранённые треки (${gpxFiles.size})"
+                setTextColor(android.graphics.Color.parseColor("#2196F3"))
+                textSize = 14f
+                setPadding(0, (14 * dp).toInt(), 0, (4 * dp).toInt())
+            })
+
+            val listContainer = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+            }
+            val sdf = java.text.SimpleDateFormat("dd.MM.yy HH:mm", java.util.Locale.getDefault())
+            gpxFiles.forEach { file ->
+                val trackFileName = file.nameWithoutExtension
+                val dateStr = sdf.format(java.util.Date(file.lastModified()))
+
+                val row = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
+                }
+                val statsText = android.widget.TextView(ctx).apply {
+                    text = "$trackFileName\n$dateStr  ···"
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 12f
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                row.addView(statsText)
+                // Async load point count + distance
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val info = try {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            val pts = GpxParser.parseGpxFull(file.inputStream()).trackPoints
+                            if (pts.size < 2) "${pts.size} т." else {
+                                var dist = 0.0
+                                for (i in 1 until pts.size) {
+                                    val a = pts[i - 1]; val b = pts[i]
+                                    val dLat = Math.toRadians(b.first - a.first)
+                                    val dLon = Math.toRadians(b.second - a.second)
+                                    val s = Math.sin(dLat/2).let { it*it } +
+                                        Math.cos(Math.toRadians(a.first)) * Math.cos(Math.toRadians(b.first)) *
+                                        Math.sin(dLon/2).let { it*it }
+                                    dist += 6371000.0 * 2 * Math.asin(Math.sqrt(s))
+                                }
+                                val km = dist / 1000.0
+                                "${pts.size} т. · ${"%.1f".format(km)} км"
+                            }
+                        }
+                    } catch (_: Exception) { "?" }
+                    statsText.text = "$trackFileName\n$dateStr  $info"
+                }
+
+                // Load button
+                row.addView(android.widget.Button(ctx).apply {
+                    text = "📂"
+                    textSize = 14f; isAllCaps = false
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        (48 * dp).toInt(), (36 * dp).toInt()
+                    ).apply { marginStart = (4 * dp).toInt() }
+                    backgroundTintList = android.content.res.ColorStateList.valueOf(
+                        android.graphics.Color.parseColor("#1565C0"))
+                    setTextColor(android.graphics.Color.WHITE)
+                    setOnClickListener {
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            val pts = try {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    GpxParser.parseGpxFull(file.inputStream()).trackPoints
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            if (pts.isNotEmpty()) {
+                                loadTrack(pts)
+                                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                    .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
+                                dialog.dismiss()
+                                Toast.makeText(ctx, "Загружен: $trackFileName (${pts.size} т.)", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(ctx, "Нет точек в файле", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                })
+
+                // Edit button
+                row.addView(android.widget.Button(ctx).apply {
+                    text = "✏️"
+                    textSize = 14f; isAllCaps = false
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        (48 * dp).toInt(), (36 * dp).toInt()
+                    ).apply { marginStart = (4 * dp).toInt() }
+                    backgroundTintList = android.content.res.ColorStateList.valueOf(
+                        android.graphics.Color.parseColor("#E65100"))
+                    setTextColor(android.graphics.Color.WHITE)
+                    setOnClickListener {
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            val pts = try {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    GpxParser.parseGpxFull(file.inputStream()).trackPoints
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            if (pts.isNotEmpty()) {
+                                loadTrack(pts)
+                                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                    .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
+                                dialog.dismiss()
+                                enterTrackEditMode()
+                            } else {
+                                Toast.makeText(ctx, "Нет точек в файле", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                })
+
+                // Delete button
+                row.addView(android.widget.Button(ctx).apply {
+                    text = "🗑"
+                    textSize = 14f; isAllCaps = false
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        (48 * dp).toInt(), (36 * dp).toInt()
+                    ).apply { marginStart = (4 * dp).toInt() }
+                    backgroundTintList = android.content.res.ColorStateList.valueOf(
+                        android.graphics.Color.parseColor("#7B0000"))
+                    setTextColor(android.graphics.Color.WHITE)
+                    setOnClickListener {
+                        android.app.AlertDialog.Builder(ctx)
+                            .setTitle("Удалить трек?")
+                            .setMessage("«$trackFileName» будет удалён без возможности восстановления.")
+                            .setPositiveButton("Удалить") { _, _ ->
+                                val deleted = file.delete()
+                                if (deleted) {
+                                    row.visibility = android.view.View.GONE
+                                    Toast.makeText(ctx, "Удалён: $trackFileName", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(ctx, "Не удалось удалить файл", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .setNegativeButton("Отмена", null)
+                            .show()
+                    }
+                })
+
+                listContainer.addView(row)
+                listContainer.addView(android.view.View(ctx).apply {
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                    setBackgroundColor(android.graphics.Color.parseColor("#333333"))
+                })
+            }
+
+            val scrollView = android.widget.ScrollView(ctx).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    (220 * dp).toInt())
+            }
+            scrollView.addView(listContainer)
+            root.addView(scrollView)
         }
     }
 
@@ -4834,7 +5361,7 @@ class MapFragment : Fragment() {
                     lastKnownGpsPoint = newPoint
                     val b = _binding ?: return
 
-                    // Первый GPS-фикс — прыгаем на зум 12
+                    // Первый GPS-фикс
                     if (!initialZoomDone) {
                         initialZoomDone = true
                         // Compute magnetic declination for magnetometer → true north
@@ -4845,9 +5372,13 @@ class MapFragment : Fragment() {
                             magneticDeclination = geoField.declination
                         } catch (_: Exception) {}
                         context?.let { DiagnosticsCollector.logEvent(it, "GPS fix: acc=${loc.accuracy}m") }
-                        mapboxMap?.animateCamera(
-                            CameraUpdateFactory.newLatLngZoom(newPoint, 12.0), 1000
-                        )
+                        waitingForFirstGps = false
+                    }
+
+                    // Первая анимация залёта к GPS — один раз за сессию (Guru Maps style)
+                    if (!firstGpsAnimDone) {
+                        firstGpsAnimDone = true
+                        flyToGps(15.0)
                     }
 
                     // Compute speed & bearing from coordinate delta (reliable on ALL devices)
@@ -5029,17 +5560,19 @@ class MapFragment : Fragment() {
                         b.widgetRemainKm.text = "--"
                     }
 
-                    // Check userMarkers proximity
-                    userMarkers.forEachIndexed { idx, marker ->
-                        if (idx !in visitedMarkerIndices) {
-                            val ctx2 = context
-                            val prefs2 = ctx2?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-                            val globalRadius = prefs2?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
-                                ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
-                            val dist = distanceM(newPoint, marker.position)
-                            if (dist <= globalRadius) {
-                                visitedMarkerIndices.add(idx)
-                                if (prefs2?.getBoolean(PREF_SOUND_APPROACH, true) == true) playApproachSound()
+                    // Check userMarkers proximity (only when navigation active)
+                    if (navActive) {
+                        userMarkers.forEachIndexed { idx, marker ->
+                            if (idx !in visitedMarkerIndices) {
+                                val ctx2 = context
+                                val prefs2 = ctx2?.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                                val globalRadius = prefs2?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
+                                    ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
+                                val dist = distanceM(newPoint, marker.position)
+                                if (dist <= globalRadius) {
+                                    visitedMarkerIndices.add(idx)
+                                    if (prefs2?.getBoolean(PREF_SOUND_APPROACH, true) == true) playApproachSound()
+                                }
                             }
                         }
                     }
@@ -5092,7 +5625,7 @@ class MapFragment : Fragment() {
 
     // ─── Track save / resume ──────────────────────────────────────────────────
 
-    /** Called when user stops recording — offer to save GPX */
+    /** Called when user stops recording — offer to save GPX with name input */
     private fun showSaveTrackDialog() {
         val ctx = context ?: return
         val pts = TrackingService.trackPoints.toList()
@@ -5102,10 +5635,32 @@ class MapFragment : Fragment() {
             clearTmpTrack()
             return
         }
+        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())
+        val input = android.widget.EditText(ctx).apply {
+            setText("track_$ts")
+            selectAll()
+            hint = "Название трека"
+        }
+        val dp = resources.displayMetrics.density
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (16 * dp).toInt()
+            setPadding(pad, 0, pad, 0)
+            addView(android.widget.TextView(ctx).apply {
+                text = "${pts.size} точек • $kmStr км"
+                setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
+                textSize = 13f
+                setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
+            })
+            addView(input)
+        }
         androidx.appcompat.app.AlertDialog.Builder(ctx)
-            .setTitle("Запись остановлена")
-            .setMessage("${pts.size} точек • $kmStr км\n\nСохранить трек в файл?")
-            .setPositiveButton("Сохранить") { _, _ -> saveTrackToFile(pts) }
+            .setTitle("💾 Сохранить трек")
+            .setView(container)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val name = input.text.toString().trim().ifBlank { "track_$ts" }
+                saveTrackToFile(pts, name)
+            }
             .setNegativeButton("Не сохранять") { _, _ -> clearTmpTrack() }
             .setCancelable(false)
             .show()
@@ -5162,9 +5717,8 @@ class MapFragment : Fragment() {
             .show()
     }
 
-    /** Save track points to GPX file in app's external tracks folder.
-     *  Name always "current_YYYYMMDD_HHmmss.gpx" — immutable, protects participant track integrity. */
-    fun saveTrackToFile(points: List<Pair<Double, Double>>? = null) {
+    /** Save track points to GPX file in app's external tracks folder. */
+    fun saveTrackToFile(points: List<Pair<Double, Double>>? = null, trackName: String? = null) {
         val ctx = context ?: return
         val pts = points ?: TrackingService.trackPoints.toList()
         if (pts.isEmpty()) {
@@ -5173,8 +5727,10 @@ class MapFragment : Fragment() {
         }
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
-        val filename = "current_$timestamp.gpx"
-        val gpxContent = GpxParser.writeGpx(pts, "current_$timestamp")
+        val rawName = trackName?.trim()?.ifBlank { null } ?: "current_$timestamp"
+        val name = rawName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+        val filename = "$name.gpx"
+        val gpxContent = GpxParser.writeGpx(pts, name)
         try {
             val dir = getRaceNavDir(ctx, "tracks")
             val file = java.io.File(dir, filename)
@@ -5354,6 +5910,20 @@ class MapFragment : Fragment() {
         }
     }
 
+    /** Guru Maps style fly-in: zoom-out → zoom-in to GPS position. Pauses camera loop. */
+    private fun flyToGps(targetZoom: Double? = null) {
+        val gps = lastKnownGpsPoint ?: return
+        val curZoom = mapboxMap?.cameraPosition?.zoom ?: 14.0
+        val toZoom = targetZoom ?: maxOf(curZoom, 15.0)
+        val midZoom = maxOf(curZoom - 2.5, 7.0)
+        flyAnimationActive = true
+        mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, midZoom), 350)
+        emergencyHandler.postDelayed({
+            mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, toZoom), 550)
+        }, 370)
+        emergencyHandler.postDelayed({ flyAnimationActive = false }, 950)
+    }
+
     fun applyFollowMode() {
         // Show/hide crosshair based on mode (before locationComponent check to work at startup)
         val crosshairEnabled = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -5364,6 +5934,8 @@ class MapFragment : Fragment() {
             _binding?.crosshairView?.visibility = View.VISIBLE
         } else {
             _binding?.crosshairView?.visibility = View.GONE
+            // Fly to GPS when switching to follow mode
+            if (lastKnownGpsPoint != null) flyToGps()
         }
         userDragged = false
         recenterRunnable?.let { recenterHandler.removeCallbacks(it) }
@@ -6116,6 +6688,14 @@ class MapFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        // Release drag lock so gestures are never permanently disabled
+        if (isDraggingPoint || dragStartRunnable != null) {
+            isDraggingPoint = false
+            dragPointIndex = -1
+            dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
+            mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
+            mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
+        }
         stopMagnetometer()
         stopCameraLoop()
         _binding?.mapView?.onPause()
@@ -6139,6 +6719,7 @@ class MapFragment : Fragment() {
         super.onSaveInstanceState(outState)
         _binding?.mapView?.onSaveInstanceState(outState)
         outState.putBoolean("screen_locked", isScreenLocked)
+        outState.putBoolean("widget_free_mode", isWidgetFreeMode)
     }
     override fun onLowMemory() { super.onLowMemory(); _binding?.mapView?.onLowMemory() }
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -6842,7 +7423,7 @@ class MapFragment : Fragment() {
     }
 
     private fun moveCameraSmooth(frameTimeNanos: Long) {
-        if (userDragged || followMode == FollowMode.FREE) return
+        if (flyAnimationActive || userDragged || followMode == FollowMode.FREE) return
         val map = mapboxMap ?: return
         if (lastGpsTimeNanos == 0L) return
 
