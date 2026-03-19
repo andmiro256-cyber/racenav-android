@@ -12,7 +12,8 @@ import androidx.core.app.NotificationCompat
 object NotificationHelper {
 
     const val CHANNEL_ID = "tracking_channel"
-    const val NOTIF_ID   = 1001
+    const val NOTIF_ID   = 1001   // Single shared notification ID for both services
+    private const val GROUP_KEY = "com.andreykoff.racenav.SERVICES"
 
     // Current state from each service
     @Volatile var trackingText: String? = null   // e.g. "⏺ Запись: 1.2 км • 50 точек"
@@ -25,7 +26,7 @@ object NotificationHelper {
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Сервисы Trophy Navigator в фоне"
-            setShowBadge(true)
+            setShowBadge(false)
         }
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .createNotificationChannel(channel)
@@ -50,6 +51,8 @@ object NotificationHelper {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setSilent(true)
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(true)
             .setContentIntent(openIntent)
             .build()
     }

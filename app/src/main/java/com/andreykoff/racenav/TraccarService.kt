@@ -128,13 +128,9 @@ class TraccarService : Service() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
 
-        // If TrackingService is still running, just update notification; otherwise remove
-        if (TrackingService.isRunning) {
-            NotificationHelper.update(this)
-            stopForeground(STOP_FOREGROUND_DETACH)
-        } else {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        }
+        // Always remove our foreground; if TrackingService still runs it will keep its own
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (TrackingService.isRunning) NotificationHelper.update(this)
         stopSelf()
 
         sendBroadcast(Intent(BROADCAST_TRACCAR_STATUS).apply {

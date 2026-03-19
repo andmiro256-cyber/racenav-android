@@ -60,23 +60,26 @@ object DiagnosticsCollector {
         }
     }
     
-    /** Log an event to the diagnostics log file */
+    /** Log an event to the diagnostics log file (runs on background thread — no main-thread I/O) */
     fun logEvent(context: Context, event: String) {
-        try {
-            val dir = File(context.getExternalFilesDir(null), "logs")
-            dir.mkdirs()
-            val file = File(dir, LOG_FILE)
-            val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-            file.appendText("$timestamp $event\n")
-            
-            // Trim if too long
-            if (file.length() > 50_000) {
-                val lines = file.readLines()
-                file.writeText(lines.takeLast(MAX_LOG_LINES).joinToString("\n") + "\n")
+        val appContext = context.applicationContext
+        Thread {
+            try {
+                val dir = File(appContext.getExternalFilesDir(null), "logs")
+                dir.mkdirs()
+                val file = File(dir, LOG_FILE)
+                val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+                file.appendText("$timestamp $event\n")
+
+                // Trim if too long
+                if (file.length() > 50_000) {
+                    val lines = file.readLines()
+                    file.writeText(lines.takeLast(MAX_LOG_LINES).joinToString("\n") + "\n")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "logEvent failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "logEvent failed: ${e.message}")
-        }
+        }.start()
     }
     
     /** Read recent log entries */

@@ -187,6 +187,12 @@ class MapFragment : Fragment() {
     private var initialZoomDone = false
     private var waitingForFirstGps = false
     private var firstGpsAnimDone = false
+    // Persisted camera position for style reloads — set once on startup, cleared when user moves map
+    private var lastSavedCamera: com.mapbox.mapboxsdk.camera.CameraPosition? = null
+    // Number of overlay layers rendered in the current style (for in-place updates)
+    private var renderedOverlayCount = 0
+    // Pending unlock runnable — stored so unlockScreen() can cancel it regardless of how unlock happens
+    private var pendingUnlockAction: Runnable? = null
     private var flyAnimationActive = false
     private var pendingNavResumeCheck = false
     var autoRecenterEnabled = false
@@ -543,16 +549,16 @@ class MapFragment : Fragment() {
             "https://btilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
             "https://ctilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png",
             "https://dtilecart.kosmosnimki.ru/rw/{z}/{x}/{y}.png"), maxZoom = 13),
-        // === Генштаб ===
-        "ggc250"       to TileSource("Генштаб 250м", listOf(
+        // === ГГЦ (Госгисцентр) ===
+        "ggc250"       to TileSource("ГГЦ 250м", listOf(
             "https://a.tiles.nakarte.me/ggc250/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc250/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc250/{z}/{x}/{y}"), tms = true, maxZoom = 15),
-        "ggc500"       to TileSource("Генштаб 500м", listOf(
+        "ggc500"       to TileSource("ГГЦ 500м", listOf(
             "https://a.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc500/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc500/{z}/{x}/{y}"), tms = true, maxZoom = 14),
-        "ggc2000"      to TileSource("Генштаб 2км", listOf(
+        "ggc2000"      to TileSource("ГГЦ 2км", listOf(
             "https://a.tiles.nakarte.me/ggc2000/{z}/{x}/{y}",
             "https://b.tiles.nakarte.me/ggc2000/{z}/{x}/{y}",
             "https://c.tiles.nakarte.me/ggc2000/{z}/{x}/{y}"), tms = true, maxZoom = 12),
@@ -771,12 +777,19 @@ class MapFragment : Fragment() {
             val savedLat = tilePrefs?.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedLon = tilePrefs?.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedZoom = tilePrefs?.getFloat(PREF_CAMERA_ZOOM, -1f) ?: -1f
-            // Only restore if zoom ≥ 5 — ignore world-view artifacts saved by onStop
-            if (savedLat != Float.MIN_VALUE && savedZoom >= 5f) {
-                map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(savedLat.toDouble(), savedLon.toDouble()), savedZoom.toDouble()))
+            Log.d("CamDebug", "STARTUP: lat=$savedLat lon=$savedLon zoom=$savedZoom")
+            if (savedLat != Float.MIN_VALUE) {
+                // Have saved coordinates — use them. Clamp bad zoom (world-view artifact) to 10.
+                val useZoom = if (savedZoom >= 5f) savedZoom.toDouble() else 10.0
+                val camPos = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+                    .target(LatLng(savedLat.toDouble(), savedLon.toDouble()))
+                    .zoom(useZoom).build()
+                map.moveCamera(CameraUpdateFactory.newCameraPosition(camPos))
+                lastSavedCamera = camPos
                 initialZoomDone = true
+                Log.d("CamDebug", "RESTORED: zoom=$useZoom lastSavedCamera SET")
             } else {
-                // No valid saved position — try last known location from system to avoid world view
+                // No saved coordinates at all — try system last known location
                 val lm = context?.getSystemService(android.content.Context.LOCATION_SERVICE)
                     as? android.location.LocationManager
                 val lastLoc = try {
@@ -789,6 +802,7 @@ class MapFragment : Fragment() {
                         LatLng(lastLoc.latitude, lastLoc.longitude), 13.0))
                 }
                 waitingForFirstGps = true
+                Log.d("CamDebug", "NO SAVED COORDS — waitingForFirstGps=true systemLoc=${lastLoc != null}")
             }
 
             // Load custom and offline maps BEFORE loadTileStyle so tile sources are ready
@@ -1241,13 +1255,16 @@ class MapFragment : Fragment() {
             ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
             ?.apply()
         val json = buildStyleJson(baseKey, overlayKeys)
-        // Save camera position before style reload (setStyle resets camera).
-        // Only restore if zoom > 2 — avoids restoring world-view on first launch
-        // before prefs-based camera has been applied (race condition on cold start).
-        val savedCamera = mapboxMap?.cameraPosition?.takeIf { it.zoom > 2.0 }
+        // Use lastSavedCamera if set (startup restore), otherwise snapshot current position.
+        // lastSavedCamera survives multiple loadTileStyle calls (e.g. async catalog reload)
+        // and is cleared once the user moves the map themselves.
+        val camToRestore = lastSavedCamera
+            ?: mapboxMap?.cameraPosition?.takeIf { it.zoom > 2.0 }
+        Log.d("CamDebug", "loadTileStyle[$baseKey]: lastSavedCamera=${lastSavedCamera?.zoom} camToRestore=${camToRestore?.zoom} curZoom=${mapboxMap?.cameraPosition?.zoom}")
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
-            // Restore camera position after style change
-            savedCamera?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
+            // Restore camera after setStyle resets it
+            Log.d("CamDebug", "onStyleLoaded: restoring camToRestore=${camToRestore?.zoom} curZoom=${mapboxMap?.cameraPosition?.zoom}")
+            camToRestore?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
             enableLocation(style)
             setupTrackLayers(style)
             setupWaypointLayers(style)
@@ -3053,6 +3070,8 @@ class MapFragment : Fragment() {
             if (reason == MapboxMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
                 // User manually moved/zoomed — record their zoom preference
                 userBaseZoom = map.cameraPosition.zoom
+                if (lastSavedCamera != null) Log.d("CamDebug", "USER MOVED MAP — lastSavedCamera CLEARED zoom=${map.cameraPosition.zoom}")
+                lastSavedCamera = null  // User moved map — no longer need to restore startup position
                 if (followMode != FollowMode.FREE) {
                     userDragged = true
                     if (autoRecenterEnabled) scheduleAutoRecenter()
@@ -3091,8 +3110,9 @@ class MapFragment : Fragment() {
         // Always show small yellow lock icon in top-right corner
         val lockIcon = b.lockOverlay.getChildAt(0) as? android.widget.ImageView
         lockIcon?.visibility = View.VISIBLE
-        // Long-press on lock icon OR anywhere on overlay for 1.5s → unlock
+        // Long-press anywhere on overlay for 3s → unlock
         val unlockAction = Runnable { unlockScreen() }
+        pendingUnlockAction = unlockAction
         b.lockOverlay.setOnTouchListener { _, event ->
             when (event.action) {
                 android.view.MotionEvent.ACTION_DOWN -> emergencyHandler.postDelayed(unlockAction, 3000)
@@ -3255,6 +3275,9 @@ class MapFragment : Fragment() {
 
     fun unlockScreen() {
         isScreenLocked = false
+        // Cancel any pending 3s unlock timer (e.g. if unlocked via Volume Up before timer fires)
+        pendingUnlockAction?.let { emergencyHandler.removeCallbacks(it) }
+        pendingUnlockAction = null
         val b = _binding ?: return
         b.lockOverlay.setOnTouchListener(null)
         b.lockOverlay.visibility = View.GONE
@@ -5382,13 +5405,16 @@ class MapFragment : Fragment() {
                             magneticDeclination = geoField.declination
                         } catch (_: Exception) {}
                         context?.let { DiagnosticsCollector.logEvent(it, "GPS fix: acc=${loc.accuracy}m") }
+                        // Первая анимация залёта к GPS — только если не было сохранённой позиции
+                        // и текущий центр карты дальше 1 км от GPS
+                        if (!firstGpsAnimDone && waitingForFirstGps) {
+                            firstGpsAnimDone = true
+                            val center = mapboxMap?.cameraPosition?.target
+                            val distToGps = if (center != null) distanceM(center, newPoint) else Double.MAX_VALUE
+                            if (distToGps > 1000.0) flyToGps(15.0)
+                            // иначе уже рядом с GPS — анимация не нужна
+                        }
                         waitingForFirstGps = false
-                    }
-
-                    // Первая анимация залёта к GPS — один раз за сессию (Guru Maps style)
-                    if (!firstGpsAnimDone) {
-                        firstGpsAnimDone = true
-                        flyToGps(15.0)
                     }
 
                     // Compute speed & bearing from coordinate delta (reliable on ALL devices)
@@ -5474,6 +5500,9 @@ class MapFragment : Fragment() {
                     if (loc.hasAccuracy()) {
                         updateAccuracyCircle(loc.latitude, loc.longitude, loc.accuracy)
                     }
+
+                    // Keep GL renderer awake — prevents first-touch lag after GPU power saving
+                    mapboxMap?.triggerRepaint()
 
                     // Save GPS state for Choreographer camera loop (smooth 60 FPS interpolation)
                     lastGpsLat = loc.latitude
@@ -5920,18 +5949,28 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Guru Maps style fly-in: zoom-out → zoom-in to GPS position. Pauses camera loop. */
+    /** Inertia snap to GPS: quick overshoot → bounce back. No zoom-out step. */
     private fun flyToGps(targetZoom: Double? = null) {
         val gps = lastKnownGpsPoint ?: return
-        val curZoom = mapboxMap?.cameraPosition?.zoom ?: 14.0
-        val toZoom = targetZoom ?: maxOf(curZoom, 15.0)
-        val midZoom = maxOf(curZoom - 2.5, 7.0)
+        val center = mapboxMap?.cameraPosition?.target
+        val curZoom = mapboxMap?.cameraPosition?.zoom ?: 15.0
+        // Only change zoom if coming from very far away (world view), otherwise keep current
+        val toZoom = if (targetZoom != null && curZoom < 8.0) targetZoom else curZoom
         flyAnimationActive = true
-        mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, midZoom), 350)
-        emergencyHandler.postDelayed({
-            mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, toZoom), 550)
-        }, 370)
-        emergencyHandler.postDelayed({ flyAnimationActive = false }, 950)
+        if (center != null && distanceM(center, gps) > 5.0) {
+            // Overshoot 20% past GPS for inertia "jolt" effect
+            val lat = gps.latitude + (gps.latitude - center.latitude) * 0.20
+            val lon = gps.longitude + (gps.longitude - center.longitude) * 0.20
+            val overshoot = LatLng(lat.coerceIn(-85.0, 85.0), lon.coerceIn(-180.0, 180.0))
+            mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(overshoot, toZoom), 300)
+            emergencyHandler.postDelayed({
+                mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, toZoom), 180)
+                emergencyHandler.postDelayed({ flyAnimationActive = false }, 200)
+            }, 310)
+        } else {
+            mapboxMap?.moveCamera(CameraUpdateFactory.newLatLngZoom(gps, toZoom))
+            flyAnimationActive = false
+        }
     }
 
     fun applyFollowMode() {
@@ -6718,6 +6757,7 @@ class MapFragment : Fragment() {
         // Save camera position so it's restored when coming back from Settings
         mapboxMap?.cameraPosition?.let { cam ->
             val target = cam.target ?: return@let
+            Log.d("CamDebug", "onStop SAVING: lat=${target.latitude} lon=${target.longitude} zoom=${cam.zoom}")
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
                 ?.putFloat(PREF_CAMERA_LAT, target.latitude.toFloat())
                 ?.putFloat(PREF_CAMERA_LON, target.longitude.toFloat())

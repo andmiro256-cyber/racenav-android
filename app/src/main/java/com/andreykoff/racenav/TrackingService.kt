@@ -210,13 +210,9 @@ class TrackingService : Service() {
         fusedCallback?.let { fusedClient?.removeLocationUpdates(it) }
         locationManager?.removeUpdates(locationListener)
 
-        // If TraccarService is still running, just update notification; otherwise remove
-        if (TraccarService.isRunning) {
-            NotificationHelper.update(this)
-            stopForeground(STOP_FOREGROUND_DETACH)
-        } else {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        }
+        // Always remove our foreground; if TraccarService still runs it will keep its own
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (TraccarService.isRunning) NotificationHelper.update(this)
         stopSelf()
     }
 
