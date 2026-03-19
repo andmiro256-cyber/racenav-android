@@ -769,7 +769,8 @@ class MapFragment : Fragment() {
             val savedLat = tilePrefs?.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedLon = tilePrefs?.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedZoom = tilePrefs?.getFloat(PREF_CAMERA_ZOOM, -1f) ?: -1f
-            if (savedLat != Float.MIN_VALUE && savedZoom > 0) {
+            // Only restore if zoom ≥ 5 — ignore world-view artifacts saved by onStop
+            if (savedLat != Float.MIN_VALUE && savedZoom >= 5f) {
                 map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(savedLat.toDouble(), savedLon.toDouble()), savedZoom.toDouble()))
                 initialZoomDone = true
             }
@@ -3271,7 +3272,8 @@ class MapFragment : Fragment() {
             orientation = android.widget.LinearLayout.HORIZONTAL
             setPadding(0, 0, 0, (12 * dp).toInt())
         }
-        val tabLp = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+        val tabH = (44 * dp).toInt()
+        val tabLp = android.widget.LinearLayout.LayoutParams(0, tabH, 1f).apply {
             marginEnd = (4 * dp).toInt()
         }
 
@@ -3286,25 +3288,44 @@ class MapFragment : Fragment() {
         fun clearContent() { content.removeAllViews() }
 
         val tabs = listOf(
-            Tab("\uD83D\uDCCD WP", "#FFD600") { clearContent(); buildWpContent(ctx, prefs, content, dialog, dp) },
-            Tab("\uD83D\uDDFA RTE", "#FF6F00") { clearContent(); buildRteContent(ctx, prefs, content, dialog, dp) },
-            Tab("\uD83D\uDCCF TRK", "#2196F3") { clearContent(); buildTrkContent(ctx, prefs, content, dialog, dp) },
-            Tab("\uD83D\uDCE6 GPX", "#CCCCCC") { clearContent(); buildGpxContent(ctx, prefs, content, dialog, dp) }
+            Tab("📍 WP",  "#FFD600") { clearContent(); buildWpContent(ctx, prefs, content, dialog, dp) },
+            Tab("🗺 RTE", "#FF6F00") { clearContent(); buildRteContent(ctx, prefs, content, dialog, dp) },
+            Tab("📏 TRK", "#2196F3") { clearContent(); buildTrkContent(ctx, prefs, content, dialog, dp) },
+            Tab("📦 GPX", "#CCCCCC") { clearContent(); buildGpxContent(ctx, prefs, content, dialog, dp) }
         )
 
         val tabButtons = mutableListOf<android.widget.Button>()
-        tabs.forEach { tab ->
+
+        fun selectTab(index: Int) {
+            tabs.forEachIndexed { i, tab ->
+                val btn = tabButtons[i]
+                if (i == index) {
+                    // Selected: colored background, dark text
+                    val bgColor = android.graphics.Color.parseColor(tab.color)
+                    btn.backgroundTintList = android.content.res.ColorStateList.valueOf(bgColor)
+                    btn.setTextColor(android.graphics.Color.parseColor("#111111"))
+                    btn.textSize = 14f
+                } else {
+                    // Unselected: dark background, dim colored text
+                    btn.backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#252525"))
+                    btn.setTextColor(android.graphics.Color.parseColor(tab.color).let {
+                        android.graphics.Color.argb(160,
+                            android.graphics.Color.red(it),
+                            android.graphics.Color.green(it),
+                            android.graphics.Color.blue(it))
+                    })
+                    btn.textSize = 13f
+                }
+            }
+            tabs[index].builder()
+        }
+
+        tabs.forEachIndexed { i, tab ->
             val btn = android.widget.Button(ctx).apply {
                 text = tab.label
                 textSize = 13f; isAllCaps = false
                 layoutParams = tabLp
-                backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#2A2A2A"))
-                setTextColor(android.graphics.Color.parseColor(tab.color))
-                setOnClickListener {
-                    tabButtons.forEach { it.backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#2A2A2A")) }
-                    backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#333333"))
-                    tab.builder()
-                }
+                setOnClickListener { selectTab(i) }
             }
             tabButtons.add(btn)
             tabRow.addView(btn)
@@ -3314,7 +3335,7 @@ class MapFragment : Fragment() {
         root.addView(content)
 
         // Show WP tab by default
-        tabButtons[0].performClick()
+        selectTab(0)
 
         val scroll = androidx.core.widget.NestedScrollView(ctx).apply {
             addView(root)
@@ -3633,31 +3654,60 @@ class MapFragment : Fragment() {
     }
 
     private fun buildTrkContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        val fullWidthLp = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            (48 * dp).toInt()
+        ).apply { topMargin = (8 * dp).toInt() }
+
+        // ── Редактор треков — всегда первым ──────────────────────────────────
+        root.addView(android.widget.Button(ctx).apply {
+            text = "✏️  Редактор треков"
+            textSize = 14f; isAllCaps = false
+            layoutParams = fullWidthLp
+            if (loadedTrackPoints.isNotEmpty()) {
+                backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0"))
+                setTextColor(android.graphics.Color.WHITE)
+            } else {
+                backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#252525"))
+                setTextColor(android.graphics.Color.parseColor("#555555"))
+            }
+            setOnClickListener {
+                if (loadedTrackPoints.isEmpty()) {
+                    Toast.makeText(ctx, "Сначала загрузите трек через GPX", Toast.LENGTH_SHORT).show()
+                } else {
+                    dialog.dismiss()
+                    enterTrackEditMode()
+                }
+            }
+        })
+
+        // ── Загруженный трек ─────────────────────────────────────────────────
         if (loadedTrackPoints.isNotEmpty()) {
-            val trackLenM = calcPolylineLength(loadedTrackPoints)
-            val trackLenKm = trackLenM / 1000.0
+            val trackLenKm = calcPolylineLength(loadedTrackPoints) / 1000.0
             val trkVisible = prefs.getBoolean(PREF_LOADED_TRACK_VISIBLE, true)
             val trackName = prefs.getString(PREF_LOADED_TRACK_NAME, "Трек") ?: "Трек"
 
             root.addView(android.widget.TextView(ctx).apply {
-                text = "📍 $trackName"
+                text = "📏 $trackName"
                 setTextColor(android.graphics.Color.parseColor("#2196F3"))
-                textSize = 15f
-                setPadding(0, 12, 0, 4)
+                textSize = 14f
+                setPadding(0, (14 * dp).toInt(), 0, 2)
             })
             root.addView(android.widget.TextView(ctx).apply {
-                text = "   Точек: ${loadedTrackPoints.size}  •  Длина: ${"%.1f".format(trackLenKm)} км"
-                setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
-                textSize = 13f
+                text = "Точек: ${loadedTrackPoints.size}  •  Длина: ${"%.1f".format(trackLenKm)} км"
+                setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
+                textSize = 12f
+                setPadding(0, 0, 0, (6 * dp).toInt())
             })
 
-            val trackRow = android.widget.LinearLayout(ctx).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                setPadding(0, 8, 0, 12)
+            val btnLp = android.widget.LinearLayout.LayoutParams(0, (40 * dp).toInt(), 1f).apply {
+                marginEnd = (6 * dp).toInt()
             }
-            val btnLp = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-
-            trackRow.addView(android.widget.Button(ctx).apply {
+            val actionRow = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                setPadding(0, 0, 0, (8 * dp).toInt())
+            }
+            actionRow.addView(android.widget.Button(ctx).apply {
                 text = if (trkVisible) "👁 Скрыть" else "👁 Показать"
                 textSize = 12f; isAllCaps = false
                 layoutParams = btnLp
@@ -3667,15 +3717,14 @@ class MapFragment : Fragment() {
                     text = if (newVis) "👁 Скрыть" else "👁 Показать"
                 }
             })
-
-            trackRow.addView(android.widget.Button(ctx).apply {
+            actionRow.addView(android.widget.Button(ctx).apply {
                 text = "🗑 Очистить"
                 textSize = 12f; isAllCaps = false
                 layoutParams = btnLp
                 setOnClickListener {
                     android.app.AlertDialog.Builder(ctx)
                         .setTitle("Очистить трек?")
-                        .setMessage("Трек «$trackName» (${loadedTrackPoints.size} точек) будет убран с карты")
+                        .setMessage("«$trackName» (${loadedTrackPoints.size} точек) будет убран с карты")
                         .setPositiveButton("Очистить") { _, _ ->
                             loadedTrackPoints.clear()
                             mapboxMap?.style?.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)
@@ -3689,26 +3738,13 @@ class MapFragment : Fragment() {
                         .show()
                 }
             })
-            root.addView(trackRow)
-
-            // Edit button
-            root.addView(android.widget.Button(ctx).apply {
-                text = "✏️ Редактировать трек"
-                textSize = 13f; isAllCaps = false
-                setTextColor(android.graphics.Color.parseColor("#2196F3"))
-                background = null
-                setPadding(0, 4, 0, 8)
-                setOnClickListener {
-                    dialog.dismiss()
-                    enterTrackEditMode()
-                }
-            })
+            root.addView(actionRow)
         } else {
             root.addView(android.widget.TextView(ctx).apply {
-                text = "📍 Трек не загружен"
-                setTextColor(android.graphics.Color.parseColor("#888888"))
-                textSize = 14f
-                setPadding(0, 12, 0, 12)
+                text = "Трек не загружен. Откройте GPX файл через вкладку GPX."
+                setTextColor(android.graphics.Color.parseColor("#666666"))
+                textSize = 13f
+                setPadding(0, (12 * dp).toInt(), 0, 0)
             })
         }
     }
