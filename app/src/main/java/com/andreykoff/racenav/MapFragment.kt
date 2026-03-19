@@ -42,6 +42,7 @@ import com.mapbox.mapboxsdk.location.modes.CameraMode
 import com.mapbox.mapboxsdk.location.modes.RenderMode
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
+import com.mapbox.mapboxsdk.style.layers.CircleLayer
 import com.mapbox.mapboxsdk.style.layers.FillLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
@@ -164,6 +165,10 @@ class MapFragment : Fragment() {
     var isScreenLocked = false
         private set
     private val loadedTrackPoints = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
+
+    // Track editor state
+    private var trackEditorMode = false
+    private var editMoveMode = false   // перемещение точки через крестик
 
     private var initialZoomDone = false
     var autoRecenterEnabled = false
@@ -357,6 +362,12 @@ class MapFragment : Fragment() {
 
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"
+
+        // Track editor layers
+        const val TRACK_EDIT_LINE_SOURCE  = "track-edit-line-source"
+        const val TRACK_EDIT_LINE_LAYER   = "track-edit-line-layer"
+        const val TRACK_EDIT_POINTS_SOURCE = "track-edit-points-source"
+        const val TRACK_EDIT_POINTS_LAYER  = "track-edit-points-layer"
 
         val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status","battery")
 
@@ -773,6 +784,10 @@ class MapFragment : Fragment() {
             if (!isRecording) checkForUnfinishedTrack()
             // Tap on live user marker → show info card
             map.addOnMapClickListener { latLng ->
+                if (trackEditorMode && !editMoveMode) {
+                    handleEditorTap(map, latLng)
+                    return@addOnMapClickListener true
+                }
                 if (isDownloadSelecting) {
                     handleDownloadTap(latLng)
                     return@addOnMapClickListener true
@@ -1668,6 +1683,8 @@ class MapFragment : Fragment() {
         // Apply saved track styles from prefs
         applyTrackStyle()
         applyLoadedTrackStyle()
+        // Track editor layers (always set up, hidden until editor activated)
+        setupTrackEditorLayers(style)
         // Clear stale loaded-track name prefs (track is gone after app restart)
         if (loadedTrackPoints.isEmpty()) {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
@@ -1676,6 +1693,371 @@ class MapFragment : Fragment() {
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
         if (loadedTrackPoints.isNotEmpty()) updateLoadedTrackOnMap()
     }
+
+    // ─── Track Editor ──────────────────────────────────────────────────────────
+
+    private fun setupTrackEditorLayers(style: Style) {
+        // Line source (mirrors loaded track while editing)
+        style.addSource(GeoJsonSource(TRACK_EDIT_LINE_SOURCE))
+        style.addLayer(com.mapbox.mapboxsdk.style.layers.LineLayer(TRACK_EDIT_LINE_LAYER, TRACK_EDIT_LINE_SOURCE).withProperties(
+            PropertyFactory.lineColor("#FF9800"),
+            PropertyFactory.lineWidth(3f),
+            PropertyFactory.lineCap("round"),
+            PropertyFactory.lineJoin("round"),
+            PropertyFactory.lineOpacity(0f)  // invisible until editor activated
+        ))
+        // Points source
+        style.addSource(GeoJsonSource(TRACK_EDIT_POINTS_SOURCE))
+        val editPointsLayer = com.mapbox.mapboxsdk.style.layers.CircleLayer(TRACK_EDIT_POINTS_LAYER, TRACK_EDIT_POINTS_SOURCE).withProperties(
+            PropertyFactory.circleRadius(
+                com.mapbox.mapboxsdk.style.expressions.Expression.match(
+                    com.mapbox.mapboxsdk.style.expressions.Expression.get("t"),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.literal("sel"), com.mapbox.mapboxsdk.style.expressions.Expression.literal(9f),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.literal(5f)
+                )
+            ),
+            PropertyFactory.circleColor(
+                com.mapbox.mapboxsdk.style.expressions.Expression.match(
+                    com.mapbox.mapboxsdk.style.expressions.Expression.get("t"),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.literal("start"), com.mapbox.mapboxsdk.style.expressions.Expression.color(android.graphics.Color.parseColor("#4CAF50")),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.literal("end"),   com.mapbox.mapboxsdk.style.expressions.Expression.color(android.graphics.Color.parseColor("#F44336")),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.literal("sel"),   com.mapbox.mapboxsdk.style.expressions.Expression.color(android.graphics.Color.parseColor("#2196F3")),
+                    com.mapbox.mapboxsdk.style.expressions.Expression.color(android.graphics.Color.parseColor("#AAAAAA"))
+                )
+            ),
+            PropertyFactory.circleStrokeWidth(2f),
+            PropertyFactory.circleStrokeColor("#FFFFFF"),
+            PropertyFactory.visibility("none")  // hidden until editor activated
+        )
+        editPointsLayer.minZoom = 13f
+        style.addLayer(editPointsLayer)
+    }
+
+    private fun enterTrackEditMode() {
+        val ctx = context ?: return
+        if (loadedTrackPoints.isEmpty()) {
+            Toast.makeText(ctx, "Нет загруженного трека", Toast.LENGTH_SHORT).show()
+            return
+        }
+        TrackEditor.load(loadedTrackPoints.map { TrackEditor.TrackPoint(it.latitude, it.longitude) })
+        trackEditorMode = true
+
+        // Show editor bar, turn on editor layers
+        _binding?.trackEditorBar?.visibility = View.VISIBLE
+        updateEditorUi()
+        renderEditorPoints()
+
+        // Show the edit line overlay (orange) instead of hidden loaded track
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+            ?.setProperties(PropertyFactory.lineOpacity(0.9f))
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
+            ?.setProperties(PropertyFactory.visibility("visible"))
+
+        setupEditorButtons()
+
+        val name = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_NAME, "Трек") ?: "Трек"
+        _binding?.trackEditorTitle?.text = "✏️ $name (${TrackEditor.editPoints.size} точек)"
+
+        Toast.makeText(ctx, "Режим редактирования. Тап на точку чтобы выбрать", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exitTrackEditMode() {
+        trackEditorMode = false
+        editMoveMode = false
+        TrackEditor.selectedIndex = -1
+        _binding?.trackEditorBar?.visibility = View.GONE
+        _binding?.editPointPopup?.visibility = View.GONE
+        _binding?.editMoveBar?.visibility = View.GONE
+
+        // Hide editor layers
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+            ?.setProperties(PropertyFactory.lineOpacity(0f))
+        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
+            ?.setProperties(PropertyFactory.visibility("none"))
+        // Clear editor sources
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)
+            ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)
+            ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+    }
+
+    private fun setupEditorButtons() {
+        val b = _binding ?: return
+        val ctx = context ?: return
+
+        b.btnEditorSave.setOnClickListener { showEditorSaveDialog() }
+        b.btnEditorExit.setOnClickListener {
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("Выйти из редактора?")
+                .setMessage("Несохранённые изменения будут потеряны")
+                .setPositiveButton("Выйти") { _, _ -> exitTrackEditMode() }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+        b.btnEditorTrim.setOnClickListener { showTrimDialog(ctx) }
+        b.btnEditorSimplify.setOnClickListener { showSimplifyDialog(ctx) }
+        b.btnEditorUndo.setOnClickListener {
+            if (TrackEditor.undo()) {
+                renderEditorPoints()
+                updateEditorUi()
+                Toast.makeText(ctx, "Отменено", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(ctx, "Нечего отменять", Toast.LENGTH_SHORT).show()
+            }
+        }
+        b.btnEditorReverse.setOnClickListener {
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("Развернуть трек?")
+                .setMessage("Направление трека будет изменено на обратное")
+                .setPositiveButton("Развернуть") { _, _ ->
+                    TrackEditor.reverse()
+                    renderEditorPoints()
+                    updateEditorUi()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+        b.btnEditorMove.setOnClickListener { enterMoveMode() }
+        b.btnEditorDeletePoint.setOnClickListener {
+            val idx = TrackEditor.selectedIndex
+            if (idx < 0) return@setOnClickListener
+            TrackEditor.deletePoint(idx)
+            _binding?.editPointPopup?.visibility = View.GONE
+            renderEditorPoints()
+            updateEditorUi()
+        }
+        b.btnEditorDeselectPoint.setOnClickListener {
+            TrackEditor.selectedIndex = -1
+            _binding?.editPointPopup?.visibility = View.GONE
+            renderEditorPoints()
+        }
+        b.btnEditorMoveConfirm.setOnClickListener { confirmMovePoint() }
+        b.btnEditorMoveCancel.setOnClickListener { cancelMoveMode() }
+    }
+
+    private fun updateEditorUi() {
+        val b = _binding ?: return
+        val n = TrackEditor.editPoints.size
+        val km = "%.1f".format(TrackEditor.totalDistanceM() / 1000)
+        val ctx = context ?: return
+        val name = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_NAME, "Трек") ?: "Трек"
+        b.trackEditorTitle.text = "✏️ $name · $n точек · $km км"
+        b.btnEditorUndo.alpha = if (TrackEditor.canUndo()) 1f else 0.4f
+        b.btnEditorTrim.alpha = if (TrackEditor.selectedIndex >= 0) 1f else 0.5f
+    }
+
+    private fun renderEditorPoints() {
+        val style = mapboxMap?.style ?: return
+        val pts = TrackEditor.editPoints
+        if (pts.isEmpty()) return
+
+        // Update line
+        val coords = JSONArray()
+        pts.forEach { coords.put(JSONArray().put(it.lon).put(it.lat)) }
+        style.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)?.setGeoJson(
+            JSONObject().put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
+                .put("properties", JSONObject()).toString()
+        )
+
+        // Update points
+        val features = JSONArray()
+        val sel = TrackEditor.selectedIndex
+        pts.forEachIndexed { idx, pt ->
+            val t = when {
+                idx == sel -> "sel"
+                idx == 0 -> "start"
+                idx == pts.size - 1 -> "end"
+                else -> "n"
+            }
+            features.put(
+                JSONObject()
+                    .put("type", "Feature")
+                    .put("geometry", JSONObject().put("type", "Point")
+                        .put("coordinates", JSONArray().put(pt.lon).put(pt.lat)))
+                    .put("properties", JSONObject().put("idx", idx).put("t", t))
+            )
+        }
+        style.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)?.setGeoJson(
+            JSONObject().put("type", "FeatureCollection").put("features", features).toString()
+        )
+    }
+
+    private fun handleEditorTap(map: MapboxMap, latLng: com.mapbox.mapboxsdk.geometry.LatLng) {
+        val density = resources.displayMetrics.density
+        val pixel = map.projection.toScreenLocation(latLng)
+        val r = 30 * density
+        val rect = android.graphics.RectF(pixel.x - r, pixel.y - r, pixel.x + r, pixel.y + r)
+        val hits = map.queryRenderedFeatures(rect, TRACK_EDIT_POINTS_LAYER)
+        if (hits.isNotEmpty()) {
+            val idx = hits[0].getNumberProperty("idx")?.toInt() ?: return
+            TrackEditor.selectedIndex = idx
+            _binding?.editPointPopup?.visibility = View.VISIBLE
+        } else {
+            TrackEditor.selectedIndex = -1
+            _binding?.editPointPopup?.visibility = View.GONE
+        }
+        renderEditorPoints()
+        updateEditorUi()
+    }
+
+    private fun showTrimDialog(ctx: android.content.Context) {
+        val idx = TrackEditor.selectedIndex
+        if (idx < 0) {
+            Toast.makeText(ctx, "Сначала выберите точку на треке", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val n = TrackEditor.editPoints.size
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("✂ Обрезать трек")
+            .setMessage("Точка ${idx + 1} из $n")
+            .setPositiveButton("Удалить начало (0..$idx)") { _, _ ->
+                if (idx > 0) {
+                    TrackEditor.trimFromStart(idx)
+                    _binding?.editPointPopup?.visibility = View.GONE
+                    renderEditorPoints()
+                    updateEditorUi()
+                }
+            }
+            .setNeutralButton("Удалить конец ($idx..$n)") { _, _ ->
+                if (idx < n - 1) {
+                    TrackEditor.trimFromEnd(idx)
+                    _binding?.editPointPopup?.visibility = View.GONE
+                    renderEditorPoints()
+                    updateEditorUi()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showSimplifyDialog(ctx: android.content.Context) {
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val p = (16 * resources.displayMetrics.density).toInt()
+            setPadding(p, p / 2, p, 0)
+        }
+        val toleranceValues = intArrayOf(2, 5, 10, 20, 50)
+        var toleranceIdx = 1  // default 5m
+        val infoText = android.widget.TextView(ctx).apply {
+            textSize = 13f
+            setTextColor(android.graphics.Color.parseColor("#CCCCCC"))
+        }
+        fun updateInfo(tIdx: Int) {
+            val tol = toleranceValues[tIdx].toDouble()
+            val preview = TrackEditor.simplifyPreview(tol)
+            val removed = TrackEditor.editPoints.size - preview
+            infoText.text = "Осталось: $preview точек (убрать $removed)"
+        }
+        updateInfo(toleranceIdx)
+
+        val labels = toleranceValues.map { "${it}м" }.toTypedArray()
+        val seekBar = android.widget.SeekBar(ctx).apply {
+            max = toleranceValues.size - 1
+            progress = toleranceIdx
+            setPadding(0, 8, 0, 8)
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    toleranceIdx = p; updateInfo(p)
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+            })
+        }
+        val toleranceLabel = android.widget.TextView(ctx).apply {
+            text = "Допуск: ${labels.joinToString(" | ")}"
+            textSize = 11f
+            setTextColor(android.graphics.Color.parseColor("#888888"))
+        }
+        container.addView(infoText)
+        container.addView(seekBar)
+        container.addView(toleranceLabel)
+
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("⎘ Упростить трек")
+            .setView(container)
+            .setPositiveButton("Применить") { _, _ ->
+                val removed = TrackEditor.simplify(toleranceValues[toleranceIdx].toDouble())
+                renderEditorPoints()
+                updateEditorUi()
+                Toast.makeText(ctx, "Убрано $removed точек", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun enterMoveMode() {
+        val idx = TrackEditor.selectedIndex
+        if (idx < 0) return
+        editMoveMode = true
+        _binding?.editPointPopup?.visibility = View.GONE
+        _binding?.editMoveBar?.visibility = View.VISIBLE
+        // Show crosshair if not visible
+        _binding?.crosshairView?.visibility = View.VISIBLE
+    }
+
+    private fun confirmMovePoint() {
+        val map = mapboxMap ?: return
+        val center = map.cameraPosition.target ?: return
+        val idx = TrackEditor.selectedIndex
+        if (idx >= 0) {
+            TrackEditor.movePoint(idx, center.latitude, center.longitude)
+            renderEditorPoints()
+            updateEditorUi()
+        }
+        cancelMoveMode()
+    }
+
+    private fun cancelMoveMode() {
+        editMoveMode = false
+        _binding?.editMoveBar?.visibility = View.GONE
+        if (TrackEditor.selectedIndex >= 0) {
+            _binding?.editPointPopup?.visibility = View.VISIBLE
+        }
+    }
+
+    private fun showEditorSaveDialog() {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val origName = prefs.getString(PREF_LOADED_TRACK_NAME, "track") ?: "track"
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Сохранить трек")
+            .setItems(arrayOf("Заменить «$origName»", "Сохранить как новый файл")) { _, which ->
+                val pts = TrackEditor.editPoints.map { Pair(it.lat, it.lon) }
+                when (which) {
+                    0 -> {
+                        // Replace in-memory loaded track and exit editor
+                        loadedTrackPoints.clear()
+                        loadedTrackPoints.addAll(pts.map { com.mapbox.mapboxsdk.geometry.LatLng(it.first, it.second) })
+                        updateLoadedTrackOnMap()
+                        saveTrackToPrefs()
+                        exitTrackEditMode()
+                        Toast.makeText(ctx, "Трек обновлён (${pts.size} точек)", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> {
+                        val gpx = GpxParser.writeGpx(pts, "${origName}_edited")
+                        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                            .format(java.util.Date())
+                        val filename = "track_edited_$timestamp.gpx"
+                        try {
+                            val dir = getRaceNavDir(ctx, "tracks")
+                            val file = java.io.File(dir, filename)
+                            file.writeText(gpx)
+                            exitTrackEditMode()
+                            Toast.makeText(ctx, "Сохранено: $filename", Toast.LENGTH_LONG).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    // ─── End Track Editor ──────────────────────────────────────────────────────
 
     private fun setupWaypointLayers(style: Style) {
         // Restore persisted data on style (re)load
@@ -3273,6 +3655,19 @@ class MapFragment : Fragment() {
                 }
             })
             root.addView(trackRow)
+
+            // Edit button
+            root.addView(android.widget.Button(ctx).apply {
+                text = "✏️ Редактировать трек"
+                textSize = 13f; isAllCaps = false
+                setTextColor(android.graphics.Color.parseColor("#2196F3"))
+                background = null
+                setPadding(0, 4, 0, 8)
+                setOnClickListener {
+                    dialog.dismiss()
+                    enterTrackEditMode()
+                }
+            })
         } else {
             root.addView(android.widget.TextView(ctx).apply {
                 text = "📍 Трек не загружен"

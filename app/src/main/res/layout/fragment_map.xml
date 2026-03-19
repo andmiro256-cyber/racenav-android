@@ -211,6 +211,234 @@
 
     </LinearLayout>
 
+    <!-- Track editor toolbar — shown when in track edit mode -->
+    <LinearLayout
+        android:id="@+id/trackEditorBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#E61A1A1A"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/waypointNavBar"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- Row 1: title + save/cancel -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="8dp">
+
+            <TextView
+                android:id="@+id/trackEditorTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="✏️ Редактор трека"
+                android:textColor="#2196F3"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <Button
+                android:id="@+id/btnEditorSave"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="✓ Сохранить"
+                android:textSize="12sp"
+                android:textAllCaps="false"
+                android:textColor="#4CAF50"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp" />
+
+            <Button
+                android:id="@+id/btnEditorExit"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="✕"
+                android:textSize="14sp"
+                android:textAllCaps="false"
+                android:textColor="#888888"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp" />
+        </LinearLayout>
+
+        <!-- Row 2: tools -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="4dp">
+
+            <Button
+                android:id="@+id/btnEditorTrim"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:text="✂ Обрезать"
+                android:textSize="11sp"
+                android:textAllCaps="false"
+                android:textColor="#CCCCCC"
+                android:background="@drawable/rounded_bg_dark" />
+
+            <View android:layout_width="4dp" android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnEditorSimplify"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:text="⎘ Упростить"
+                android:textSize="11sp"
+                android:textAllCaps="false"
+                android:textColor="#CCCCCC"
+                android:background="@drawable/rounded_bg_dark" />
+
+            <View android:layout_width="4dp" android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnEditorUndo"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:text="↩ Undo"
+                android:textSize="11sp"
+                android:textAllCaps="false"
+                android:textColor="#888888"
+                android:background="@drawable/rounded_bg_dark" />
+
+            <View android:layout_width="4dp" android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnEditorReverse"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:text="⇄ Реверс"
+                android:textSize="11sp"
+                android:textAllCaps="false"
+                android:textColor="#CCCCCC"
+                android:background="@drawable/rounded_bg_dark" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Edit point popup — shown when a track point is selected in editor mode -->
+    <LinearLayout
+        android:id="@+id/editPointPopup"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="@drawable/rounded_bg_dark"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:gravity="center_vertical"
+        android:elevation="8dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/trackEditorBar"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginBottom="8dp">
+
+        <Button
+            android:id="@+id/btnEditorMove"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="📍 Переместить"
+            android:textSize="12sp"
+            android:textAllCaps="false"
+            android:textColor="#2196F3"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="20dp"
+            android:background="#444444"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/btnEditorDeletePoint"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="🗑 Удалить"
+            android:textSize="12sp"
+            android:textAllCaps="false"
+            android:textColor="#F44336"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="20dp"
+            android:background="#444444"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/btnEditorDeselectPoint"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="✕"
+            android:textSize="14sp"
+            android:textAllCaps="false"
+            android:textColor="#888888"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+    </LinearLayout>
+
+    <!-- Move mode confirm bar — shown when moving a point via crosshair -->
+    <LinearLayout
+        android:id="@+id/editMoveBar"
+        android:layout_width="0dp"
+        android:layout_height="44dp"
+        android:orientation="horizontal"
+        android:background="#E62196F3"
+        android:gravity="center"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/trackEditorBar"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Наведите крестик на нужное место"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:gravity="center" />
+
+        <Button
+            android:id="@+id/btnEditorMoveConfirm"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="✓ Подтвердить"
+            android:textSize="13sp"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <Button
+            android:id="@+id/btnEditorMoveCancel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="✕"
+            android:textSize="14sp"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+    </LinearLayout>
+
     <!-- Waypoint navigation bar (prev/next CP buttons), shown when navigation active -->
     <LinearLayout
         android:id="@+id/waypointNavBar"
