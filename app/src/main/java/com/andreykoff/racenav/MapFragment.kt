@@ -761,31 +761,13 @@ class MapFragment : Fragment() {
             map.uiSettings.isCompassEnabled = false
             map.uiSettings.isAttributionEnabled = false
             map.uiSettings.isLogoEnabled = false
-            // Reduce prefetch zoom delta from default 4 → 1 to load fewer adjacent tiles on startup
-            map.setPrefetchZoomDelta(1)
             val tilePrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val savedTile = tilePrefs?.getString(PREF_TILE_KEY, "osm") ?: "osm"
             val savedOverlayStr = tilePrefs?.getString(PREF_OVERLAY_KEY, "") ?: ""
             val savedOverlays = savedOverlayStr.split(",").filter { it.isNotBlank() && it != "none" }.toSet()
-            // Load custom and offline maps BEFORE loadTileStyle so tile sources are ready
-            reloadCustomSources()
-            loadOfflineMapsFromPrefs()
-            // Apply cached catalog instantly (no network), then load style
-            val ctx = context ?: return@getMapAsync
-            val cachedCatalog = TileCatalogManager.loadCachedCatalog(ctx)
-            applyCatalog(cachedCatalog)
-            loadTileStyle(savedTile, savedOverlays)
-            // Async fetch fresh catalog from server
-            val cachedVersion = cachedCatalog?.version ?: -1
-            TileCatalogManager.fetchCatalog(ctx) { catalog ->
-                if (catalog != null && catalog.version != cachedVersion && isAdded && _binding != null) {
-                    applyCatalog(catalog)
-                    // Reload current style with updated proxy URLs
-                    loadTileStyle(currentTileKey, currentOverlayKeys)
-                }
-            }
-
-            // Restore camera position if saved
+            // Restore camera BEFORE loadTileStyle so savedCamera capture inside loadTileStyle is correct.
+            // (loadTileStyle calls setStyle which resets camera; it captures current position first —
+            //  if we restore AFTER, it captures world-view zoom=0 and savedCamera becomes null)
             val savedLat = tilePrefs?.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedLon = tilePrefs?.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedZoom = tilePrefs?.getFloat(PREF_CAMERA_ZOOM, -1f) ?: -1f
@@ -807,6 +789,24 @@ class MapFragment : Fragment() {
                         LatLng(lastLoc.latitude, lastLoc.longitude), 13.0))
                 }
                 waitingForFirstGps = true
+            }
+
+            // Load custom and offline maps BEFORE loadTileStyle so tile sources are ready
+            reloadCustomSources()
+            loadOfflineMapsFromPrefs()
+            // Apply cached catalog instantly (no network), then load style
+            val ctx = context ?: return@getMapAsync
+            val cachedCatalog = TileCatalogManager.loadCachedCatalog(ctx)
+            applyCatalog(cachedCatalog)
+            loadTileStyle(savedTile, savedOverlays)
+            // Async fetch fresh catalog from server
+            val cachedVersion = cachedCatalog?.version ?: -1
+            TileCatalogManager.fetchCatalog(ctx) { catalog ->
+                if (catalog != null && catalog.version != cachedVersion && isAdded && _binding != null) {
+                    applyCatalog(catalog)
+                    // Reload current style with updated proxy URLs
+                    loadTileStyle(currentTileKey, currentOverlayKeys)
+                }
             }
 
             autoRecenterEnabled = tilePrefs?.getBoolean(PREF_AUTO_RECENTER, false) ?: false
@@ -3091,6 +3091,15 @@ class MapFragment : Fragment() {
         // Always show small yellow lock icon in top-right corner
         val lockIcon = b.lockOverlay.getChildAt(0) as? android.widget.ImageView
         lockIcon?.visibility = View.VISIBLE
+        // Long-press on lock icon OR anywhere on overlay for 1.5s → unlock
+        val unlockAction = Runnable { unlockScreen() }
+        b.lockOverlay.setOnTouchListener { _, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> emergencyHandler.postDelayed(unlockAction, 3000)
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> emergencyHandler.removeCallbacks(unlockAction)
+            }
+            true
+        }
         ImageViewCompat.setImageTintList(
             b.btnLock,
             android.content.res.ColorStateList.valueOf(Color.parseColor("#FFD600"))
@@ -3247,6 +3256,7 @@ class MapFragment : Fragment() {
     fun unlockScreen() {
         isScreenLocked = false
         val b = _binding ?: return
+        b.lockOverlay.setOnTouchListener(null)
         b.lockOverlay.visibility = View.GONE
         ImageViewCompat.setImageTintList(
             b.btnLock,
