@@ -7,11 +7,12 @@ import android.content.IntentFilter
 import android.location.*
 import android.os.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.filterNotNull
 
 /**
  * Standalone foreground service for sending GPS data to Traccar.
- * Completely independent from TrackingService (track recording).
- * Starts/stops via toggle in Settings or programmatically.
+ * When TrackingService is running — uses its location (same source as camera/cursor).
+ * When TrackingService is NOT running — uses own GPS_PROVIDER listener.
  */
 class TraccarService : Service() {
 
@@ -34,23 +35,32 @@ class TraccarService : Service() {
     private var traccarDb: TraccarLocationDb? = null
     private var traccarSender: TraccarSender? = null
 
+    // Own GPS listener — fallback when TrackingService is NOT running
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
-            val batteryLevel = getBatteryLevel()
-            traccarDb?.insertPoint(
-                lat = loc.latitude,
-                lon = loc.longitude,
-                speed = loc.speed,
-                bearing = loc.bearing,
-                altitude = loc.altitude,
-                timestamp = System.currentTimeMillis(),
-                battery = batteryLevel
-            )
+            // Skip stale cached locations (older than 30 seconds)
+            if (System.currentTimeMillis() - loc.time > 30_000) return
+            // Skip if TrackingService is running — flow provides the position
+            if (TrackingService.isRunning) return
+            savePoint(loc.latitude, loc.longitude, loc.speed, loc.bearing, loc.altitude)
         }
         @Deprecated("Deprecated in API 29")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
         override fun onProviderEnabled(provider: String) {}
         override fun onProviderDisabled(provider: String) {}
+    }
+
+    private fun savePoint(lat: Double, lon: Double, speed: Float, bearing: Float, altitude: Double) {
+        val batteryLevel = getBatteryLevel()
+        traccarDb?.insertPoint(
+            lat = lat,
+            lon = lon,
+            speed = speed,
+            bearing = bearing,
+            altitude = altitude,
+            timestamp = System.currentTimeMillis(),
+            battery = batteryLevel
+        )
     }
 
     override fun onCreate() {
@@ -88,7 +98,6 @@ class TraccarService : Service() {
                     setPackage(packageName)
                     putExtra(EXTRA_TRACCAR_STATUS, status.name)
                 })
-                // Update shared notification with status
                 val statusText = when (status) {
                     TraccarSender.SyncStatus.OK -> "📡 ✓ Онлайн"
                     TraccarSender.SyncStatus.SYNCING -> "📡 ↑ Отправка..."
@@ -102,13 +111,21 @@ class TraccarService : Service() {
             start(serviceScope)
         }
 
-        // Start GPS listener — 1 second interval
+        // Always subscribe to TrackingService flow — syncs position with camera when recording
+        serviceScope.launch {
+            TrackingService.locationFlow.filterNotNull().collect { loc ->
+                if (!isRunning) return@collect
+                savePoint(loc.lat, loc.lon, loc.speed, loc.bearing, loc.altitude)
+            }
+        }
+
+        // Always run own GPS listener as fallback (used when TrackingService is NOT running)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         try {
             locationManager?.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
-                1000L,     // 1 second
-                0f,        // 0 meters
+                1000L,
+                0f,
                 locationListener,
                 Looper.getMainLooper()
             )
@@ -128,7 +145,6 @@ class TraccarService : Service() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
 
-        // Always remove our foreground; if TrackingService still runs it will keep its own
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (TrackingService.isRunning) NotificationHelper.update(this)
         stopSelf()
