@@ -238,9 +238,10 @@ class TrackingService : Service() {
         return 2 * R * asin(sqrt(x))
     }
 
-    // onTaskRemoved NOT overridden — Samsung/Vivo call it aggressively
-    // even when switching apps, which would kill GPS recording.
-    // Service stops via explicit ACTION_STOP or onDestroy.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (isRunning) stopTracking()
+        super.onTaskRemoved(rootIntent)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
