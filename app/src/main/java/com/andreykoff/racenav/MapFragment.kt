@@ -1850,39 +1850,42 @@ class MapFragment : Fragment() {
 
     private fun renderEditorPoints() {
         val style = mapboxMap?.style ?: return
-        val pts = TrackEditor.editPoints
+        val pts = TrackEditor.editPoints.toList()  // snapshot for background thread
         if (pts.isEmpty()) return
+        val sel = TrackEditor.selectedIndex
 
-        // Update line
-        val coords = JSONArray()
-        pts.forEach { coords.put(JSONArray().put(it.lon).put(it.lat)) }
-        style.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)?.setGeoJson(
-            JSONObject().put("type", "Feature")
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+            // Build JSON off the UI thread
+            val coords = JSONArray()
+            pts.forEach { coords.put(JSONArray().put(it.lon).put(it.lat)) }
+            val lineJson = JSONObject().put("type", "Feature")
                 .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
                 .put("properties", JSONObject()).toString()
-        )
 
-        // Update points
-        val features = JSONArray()
-        val sel = TrackEditor.selectedIndex
-        pts.forEachIndexed { idx, pt ->
-            val t = when {
-                idx == sel -> "sel"
-                idx == 0 -> "start"
-                idx == pts.size - 1 -> "end"
-                else -> "n"
+            val features = JSONArray()
+            pts.forEachIndexed { idx, pt ->
+                val t = when {
+                    idx == sel -> "sel"
+                    idx == 0 -> "start"
+                    idx == pts.size - 1 -> "end"
+                    else -> "n"
+                }
+                features.put(
+                    JSONObject()
+                        .put("type", "Feature")
+                        .put("geometry", JSONObject().put("type", "Point")
+                            .put("coordinates", JSONArray().put(pt.lon).put(pt.lat)))
+                        .put("properties", JSONObject().put("idx", idx).put("t", t))
+                )
             }
-            features.put(
-                JSONObject()
-                    .put("type", "Feature")
-                    .put("geometry", JSONObject().put("type", "Point")
-                        .put("coordinates", JSONArray().put(pt.lon).put(pt.lat)))
-                    .put("properties", JSONObject().put("idx", idx).put("t", t))
-            )
+            val pointsJson = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
+
+            withContext(Dispatchers.Main) {
+                val s = mapboxMap?.style ?: return@withContext
+                s.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)?.setGeoJson(lineJson)
+                s.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)?.setGeoJson(pointsJson)
+            }
         }
-        style.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)?.setGeoJson(
-            JSONObject().put("type", "FeatureCollection").put("features", features).toString()
-        )
     }
 
     private fun handleEditorTap(map: MapboxMap, latLng: com.mapbox.mapboxsdk.geometry.LatLng) {
@@ -1921,7 +1924,7 @@ class MapFragment : Fragment() {
                     updateEditorUi()
                 }
             }
-            .setNeutralButton("Удалить конец ($idx..$n)") { _, _ ->
+            .setNeutralButton("Удалить конец ($idx..${n - 1})") { _, _ ->
                 if (idx < n - 1) {
                     TrackEditor.trimFromEnd(idx)
                     _binding?.editPointPopup?.visibility = View.GONE
@@ -2016,6 +2019,8 @@ class MapFragment : Fragment() {
         if (TrackEditor.selectedIndex >= 0) {
             _binding?.editPointPopup?.visibility = View.VISIBLE
         }
+        // Restore crosshair to its proper state (may have been off before move mode)
+        applyFollowMode()
     }
 
     private fun showEditorSaveDialog() {

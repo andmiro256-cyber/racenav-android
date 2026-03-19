@@ -53,7 +53,7 @@ object TrackEditor {
     fun trimFromStart(index: Int) {
         if (index <= 0 || index >= editPoints.size) return
         pushUndo()
-        repeat(index) { editPoints.removeAt(0) }
+        editPoints.subList(0, index).clear()
         selectedIndex = -1
     }
 
