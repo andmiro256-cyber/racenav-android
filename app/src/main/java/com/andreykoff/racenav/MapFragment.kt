@@ -1153,8 +1153,10 @@ class MapFragment : Fragment() {
             ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
             ?.apply()
         val json = buildStyleJson(baseKey, overlayKeys)
-        // Save camera position before style reload (setStyle resets camera)
-        val savedCamera = mapboxMap?.cameraPosition
+        // Save camera position before style reload (setStyle resets camera).
+        // Only restore if zoom > 2 — avoids restoring world-view on first launch
+        // before prefs-based camera has been applied (race condition on cold start).
+        val savedCamera = mapboxMap?.cameraPosition?.takeIf { it.zoom > 2.0 }
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
             // Restore camera position after style change
             savedCamera?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
@@ -2027,6 +2029,18 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val origName = prefs.getString(PREF_LOADED_TRACK_NAME, "track") ?: "track"
+        // Protect today's "current_YYYYMMDD_*" tracks from overwrite
+        val todayPrefix = "current_" + java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.getDefault()).format(java.util.Date())
+        val isTodayTrack = origName.startsWith(todayPrefix) || origName.startsWith("current_" + java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.getDefault()).format(java.util.Date()))
+        if (isTodayTrack) {
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("⛔ Трек защищён")
+                .setMessage("Трек сегодняшнего дня «$origName» нельзя изменить.\nСохранить как новый файл?")
+                .setPositiveButton("Сохранить копию") { _, _ -> saveEditorAsNewFile(ctx, origName) }
+                .setNegativeButton("Отмена", null)
+                .show()
+            return
+        }
         android.app.AlertDialog.Builder(ctx)
             .setTitle("Сохранить трек")
             .setItems(arrayOf("Заменить «$origName»", "Сохранить как новый файл")) { _, which ->
@@ -2060,6 +2074,22 @@ class MapFragment : Fragment() {
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    private fun saveEditorAsNewFile(ctx: android.content.Context, baseName: String) {
+        val pts = TrackEditor.editPoints.map { Pair(it.lat, it.lon) }
+        val gpx = GpxParser.writeGpx(pts, "${baseName}_edited")
+        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val filename = "track_edited_$timestamp.gpx"
+        try {
+            val file = java.io.File(getRaceNavDir(ctx, "tracks"), filename)
+            file.writeText(gpx)
+            exitTrackEditMode()
+            Toast.makeText(ctx, "Сохранено: $filename", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     // ─── End Track Editor ──────────────────────────────────────────────────────
@@ -5096,7 +5126,8 @@ class MapFragment : Fragment() {
             .show()
     }
 
-    /** Save track points to GPX file in app's external tracks folder */
+    /** Save track points to GPX file in app's external tracks folder.
+     *  Name always "current_YYYYMMDD_HHmmss.gpx" — immutable, protects participant track integrity. */
     fun saveTrackToFile(points: List<Pair<Double, Double>>? = null) {
         val ctx = context ?: return
         val pts = points ?: TrackingService.trackPoints.toList()
@@ -5106,8 +5137,8 @@ class MapFragment : Fragment() {
         }
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
-        val filename = "racenav_$timestamp.gpx"
-        val gpxContent = GpxParser.writeGpx(pts, "RaceNav $timestamp")
+        val filename = "current_$timestamp.gpx"
+        val gpxContent = GpxParser.writeGpx(pts, "current_$timestamp")
         try {
             val dir = getRaceNavDir(ctx, "tracks")
             val file = java.io.File(dir, filename)

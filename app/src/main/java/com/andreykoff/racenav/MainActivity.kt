@@ -387,11 +387,11 @@ class MainActivity : AppCompatActivity() {
                     )
                     mapFrag?.saveTrackToFile()
                     stopAllServices()
-                    finish()
+                    finishAndRemoveTask()
                 }
                 .setNeutralButton("Выйти без сохранения") { _, _ ->
                     stopAllServices()
-                    finish()
+                    finishAndRemoveTask()
                 }
                 .setNegativeButton("Отмена", null)
                 .show()
@@ -400,7 +400,7 @@ class MainActivity : AppCompatActivity() {
                 .setMessage("Выйти из приложения?")
                 .setPositiveButton("Выйти") { _, _ ->
                     stopAllServices()
-                    finish()
+                    finishAndRemoveTask()
                 }
                 .setNegativeButton("Отмена", null)
                 .show()
