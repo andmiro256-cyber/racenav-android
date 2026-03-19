@@ -29,18 +29,18 @@ class TraccarService : Service() {
     }
 
     private var locationManager: LocationManager? = null
+    private var fusedClient: com.google.android.gms.location.FusedLocationProviderClient? = null
+    private var fusedCallback: com.google.android.gms.location.LocationCallback? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var traccarDb: TraccarLocationDb? = null
     private var traccarSender: TraccarSender? = null
 
-    // Own GPS listener — fallback when TrackingService is NOT running
+    // Own GPS listener — fallback when TrackingService is NOT running and no FusedLocation
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
-            // Skip stale cached locations (older than 30 seconds)
             if (System.currentTimeMillis() - loc.time > 30_000) return
-            // Skip if TrackingService is running — flow provides the position
             if (TrackingService.isRunning) return
             savePoint(loc.latitude, loc.longitude, loc.speed, loc.bearing, loc.altitude)
         }
@@ -48,6 +48,13 @@ class TraccarService : Service() {
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
         override fun onProviderEnabled(provider: String) {}
         override fun onProviderDisabled(provider: String) {}
+    }
+
+    private fun isGooglePlayServicesAvailable(): Boolean {
+        return try {
+            com.google.android.gms.common.GoogleApiAvailability.getInstance()
+                .isGooglePlayServicesAvailable(this) == com.google.android.gms.common.ConnectionResult.SUCCESS
+        } catch (_: Exception) { false }
     }
 
     private fun savePoint(lat: Double, lon: Double, speed: Float, bearing: Float, altitude: Double) {
@@ -119,24 +126,35 @@ class TraccarService : Service() {
             }
         }
 
-        // Always run own GPS listener as fallback (used when TrackingService is NOT running)
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        try {
-            locationManager?.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                1000L,
-                0f,
-                locationListener,
-                Looper.getMainLooper()
-            )
-        } catch (e: SecurityException) {
-            stopTraccar()
+        // Own GPS source as fallback (used when TrackingService is NOT running)
+        if (isGooglePlayServicesAvailable()) {
+            fusedClient = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(this)
+            val request = com.google.android.gms.location.LocationRequest.Builder(
+                com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, 1000L
+            ).setMinUpdateIntervalMillis(500L).build()
+            fusedCallback = object : com.google.android.gms.location.LocationCallback() {
+                override fun onLocationResult(result: com.google.android.gms.location.LocationResult) {
+                    if (TrackingService.isRunning) return
+                    result.lastLocation?.let { savePoint(it.latitude, it.longitude, it.speed, it.bearing, it.altitude) }
+                }
+            }
+            try {
+                fusedClient?.requestLocationUpdates(request, fusedCallback!!, Looper.getMainLooper())
+            } catch (_: SecurityException) { stopTraccar() }
+        } else {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            try {
+                locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, locationListener, Looper.getMainLooper())
+            } catch (_: SecurityException) { stopTraccar() }
         }
     }
 
     private fun stopTraccar() {
         isRunning = false
         NotificationHelper.traccarText = null
+        fusedCallback?.let { fusedClient?.removeLocationUpdates(it) }
+        fusedClient = null
+        fusedCallback = null
         locationManager?.removeUpdates(locationListener)
         traccarSender?.stop()
         traccarSender = null
