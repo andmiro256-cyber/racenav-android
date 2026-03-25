@@ -2,6 +2,7 @@ package com.andreykoff.racenav
 
 import android.content.Context
 import android.util.Log
+import androidx.lifecycle.lifecycleScope
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import android.net.Uri
@@ -334,6 +335,30 @@ class SettingsFragment : Fragment() {
         switchOnlyMoving?.isChecked = prefs.getBoolean(MapFragment.PREF_TRACK_ONLY_MOVING, false)
         switchOnlyMoving?.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(MapFragment.PREF_TRACK_ONLY_MOVING, checked).apply()
+        }
+
+        // Track stop filter (stationary GPS noise filter)
+        val stopFilterValues = intArrayOf(0, 5, 10, 20)
+        val txtStopFilter = view.findViewById<TextView>(R.id.txtStopFilter)
+        var stopFilterCurrent = prefs.getInt(MapFragment.PREF_TRACK_STOP_FILTER, MapFragment.DEFAULT_TRACK_STOP_FILTER)
+        var stopIdx = stopFilterValues.indexOfFirst { it >= stopFilterCurrent }.coerceAtLeast(0)
+        stopFilterCurrent = stopFilterValues[stopIdx]
+        txtStopFilter?.text = if (stopFilterCurrent == 0) "Выкл" else "${stopFilterCurrent}м"
+        view.findViewById<TextView>(R.id.btnStopFilterMinus)?.setOnClickListener {
+            if (stopIdx > 0) {
+                stopIdx--
+                stopFilterCurrent = stopFilterValues[stopIdx]
+                txtStopFilter?.text = if (stopFilterCurrent == 0) "Выкл" else "${stopFilterCurrent}м"
+                prefs.edit().putInt(MapFragment.PREF_TRACK_STOP_FILTER, stopFilterCurrent).apply()
+            }
+        }
+        view.findViewById<TextView>(R.id.btnStopFilterPlus)?.setOnClickListener {
+            if (stopIdx < stopFilterValues.lastIndex) {
+                stopIdx++
+                stopFilterCurrent = stopFilterValues[stopIdx]
+                txtStopFilter?.text = if (stopFilterCurrent == 0) "Выкл" else "${stopFilterCurrent}м"
+                prefs.edit().putInt(MapFragment.PREF_TRACK_STOP_FILTER, stopFilterCurrent).apply()
+            }
         }
 
         // Recording track color — single swatch with picker
@@ -1039,6 +1064,8 @@ class SettingsFragment : Fragment() {
 
         // Custom map sources
         setupCustomSources(view, prefs)
+        // Map visibility toggles
+        setupMapVisibility(view, prefs)
 
         // Navigation start/stop
         view.findViewById<android.widget.Button>(R.id.btnNavStart).setOnClickListener {
@@ -1120,12 +1147,197 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        // Sync
+        // ── Account & Data ──
+        val editSyncEmail = view.findViewById<EditText>(R.id.editSyncEmail)
         val editApiKey = view.findViewById<EditText>(R.id.editSyncApiKey)
+        val txtAccountStatus = view.findViewById<TextView>(R.id.txtAccountStatus)
+        val txtSyncKeyToggle = view.findViewById<TextView>(R.id.txtSyncKeyToggle)
         val btnSyncPull = view.findViewById<android.widget.Button>(R.id.btnSyncPull)
         val btnSyncPush = view.findViewById<android.widget.Button>(R.id.btnSyncPush)
         val txtSyncStatus = view.findViewById<TextView>(R.id.txtSyncStatus)
+        val txtSyncDataInfo = view.findViewById<TextView>(R.id.txtSyncDataInfo)
+        val txtSyncLastTime = view.findViewById<TextView>(R.id.txtSyncLastTime)
+        val switchAutoSync = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoSync)
+        val switchSyncWifiOnly = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchSyncWifiOnly)
+        val syncSettingsBlock = view.findViewById<View>(R.id.syncSettingsBlock)
+
+        // Pre-fill email from license or backup email
+        val savedEmail = prefs.getString("sync_email", null)
+            ?: prefs.getString("backup_email", null) ?: ""
+        editSyncEmail.setText(savedEmail)
         editApiKey.setText(prefs.getString(PREF_SYNC_API_KEY, ""))
+
+        val txtEmailWarning = view.findViewById<TextView>(R.id.txtEmailWarning)
+        val btnSaveEmail = view.findViewById<android.widget.Button>(R.id.btnSaveEmail)
+
+        // If email already saved — lock the field
+        if (savedEmail.isNotEmpty()) {
+            editSyncEmail.isEnabled = false
+            btnSaveEmail?.visibility = View.GONE
+            txtEmailWarning?.visibility = View.GONE
+            txtAccountStatus.text = "Изменить email → поддержка info@trophynav.ru"
+            txtAccountStatus.setTextColor(0xFF888888.toInt())
+            txtAccountStatus.visibility = View.VISIBLE
+        } else {
+            txtEmailWarning?.visibility = View.VISIBLE
+        }
+
+        // OK button — save email and lookup sync key
+        btnSaveEmail?.setOnClickListener {
+            val email = editSyncEmail.text.toString().trim()
+            if (email.isEmpty()) {
+                Toast.makeText(requireContext(), "Введите email", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (!email.contains("@") || !email.contains(".")) {
+                Toast.makeText(requireContext(), "Некорректный email", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            // Confirmation dialog
+            androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle("Подтверждение")
+                .setMessage("Email: $email\n\nПосле сохранения изменить email можно будет только через поддержку.\n\nПодтвердить?")
+                .setPositiveButton("Да") { _, _ ->
+                    prefs.edit().putString("sync_email", email).putString("backup_email", email).apply()
+                    // Hide keyboard
+                    val imm = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                    imm.hideSoftInputFromWindow(editSyncEmail.windowToken, 0)
+                    // Lock the field
+                    editSyncEmail.isEnabled = false
+                    btnSaveEmail.visibility = View.GONE
+                    txtEmailWarning?.visibility = View.GONE
+                    txtAccountStatus.text = "Изменить email → поддержка info@trophynav.ru"
+                    txtAccountStatus.setTextColor(0xFF888888.toInt())
+                    txtAccountStatus.visibility = View.VISIBLE
+                    // Register email on server + get sync key
+                    val deviceId = LicenseManager.getShortDeviceId(requireContext())
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        try {
+                            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                val url = java.net.URL("${MapFragment.SYNC_BASE_URL}/api/email/register")
+                                val conn = url.openConnection() as java.net.HttpURLConnection
+                                conn.requestMethod = "POST"
+                                conn.setRequestProperty("Content-Type", "application/json")
+                                conn.doOutput = true
+                                conn.connectTimeout = 10000; conn.readTimeout = 10000
+                                conn.outputStream.write("""{"email":"$email","deviceId":"$deviceId","deviceType":"android"}""".toByteArray())
+                                try {
+                                    val body = conn.inputStream.bufferedReader().readText()
+                                    org.json.JSONObject(body)
+                                } finally { conn.disconnect() }
+                            }
+                            // Save sync key if returned
+                            val syncKey = result.optString("syncKey", "")
+                            if (syncKey.isNotEmpty()) {
+                                prefs.edit().putString(MapFragment.PREF_SYNC_API_KEY, syncKey).apply()
+                            }
+                            val licensed = result.optBoolean("licensed", false)
+                            val plan = result.optString("plan", "")
+                            if (licensed) {
+                                txtAccountStatus.text = "Лицензия: $plan"
+                                txtAccountStatus.setTextColor(0xFF4CAF50.toInt())
+                            } else {
+                                txtAccountStatus.text = "Email зарегистрирован"
+                                txtAccountStatus.setTextColor(0xFF22C55E.toInt())
+                            }
+                        } catch (_: Exception) {
+                            txtAccountStatus.text = "Email сохранён (сервер недоступен)"
+                            txtAccountStatus.setTextColor(0xFFFF9800.toInt())
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+        // Also handle keyboard Done action
+        editSyncEmail.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                view.findViewById<android.widget.Button>(R.id.btnSaveEmail)?.performClick()
+                true
+            } else false
+        }
+
+        // Hide manual key entry — not needed for users (keys are auto-generated)
+        txtSyncKeyToggle.visibility = View.GONE
+        editApiKey.visibility = View.GONE
+
+        // Data counters
+        val wpCount = prefs.getInt("loaded_wp_count", 0)
+        val trackCount = TrackingService.trackPoints.size
+        txtSyncDataInfo.text = "Точек: $wpCount, Записано: $trackCount точек трека"
+        val lastSync = prefs.getLong("last_sync_time", 0L)
+        if (lastSync > 0) {
+            val fmt = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+            txtSyncLastTime.text = "Последняя синхронизация: ${fmt.format(java.util.Date(lastSync))}"
+            txtSyncLastTime.visibility = View.VISIBLE
+        }
+
+        // Auto-sync settings
+        switchAutoSync.isChecked = prefs.getBoolean("auto_sync_on_start", false)
+        switchSyncWifiOnly.isChecked = prefs.getBoolean("sync_wifi_only", false)
+        switchAutoSync.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("auto_sync_on_start", checked).apply()
+        }
+        switchSyncWifiOnly.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("sync_wifi_only", checked).apply()
+        }
+
+        // Sync settings always enabled (trial is full-featured)
+
+        // Show account status
+        val plan = LicenseManager.getPlan(requireContext())
+        if (plan != null) {
+            val planName = when (plan) {
+                "full" -> "Full (Navigator + Server)"
+                "license" -> "Navigator Pro"
+                else -> plan
+            }
+            txtAccountStatus.text = "Тариф: $planName"
+            txtAccountStatus.setTextColor(if (plan == "full") 0xFFFFD700.toInt() else 0xFF4CAF50.toInt())
+            txtAccountStatus.visibility = View.VISIBLE
+        }
+
+        /** Resolve sync key: from manual field or by email lookup */
+        fun getSyncKey(onKey: (String?) -> Unit) {
+            val manualKey = editApiKey.text.toString().trim()
+            if (manualKey.isNotEmpty()) {
+                prefs.edit().putString(PREF_SYNC_API_KEY, manualKey).apply()
+                onKey(manualKey)
+                return
+            }
+            val email = editSyncEmail.text.toString().trim()
+            if (email.isEmpty()) { onKey(null); return }
+            prefs.edit().putString("sync_email", email).putString("backup_email", email).apply()
+            // Lookup key by email from server
+            viewLifecycleOwner.lifecycleScope.launch {
+                try {
+                    val key = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        val url = java.net.URL("${MapFragment.SYNC_BASE_URL}/api/sync/by-email/$email")
+                        val conn = url.openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 10000; conn.readTimeout = 10000
+                        try {
+                            if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+                            val json = org.json.JSONObject(conn.inputStream.bufferedReader().readText())
+                            json.optString("apiKey", "")
+                        } finally {
+                            conn.disconnect()
+                        }
+                    }
+                    if (key.isNotEmpty()) {
+                        prefs.edit().putString(PREF_SYNC_API_KEY, key).apply()
+                        editApiKey.setText(key)
+                        onKey(key)
+                    } else {
+                        onKey(null)
+                    }
+                } catch (e: Exception) {
+                    txtSyncStatus.text = "Email не найден: ${e.message}"
+                    txtSyncStatus.setTextColor(0xFFFF6B6B.toInt())
+                    txtSyncStatus.visibility = View.VISIBLE
+                    onKey(null)
+                }
+            }
+        }
 
         fun setSyncStatus(ok: Boolean, msg: String) {
             txtSyncStatus.text = msg
@@ -1133,43 +1345,53 @@ class SettingsFragment : Fragment() {
             txtSyncStatus.visibility = View.VISIBLE
             btnSyncPull.isEnabled = true
             btnSyncPush.isEnabled = true
+            if (ok) prefs.edit().putLong("last_sync_time", System.currentTimeMillis()).apply()
         }
 
         btnSyncPull.setOnClickListener {
-            val key = editApiKey.text.toString().trim()
-            if (key.isEmpty()) { Toast.makeText(requireContext(), "Введите ключ активации", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
-            prefs.edit().putString(PREF_SYNC_API_KEY, key).apply()
-            btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
-            txtSyncStatus.text = "Получаю данные..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
-            val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-            if (mf != null) {
-                mf.syncPull(key) { ok, msg -> setSyncStatus(ok, msg) }
-            } else {
-                setSyncStatus(false, "Откройте карту и попробуйте снова")
+            if (!LicenseManager.hasFullAccess(requireContext())) { LicenseManager.showLicenseRequired(requireContext()); return@setOnClickListener }
+            getSyncKey { key ->
+                if (key.isNullOrEmpty()) {
+                    Toast.makeText(requireContext(), "Введите email или ключ", Toast.LENGTH_SHORT).show()
+                    return@getSyncKey
+                }
+                btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
+                txtSyncStatus.text = "Получаю данные..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
+                val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                if (mf != null) {
+                    mf.syncPull(key) { ok, msg -> setSyncStatus(ok, msg) }
+                } else {
+                    setSyncStatus(false, "Откройте карту и попробуйте снова")
+                }
             }
         }
 
         btnSyncPush.setOnClickListener {
-            val key = editApiKey.text.toString().trim()
-            if (key.isEmpty()) { Toast.makeText(requireContext(), "Введите ключ активации", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
-            prefs.edit().putString(PREF_SYNC_API_KEY, key).apply()
-            btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
-            txtSyncStatus.text = "Отправляю трек..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
-            val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-            if (mf != null) {
-                mf.syncPush(key) { ok, msg -> setSyncStatus(ok, msg) }
-            } else {
-                setSyncStatus(false, "Откройте карту и попробуйте снова")
+            if (!LicenseManager.hasFullAccess(requireContext())) { LicenseManager.showLicenseRequired(requireContext()); return@setOnClickListener }
+            getSyncKey { key ->
+                if (key.isNullOrEmpty()) {
+                    Toast.makeText(requireContext(), "Введите email или ключ", Toast.LENGTH_SHORT).show()
+                    return@getSyncKey
+                }
+                btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
+                txtSyncStatus.text = "Отправляю трек..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
+                val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                if (mf != null) {
+                    mf.syncPush(key) { ok, msg -> setSyncStatus(ok, msg) }
+                } else {
+                    setSyncStatus(false, "Откройте карту и попробуйте снова")
+                }
             }
         }
 
-        // ── Backup ──
+        // ── Backup ── (uses shared email from Account block)
         val editBackupEmail = view.findViewById<EditText>(R.id.editBackupEmail)
         val btnBackupCreate = view.findViewById<android.widget.Button>(R.id.btnBackupCreate)
         val btnBackupRestore = view.findViewById<android.widget.Button>(R.id.btnBackupRestore)
         val txtBackupStatus = view.findViewById<TextView>(R.id.txtBackupStatus)
 
-        editBackupEmail.setText(prefs.getString("backup_email", ""))
+        // Backup email is synced from editSyncEmail
+        editBackupEmail.setText(savedEmail)
 
         fun setBackupStatus(ok: Boolean, msg: String) {
             txtBackupStatus.text = msg
@@ -1180,26 +1402,26 @@ class SettingsFragment : Fragment() {
         }
 
         btnBackupCreate.setOnClickListener {
-            val email = editBackupEmail.text.toString().trim()
-            if (email.isNotEmpty()) prefs.edit().putString("backup_email", email).apply()
+            val email = editSyncEmail.text.toString().trim()
+            if (email.isNotEmpty()) prefs.edit().putString("backup_email", email).putString("sync_email", email).apply()
             btnBackupCreate.isEnabled = false; btnBackupRestore.isEnabled = false
             txtBackupStatus.text = "Создаю бэкап..."; txtBackupStatus.setTextColor(0xFF888888.toInt()); txtBackupStatus.visibility = View.VISIBLE
-            kotlinx.coroutines.MainScope().launch {
+            viewLifecycleOwner.lifecycleScope.launch {
                 val result = BackupManager.createBackup(requireContext(), email.ifEmpty { null })
                 setBackupStatus(result.ok, result.message)
             }
         }
 
         btnBackupRestore.setOnClickListener {
-            val email = editBackupEmail.text.toString().trim()
-            if (email.isEmpty()) { Toast.makeText(requireContext(), "Введите email для восстановления", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+            val email = editSyncEmail.text.toString().trim()
+            if (email.isEmpty()) { Toast.makeText(requireContext(), "Введите email в поле аккаунта", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
             android.app.AlertDialog.Builder(requireContext())
                 .setTitle("Восстановить бэкап?")
                 .setMessage("Текущие настройки будут заменены. Продолжить?")
                 .setPositiveButton("Да") { _, _ ->
                     btnBackupCreate.isEnabled = false; btnBackupRestore.isEnabled = false
                     txtBackupStatus.text = "Восстанавливаю..."; txtBackupStatus.setTextColor(0xFF888888.toInt()); txtBackupStatus.visibility = View.VISIBLE
-                    kotlinx.coroutines.MainScope().launch {
+                    viewLifecycleOwner.lifecycleScope.launch {
                         val result = BackupManager.restoreBackup(requireContext(), email)
                         setBackupStatus(result.ok, result.message)
                     }
@@ -1289,11 +1511,11 @@ class SettingsFragment : Fragment() {
                     prefs.edit().putBoolean(MapFragment.PREF_TRACCAR_ENABLED, false).apply()
                     return@setOnCheckedChangeListener
                 }
-                // Check server subscription
-                if (!LicenseManager.isServerActive(ctx)) {
-                    Toast.makeText(ctx, "Серверная подписка не активна", Toast.LENGTH_LONG).show()
+                // Check license for premium features
+                if (!LicenseManager.hasFullAccess(ctx)) {
                     switchTraccar.isChecked = false
                     prefs.edit().putBoolean(MapFragment.PREF_TRACCAR_ENABLED, false).apply()
+                    LicenseManager.showLicenseRequired(ctx)
                     return@setOnCheckedChangeListener
                 }
                 // First-time consent dialog
@@ -1390,9 +1612,9 @@ class SettingsFragment : Fragment() {
         switchLiveUsers.isEnabled = traccarOn
         switchLiveUsers.alpha = if (traccarOn) 1.0f else 0.4f
         switchLiveUsers.setOnCheckedChangeListener { _, checked ->
-            if (checked && !LicenseManager.isServerActive(requireContext())) {
-                Toast.makeText(requireContext(), "Серверная подписка не активна", Toast.LENGTH_LONG).show()
+            if (checked && !LicenseManager.hasFullAccess(requireContext())) {
                 switchLiveUsers.isChecked = false
+                LicenseManager.showLicenseRequired(requireContext())
                 return@setOnCheckedChangeListener
             }
             prefs.edit().putBoolean(MapFragment.PREF_LIVE_USERS_ENABLED, checked).apply()
@@ -1693,28 +1915,83 @@ class SettingsFragment : Fragment() {
             val serverStatus = licPrefs.getString("server_status", null)
             val licenseStatus = licPrefs.getString("license_status", null)
             val licUntil = licPrefs.getString("license_until", null)
-            val licDateStr = try {
-                if (licUntil != null) {
-                    val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).parse(licUntil)
-                    if (date != null && date.time > System.currentTimeMillis() + 365L * 24 * 3600 * 1000 * 50) {
-                        "бессрочно"
-                    } else if (date != null) {
-                        java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.getDefault()).format(date)
-                    } else null
-                } else null
-            } catch (_: Exception) { null }
-            val licStatus = when {
-                LicenseManager.isActivated(ctx) || licenseStatus == "active" -> {
-                    if (licDateStr != null) "Лицензия: $licDateStr ✓" else "Лицензия: активирована ✓"
-                }
-                serverStatus == "active" -> "Сервер: активен ✓"
-                else -> {
-                    val days = LicenseManager.trialDaysLeft(ctx)
-                    "Пробный период: $days дн. осталось"
-                }
+            val srvUntil = licPrefs.getString("server_until", null)
+            val dateFmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
             }
+            val displayFmt = java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.getDefault())
+
+            fun parseDate(iso: String?): java.util.Date? {
+                if (iso.isNullOrEmpty()) return null
+                return try { dateFmt.parse(iso.substringBefore('.').substringBefore('Z')) } catch (_: Exception) { null }
+            }
+            fun fmtDate(iso: String?): String? {
+                val d = parseDate(iso) ?: return null
+                return if (d.time > System.currentTimeMillis() + 365L * 24 * 3600 * 1000 * 50) "бессрочно"
+                else displayFmt.format(d)
+            }
+
+            val licDate = parseDate(licUntil)
+            val srvDate = parseDate(srvUntil)
+            val licActive = LicenseManager.isActivated(ctx) || licenseStatus == "active" || (licDate != null && licDate.time > System.currentTimeMillis())
+            val srvActive = serverStatus == "active" && srvDate != null && srvDate.time > System.currentTimeMillis()
+            val isFull = LicenseManager.isFullPlan(ctx) || (licActive && srvActive)
+            val isTrial = !licActive && LicenseManager.isTrialActive(ctx)
+
+            // License card
+            val licenseCard = view.findViewById<LinearLayout>(R.id.licenseCard)
+            val txtBadge = view.findViewById<TextView>(R.id.txtLicenseBadge)
+            val txtLicLine = view.findViewById<TextView>(R.id.txtLicenseLine)
+            val txtSrvLine = view.findViewById<TextView>(R.id.txtServerLine)
+            val txtDevId = view.findViewById<TextView>(R.id.txtLicenseDeviceId)
+
+            if (isFull) {
+                txtBadge.text = "⭐ Navigator Pro"
+                txtBadge.setTextColor(0xFFFFD700.toInt())
+                licenseCard.setBackgroundColor(0xFF1A1A2E.toInt())
+            } else if (licActive) {
+                txtBadge.text = "📱 Navigator Pro"
+                txtBadge.setTextColor(0xFF4CAF50.toInt())
+                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+            } else if (isTrial) {
+                val days = LicenseManager.trialDaysLeft(ctx)
+                txtBadge.text = "⏳ Пробный период — $days дн."
+                txtBadge.setTextColor(0xFFFF9800.toInt())
+                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+            } else {
+                txtBadge.text = "🔒 Лицензия не активна"
+                txtBadge.setTextColor(0xFFFF5252.toInt())
+                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+            }
+
+            txtLicLine.text = if (licActive) {
+                val dateStr = fmtDate(licUntil) ?: "активирована"
+                "📱 Navigator Pro — до $dateStr"
+            } else if (isTrial) {
+                "📱 Navigator Pro — пробный период"
+            } else {
+                "📱 Navigator Pro — нет лицензии"
+            }
+            txtLicLine.setTextColor(if (licActive) 0xFF4CAF50.toInt() else 0xFF888888.toInt())
+
+            txtSrvLine.text = if (srvActive) {
+                val dateStr = fmtDate(srvUntil) ?: "активен"
+                "📡 Server — до $dateStr"
+            } else {
+                "📡 Server — нет подписки"
+            }
+            txtSrvLine.setTextColor(if (srvActive) 0xFF4CAF50.toInt() else 0xFF888888.toInt())
+
+            // Show user email after server line
+            val userEmail = prefs.getString("sync_email", null) ?: ""
+            if (userEmail.isNotEmpty()) {
+                txtSrvLine.text = "${txtSrvLine.text}\n📧 $userEmail"
+            }
+
             val deviceId = LicenseManager.getShortDeviceId(ctx)
-            view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v\n© Andrey Mironchik\n$licStatus\nID: $deviceId"
+            txtDevId.text = "ID: $deviceId"
+
+            view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v\n© Andrey Mironchik"
             view.findViewById<TextView>(R.id.txtAboutFeatures).text = listOf(
                 "• Оффлайн и онлайн карты с кешированием",
                 "• Запись и экспорт треков (GPX/PLT/KML)",
@@ -1891,8 +2168,8 @@ class SettingsFragment : Fragment() {
 
     /** Migrate Traccar device: update uniqueId on server from old random to stable */
     private fun migrateTraccarDeviceId(serverUrl: String, oldId: String, newId: String, deviceName: String) {
-        val apiBase = serverUrl.replace(":5055", ":8082").replace(":5056", ":8082").trimEnd('/')
-        val auth = okhttp3.Credentials.basic("snowwolf888@gmail.com", "7513")
+        val apiBase = "${BackupManager.BACKUP_SERVER}/api/traccar"
+        // Auth handled by server-side proxy — no credentials in client
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val client = okhttp3.OkHttpClient.Builder()
@@ -1902,7 +2179,6 @@ class SettingsFragment : Fragment() {
                 // Find old device
                 val checkReq = okhttp3.Request.Builder()
                     .url("$apiBase/api/devices?uniqueId=$oldId")
-                    .header("Authorization", auth)
                     .get().build()
                 val resp = client.newCall(checkReq).execute()
                 val body = resp.body?.string() ?: "[]"
@@ -1913,9 +2189,9 @@ class SettingsFragment : Fragment() {
                     val deviceServerId = device.getInt("id")
                     device.put("uniqueId", newId)
                     if (deviceName.isNotBlank()) device.put("name", deviceName)
+                    if (!device.has("groupId") || device.optInt("groupId", 0) == 0) device.put("groupId", 66)
                     val updateReq = okhttp3.Request.Builder()
                         .url("$apiBase/api/devices/$deviceServerId")
-                        .header("Authorization", auth)
                         .put(device.toString().toRequestBody("application/json".toMediaType()))
                         .build()
                     val updateResp = client.newCall(updateReq).execute()
@@ -1930,9 +2206,7 @@ class SettingsFragment : Fragment() {
 
     private fun registerTraccarDevice(serverUrl: String, uniqueId: String, deviceName: String, onDone: () -> Unit) {
         val ctx = context ?: return
-        // Traccar API is on port 8082, OsmAnd is on 5055. Derive API base from OsmAnd URL.
-        val apiBase = serverUrl.replace(":5055", ":8082").replace(":5056", ":8082").trimEnd('/')
-        val auth = okhttp3.Credentials.basic("snowwolf888@gmail.com", "7513")
+        val apiBase = "${BackupManager.BACKUP_SERVER}/api/traccar"
 
         CoroutineScope(Dispatchers.Main).launch {
             try {
@@ -1945,8 +2219,7 @@ class SettingsFragment : Fragment() {
                     // Check if device exists
                     val checkReq = okhttp3.Request.Builder()
                         .url("$apiBase/api/devices?uniqueId=$uniqueId")
-                        .header("Authorization", auth)
-                        .get().build()
+                                                .get().build()
                     val checkResp = client.newCall(checkReq).execute()
                     val body = checkResp.body?.string() ?: "[]"
                     checkResp.close()
@@ -1962,8 +2235,7 @@ class SettingsFragment : Fragment() {
                             existing.put("name", deviceName)
                             val updateReq = okhttp3.Request.Builder()
                                 .url("$apiBase/api/devices/$deviceId")
-                                .header("Authorization", auth)
-                                .put(existing.toString()
+                                                                .put(existing.toString()
                                     .toRequestBody("application/json".toMediaType()))
                                 .build()
                             val updateResp = client.newCall(updateReq).execute()
@@ -1981,8 +2253,7 @@ class SettingsFragment : Fragment() {
                         }
                         val createReq = okhttp3.Request.Builder()
                             .url("$apiBase/api/devices")
-                            .header("Authorization", auth)
-                            .post(json.toString()
+                                                        .post(json.toString()
                                 .toRequestBody("application/json".toMediaType()))
                             .build()
                         val createResp = client.newCall(createReq).execute()
@@ -2009,7 +2280,7 @@ class SettingsFragment : Fragment() {
         "main" to listOf("ЭКРАН", "МАРКЕР ПОЗИЦИИ", "УПРАВЛЕНИЕ", "ВИДЖЕТЫ НА КАРТЕ", "Карта — дополнительно"),
         "files" to listOf("ОБЪЕКТЫ КАРТЫ", "ЗАПИСЬ ТРЕКА", "НАВИГАЦИЯ"),
         "maps" to listOf("ТЕКУЩАЯ КАРТА", "ИСТОЧНИКИ КАРТ", "ОФФЛАЙН КАРТЫ", "ЗАГРУЗКА КАРТ", "КЭШ КАРТ"),
-        "network" to listOf("МОНИТОРИНГ", "СИНХРОНИЗАЦИЯ", "О ПРИЛОЖЕНИИ"),
+        "network" to listOf("МОНИТОРИНГ", "АККАУНТ И ДАННЫЕ", "О ПРИЛОЖЕНИИ"),
         "about" to listOf("О ПРИЛОЖЕНИИ")
     )
 
@@ -2383,7 +2654,7 @@ class SettingsFragment : Fragment() {
         "ЭКРАН", "МАРКЕР ПОЗИЦИИ", "УПРАВЛЕНИЕ", "ВИДЖЕТЫ НА КАРТЕ",
         "ОБЪЕКТЫ КАРТЫ", "ЗАПИСЬ ТРЕКА", "НАВИГАЦИЯ",
         "ТЕКУЩАЯ КАРТА", "ИСТОЧНИКИ КАРТ", "ОФФЛАЙН КАРТЫ", "ЗАГРУЗКА КАРТ", "КЭШ КАРТ",
-        "МОНИТОРИНГ", "СИНХРОНИЗАЦИЯ", "О ПРИЛОЖЕНИИ"
+        "МОНИТОРИНГ", "АККАУНТ И ДАННЫЕ", "О ПРИЛОЖЕНИИ"
     )
 
     /** Default collapsed sections — less frequently used */
@@ -2488,13 +2759,15 @@ class SettingsFragment : Fragment() {
                 BtnInfo("zoom",       "Зум +/−",          MapFragment.PREF_BTN_ZOOM,       true),
                 BtnInfo("waypoint",   "Добавить точку",   MapFragment.PREF_BTN_WAYPOINT,   true),
                 BtnInfo("quick",      "Быстрые действия", MapFragment.PREF_BTN_QUICK,      true),
-                BtnInfo("stop",       "STOP",             "btn_stop_always",               true),
-                BtnInfo("go",         "GO",               "btn_go_always",                 true),
+                BtnInfo("stop",       "STOP",             MapFragment.PREF_BTN_STOP,       true),
+                BtnInfo("go",         "GO",               MapFragment.PREF_BTN_GO,         true),
+                BtnInfo("zoom_level", "Уровень зума",     MapFragment.PREF_BTN_ZOOM_LEVEL, false),
                 BtnInfo("battery",    "Батарея",          MapFragment.PREF_BTN_BATTERY,    false),
                 BtnInfo("layers",     "Слои карты",       MapFragment.PREF_BTN_LAYERS,     true),
                 BtnInfo("rec",        "Запись трека",     MapFragment.PREF_BTN_REC,        true),
                 BtnInfo("lock",       "Блокировка",       MapFragment.PREF_BTN_LOCK,       true),
                 BtnInfo("map_switch", "Смена карты ⇄",    MapFragment.PREF_BTN_MAP_SWITCH, false),
+                BtnInfo("gps_dot",    "Качество GPS",     MapFragment.PREF_BTN_GPS_DOT, true),
                 BtnInfo("server_dot", "Статус сервера",   MapFragment.PREF_BTN_SERVER_DOT, false),
                 BtnInfo("settings",   "Настройки",        "btn_settings_always",           true),
             )
@@ -2514,7 +2787,7 @@ class SettingsFragment : Fragment() {
             fun buildItems(keys: List<String>): MutableList<Triple<String, String, Boolean>> {
                 return keys.mapNotNull { key ->
                     val info = btnByKey[key] ?: return@mapNotNull null
-                    val alwaysOn = info.key in listOf("stop", "go", "settings")
+                    val alwaysOn = info.key in listOf("settings")
                     val enabled = if (alwaysOn) true else prefs.getBoolean(info.prefKey, info.defaultOn)
                     Triple(info.key, info.label, enabled)
                 }.toMutableList()
@@ -2537,7 +2810,7 @@ class SettingsFragment : Fragment() {
                 val adapter = WidgetOrderAdapter(items, dp) { pos, checked ->
                     val key = items.getOrNull(pos)?.first ?: return@WidgetOrderAdapter
                     val info = btnByKey[key] ?: return@WidgetOrderAdapter
-                    if (info.key in listOf("stop", "go", "settings")) return@WidgetOrderAdapter // always on
+                    if (info.key in listOf("settings")) return@WidgetOrderAdapter // always on
                     prefs.edit().putBoolean(info.prefKey, checked).apply()
                     saveTopBarOrder()
                 }
@@ -2621,18 +2894,14 @@ class SettingsFragment : Fragment() {
 
             // ── Map switch settings (only shown when map switch button is enabled) ──
             if (prefs.getBoolean(MapFragment.PREF_BTN_MAP_SWITCH, false)) {
-                val mapNames = linkedMapOf(
-                    "osm" to "OpenStreetMap",
-                    "satellite" to "Спутник ESRI",
-                    "topo" to "OpenTopoMap",
-                    "google" to "Google Спутник",
-                    "genshtab250" to "Генштаб 250м",
-                    "genshtab500" to "Генштаб 500м",
-                    "ggc500" to "ГГЦ 500м",
-                    "ggc1000" to "ГГЦ 1км",
-                    "topo250" to "Топо 250м",
-                    "topo500" to "Топо 500м",
-                )
+                // Build map list dynamically from all available tileSources (catalog + local)
+                val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                val mapNames = linkedMapOf<String, String>()
+                mapFrag?.getTileSourceKeys()?.forEach { (key, label) -> mapNames[key] = label }
+                if (mapNames.isEmpty()) {
+                    // Fallback if fragment not available
+                    mapNames["osm"] = "OpenStreetMap"
+                }
                 val mapKeys = mapNames.keys.toList()
                 val mapLabels = mapNames.values.toTypedArray()
 
@@ -2765,6 +3034,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun openFilePicker() {
+        if (!LicenseManager.hasFullAccess(requireContext())) { LicenseManager.showLicenseRequired(requireContext()); return }
         filePickerLauncher.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
     }
 
@@ -3419,6 +3689,65 @@ class SettingsFragment : Fragment() {
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    private fun setupMapVisibility(view: View, prefs: android.content.SharedPreferences) {
+        val container = view.findViewById<LinearLayout>(R.id.customSourcesContainer) ?: return
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return
+        val hiddenSet = prefs.getString(MapFragment.PREF_HIDDEN_MAPS, "")
+            ?.split(",")?.filter { it.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+
+        // Add header
+        container.addView(android.widget.TextView(requireContext()).apply {
+            text = "Видимость карт"
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 14f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 32, 0, 8)
+        })
+        container.addView(android.widget.TextView(requireContext()).apply {
+            text = "Снимите галочку чтобы скрыть карту из списка выбора"
+            setTextColor(0xFF888888.toInt()); textSize = 11f
+            setPadding(0, 0, 0, 8)
+        })
+
+        // Base layers
+        val allBases = mapFrag.getTileSources().filter { !it.key.startsWith("offline_") && !it.key.startsWith("custom_") }
+        for ((key, source) in allBases) {
+            container.addView(android.widget.CheckBox(requireContext()).apply {
+                text = source.label
+                isChecked = key !in hiddenSet
+                setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+                setPadding(16, 4, 16, 4)
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) hiddenSet.remove(key) else hiddenSet.add(key)
+                    prefs.edit().putString(MapFragment.PREF_HIDDEN_MAPS, hiddenSet.joinToString(",")).apply()
+                }
+            })
+        }
+
+        // Overlay layers
+        val allOverlays = mapFrag.getOverlaySources().filter { it.key != "none" }
+        if (allOverlays.isNotEmpty()) {
+            container.addView(android.widget.TextView(requireContext()).apply {
+                text = "Оверлеи"
+                setTextColor(0xFF888888.toInt()); textSize = 11f
+                setPadding(0, 16, 0, 4)
+            })
+            for ((key, source) in allOverlays) {
+                container.addView(android.widget.CheckBox(requireContext()).apply {
+                    text = source.label
+                    isChecked = key !in hiddenSet
+                    setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                    buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+                    setPadding(16, 4, 16, 4)
+                    setOnCheckedChangeListener { _, checked ->
+                        if (checked) hiddenSet.remove(key) else hiddenSet.add(key)
+                        prefs.edit().putString(MapFragment.PREF_HIDDEN_MAPS, hiddenSet.joinToString(",")).apply()
+                    }
+                })
+            }
+        }
     }
 
     private val PREF_CUSTOM_SOURCES = "custom_sources_json"

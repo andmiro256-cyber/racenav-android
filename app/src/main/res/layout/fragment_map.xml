@@ -61,6 +61,22 @@
             android:tint="#FFFFFF"
             android:padding="5dp" />
 
+        <!-- Zoom level indicator -->
+        <TextView
+            android:id="@+id/btnZoomLevel"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:gravity="center"
+            android:text="Z0"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textColor="#888888"
+            android:visibility="gone"
+            android:maxLines="1"
+            app:autoSizeTextType="uniform"
+            app:autoSizeMinTextSize="8sp"
+            app:autoSizeMaxTextSize="11sp" />
+
         <!-- Add marker at current position -->
         <ImageButton
             android:id="@+id/btnAddWaypoint"
@@ -121,14 +137,18 @@
         <!-- Battery indicator (top bar) -->
         <TextView
             android:id="@+id/btnBatteryIndicator"
-            android:layout_width="40dp"
+            android:layout_width="44dp"
             android:layout_height="36dp"
             android:gravity="center"
             android:text="--"
             android:textSize="13sp"
             android:textStyle="bold"
             android:textColor="#888888"
-            android:visibility="gone" />
+            android:visibility="gone"
+            android:maxLines="1"
+            app:autoSizeTextType="uniform"
+            app:autoSizeMinTextSize="8sp"
+            app:autoSizeMaxTextSize="13sp" />
 
         <View
             android:layout_width="1dp"
@@ -181,13 +201,26 @@
             android:padding="5dp"
             android:visibility="gone" />
 
+        <!-- GPS quality indicator in top bar -->
+        <TextView
+            android:id="@+id/topBarGpsDot"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:text="🛰️"
+            android:textSize="13sp"
+            android:gravity="center"
+            android:background="@drawable/circle_dot"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="2dp"
+            android:visibility="gone" />
+
         <!-- Server status indicator in top bar -->
         <View
             android:id="@+id/topBarServerDot"
             android:layout_width="12dp"
             android:layout_height="12dp"
             android:background="@drawable/circle_dot"
-            android:layout_marginStart="4dp"
+            android:layout_marginStart="2dp"
             android:layout_marginEnd="4dp"
             android:visibility="gone" />
 
@@ -659,12 +692,17 @@
             android:gravity="center">
             <TextView
                 android:id="@+id/widgetSpeed"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -706,12 +744,17 @@
             android:gravity="center">
             <TextView
                 android:id="@+id/widgetTrackLen"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="0.0"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -730,12 +773,17 @@
             android:gravity="center">
             <TextView
                 android:id="@+id/widgetNextCp"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -754,12 +802,17 @@
             android:gravity="center">
             <TextView
                 android:id="@+id/widgetAltitude"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -779,12 +832,17 @@
             android:visibility="gone">
             <TextView
                 android:id="@+id/widgetChrono"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--:--"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="18sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -804,12 +862,17 @@
             android:visibility="gone">
             <TextView
                 android:id="@+id/widgetTime"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--:--"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="18sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -829,12 +892,17 @@
             android:visibility="gone">
             <TextView
                 android:id="@+id/widgetRemainKm"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -882,12 +950,17 @@
             android:visibility="gone">
             <TextView
                 android:id="@+id/widgetTripmaster"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="0.0"
                 android:textColor="#00E676"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -934,12 +1007,17 @@
             android:visibility="gone">
             <TextView
                 android:id="@+id/widgetBattery"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:gravity="center"
+                android:maxLines="1"
+                app:autoSizeTextType="uniform"
+                app:autoSizeMinTextSize="10sp"
+                app:autoSizeMaxTextSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

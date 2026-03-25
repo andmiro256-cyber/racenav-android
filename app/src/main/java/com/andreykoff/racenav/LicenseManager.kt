@@ -23,10 +23,11 @@ object LicenseManager {
     private const val KEY_LICENSE_UNTIL = "license_until"         // ISO date string
     private const val KEY_SERVER_STATUS = "server_status"         // "active"|"expired"|"none"
     private const val KEY_SERVER_UNTIL = "server_until"           // ISO date string
+    private const val KEY_PLAN = "license_plan"                   // "full"|"license"|null
     private const val KEY_LAST_CHECK = "last_license_check"      // timestamp ms
-    private const val LICENSE_API = "http://87.120.84.254:9222/api/license"
+    private const val LICENSE_API = "http://87.120.84.254/api/license"
 
-    const val TRIAL_DAYS = 30
+    const val TRIAL_DAYS = 20
     private const val CONTACT_TELEGRAM = "https://t.me/Andreykoff"
     private const val CONTACT_EMAIL = "snowwolf888@gmail.com"
 
@@ -138,9 +139,32 @@ object LicenseManager {
         return trialDaysLeft(context) > 0
     }
 
-    /** Can the user use the app (either trial active or activated)? */
-    fun canUse(context: Context): Boolean {
+    /** Can the user use the app? Always true — app works in free mode after trial. */
+    fun canUse(context: Context): Boolean = true
+
+    /** Full access to all features: trial active OR license purchased. */
+    fun hasFullAccess(context: Context): Boolean {
         return isActivated(context) || isTrialActive(context) || canUseCached(context)
+    }
+
+    /** Free mode: trial expired and no license. Map works, premium features blocked. */
+    fun isFreeMode(context: Context): Boolean = !hasFullAccess(context)
+
+    /** Show trial warning: 5 days or less remaining */
+    fun shouldShowTrialWarning(context: Context): Boolean {
+        return isTrialActive(context) && !isActivated(context) && trialDaysLeft(context) <= 5
+    }
+
+    private const val FREE_MODE_MAX_WAYPOINTS = 5
+
+    /** Max waypoints user can create */
+    fun getMaxUserWaypoints(context: Context): Int {
+        return if (hasFullAccess(context)) Int.MAX_VALUE else FREE_MODE_MAX_WAYPOINTS
+    }
+
+    /** Show "license required" toast */
+    fun showLicenseRequired(context: Context) {
+        android.widget.Toast.makeText(context, "Требуется лицензия — info@trophynav.ru", android.widget.Toast.LENGTH_LONG).show()
     }
 
     /**
@@ -238,6 +262,7 @@ object LicenseManager {
                 .putString(KEY_LICENSE_UNTIL, json.optString("license_until", ""))
                 .putString(KEY_SERVER_STATUS, json.optString("server", "none"))
                 .putString(KEY_SERVER_UNTIL, json.optString("server_until", ""))
+                .putString(KEY_PLAN, json.optString("plan", ""))
                 .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
                 .apply()
 
@@ -284,6 +309,15 @@ object LicenseManager {
 
         return false
     }
+
+    /** Get license plan: "full", "license", or null */
+    fun getPlan(context: Context): String? {
+        val plan = getPrefs(context).getString(KEY_PLAN, null)
+        return if (plan.isNullOrEmpty()) null else plan
+    }
+
+    /** Is this a full (Pro+Server) plan? */
+    fun isFullPlan(context: Context): Boolean = getPlan(context) == "full"
 
     /** Is server subscription active? */
     fun isServerActive(context: Context): Boolean {

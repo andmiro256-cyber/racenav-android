@@ -50,6 +50,10 @@ object GpxParser {
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                             name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
+                        "trkseg" -> {
+                            // Insert NaN marker between segments
+                            if (trackPoints.isNotEmpty()) trackPoints.add(Pair(Double.NaN, Double.NaN))
+                        }
                         "trkpt" -> {
                             inTrkpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
@@ -204,15 +208,24 @@ object GpxParser {
         return points
     }
 
-    /** Write track points as GPX string */
+    /** Write track points as GPX string, splitting by NaN markers into separate trkseg */
     fun writeGpx(points: List<Pair<Double, Double>>, name: String = "Трек"): String {
         val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
             appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
-            appendLine("  <trk><name>$safeName</name><trkseg>")
-            for ((lat, lon) in points) appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
-            appendLine("  </trkseg></trk>")
+            appendLine("  <trk><name>$safeName</name>")
+            var inSeg = false
+            for ((lat, lon) in points) {
+                if (lat.isNaN() || lon.isNaN()) {
+                    if (inSeg) { appendLine("  </trkseg>"); inSeg = false }
+                    continue
+                }
+                if (!inSeg) { appendLine("  <trkseg>"); inSeg = true }
+                appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+            }
+            if (inSeg) appendLine("  </trkseg>")
+            appendLine("  </trk>")
             append("</gpx>")
         }
     }

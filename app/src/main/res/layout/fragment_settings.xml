@@ -1222,6 +1222,50 @@
                     android:thumbTint="#FF6F00"
                     android:trackTint="#555555" />
             </LinearLayout>
+            <!-- Track stop filter -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#1E1E1E"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="2dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Фильтр стоянки"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+                <TextView
+                    android:id="@+id/btnStopFilterMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:gravity="center"
+                    android:text="−"
+                    android:textColor="#FFFFFF"
+                    android:textSize="20sp"
+                    android:background="?attr/selectableItemBackgroundBorderless" />
+                <TextView
+                    android:id="@+id/txtStopFilter"
+                    android:layout_width="52dp"
+                    android:layout_height="wrap_content"
+                    android:text="10м"
+                    android:textColor="#FF6F00"
+                    android:textSize="15sp"
+                    android:gravity="center" />
+                <TextView
+                    android:id="@+id/btnStopFilterPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:gravity="center"
+                    android:text="+"
+                    android:textColor="#FFFFFF"
+                    android:textSize="20sp"
+                    android:background="?attr/selectableItemBackgroundBorderless" />
+            </LinearLayout>
             <!-- Recording track color -->
             <LinearLayout
                 android:layout_width="match_parent"
@@ -2066,11 +2110,11 @@
                 android:orientation="vertical"
                 android:layout_marginTop="4dp" />
 
-            <!-- Section: Sync -->
+            <!-- Section: Account & Data -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="СИНХРОНИЗАЦИЯ"
+                android:text="АККАУНТ И ДАННЫЕ"
                 android:tag="tab:network"
                 android:textColor="#888888"
                 android:textSize="11sp"
@@ -2078,6 +2122,7 @@
                 android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp" />
 
+            <!-- Block 1: Account -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -2088,10 +2133,79 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Ключ активации (TND-XXXX-XXXX-XXXX)"
+                    android:text="Email аккаунта"
+                    android:textColor="#AAAAAA"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="6dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <EditText
+                        android:id="@+id/editSyncEmail"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:layout_height="44dp"
+                        android:hint="your@email.com"
+                        android:textColor="#FFFFFF"
+                        android:textColorHint="#555555"
+                        android:textSize="14sp"
+                        android:background="#2A2A2A"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:inputType="textEmailAddress"
+                        android:maxLines="1"
+                        android:imeOptions="actionDone" />
+
+                    <Button
+                        android:id="@+id/btnSaveEmail"
+                        android:layout_width="wrap_content"
+                        android:layout_height="44dp"
+                        android:text="OK"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp"
+                        android:backgroundTint="#FF6F00"
+                        android:layout_marginStart="8dp"
+                        android:minWidth="56dp"
+                        android:padding="0dp" />
+
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtEmailWarning"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="После сохранения изменить email можно только через поддержку"
+                    android:textColor="#FF9800"
+                    android:textSize="11sp"
+                    android:layout_marginTop="4dp"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/txtAccountStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
                     android:textColor="#888888"
                     android:textSize="12sp"
-                    android:layout_marginBottom="6dp" />
+                    android:layout_marginTop="6dp"
+                    android:visibility="gone" />
+
+                <!-- Fallback: manual key entry -->
+                <TextView
+                    android:id="@+id/txtSyncKeyToggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Или введите ключ вручную ▸"
+                    android:textColor="#666666"
+                    android:textSize="11sp"
+                    android:layout_marginTop="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp" />
 
                 <EditText
                     android:id="@+id/editSyncApiKey"
@@ -2105,42 +2219,70 @@
                     android:paddingEnd="12dp"
                     android:inputType="text"
                     android:maxLines="1"
-                    android:imeOptions="actionDone" />
+                    android:imeOptions="actionDone"
+                    android:visibility="gone" />
 
-                <LinearLayout
+            </LinearLayout>
+
+            <!-- Block 2: Route Data -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#1E1E1E"
+                android:padding="16dp"
+                android:layout_marginTop="2dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Данные маршрута"
+                    android:textColor="#AAAAAA"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/txtSyncDataInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginTop="10dp">
+                    android:text="Точек: —, Маршрутов: —"
+                    android:textColor="#888888"
+                    android:textSize="12sp"
+                    android:layout_marginBottom="4dp" />
 
-                    <Button
-                        android:id="@+id/btnSyncPull"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:minHeight="36dp"
-                        android:layout_weight="1"
-                        android:text="📥 Получить WP"
-                        android:textSize="11sp"
-                        android:textColor="#FFFFFF"
-                        android:backgroundTint="#1565C0"
-                        android:textAllCaps="false"
-                        android:layout_marginEnd="6dp" />
+                <TextView
+                    android:id="@+id/txtSyncLastTime"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#666666"
+                    android:textSize="11sp"
+                    android:layout_marginBottom="10dp"
+                    android:visibility="gone" />
 
-                    <Button
-                        android:id="@+id/btnSyncPush"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:minHeight="36dp"
-                        android:layout_weight="1"
-                        android:text="📤 Отправить трек"
-                        android:textSize="11sp"
-                        android:textColor="#FFFFFF"
-                        android:backgroundTint="#1B5E20"
-                        android:textAllCaps="false"
-                        android:layout_marginStart="6dp" />
+                <Button
+                    android:id="@+id/btnSyncPull"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="40dp"
+                    android:text="📥 Получить с Desktop"
+                    android:textSize="13sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#E65100"
+                    android:textAllCaps="false" />
 
-                </LinearLayout>
+                <Button
+                    android:id="@+id/btnSyncPush"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="36dp"
+                    android:text="📤 Отправить трек"
+                    android:textSize="12sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#1B5E20"
+                    android:textAllCaps="false"
+                    android:layout_marginTop="6dp" />
 
                 <TextView
                     android:id="@+id/txtSyncStatus"
@@ -2154,54 +2296,111 @@
 
             </LinearLayout>
 
-            <!-- Section: Backup -->
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- Block 3: Sync Settings -->
+            <LinearLayout
+                android:id="@+id/syncSettingsBlock"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="БЭКАП"
-                android:tag="tab:network"
-                android:textColor="#888888"
-                android:textSize="11sp"
-                android:letterSpacing="0.1"
-                android:layout_marginBottom="8dp"
-                android:layout_marginTop="24dp" />
+                android:orientation="vertical"
+                android:background="#1E1E1E"
+                android:padding="16dp"
+                android:layout_marginTop="2dp">
 
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Настройки синхронизации"
+                    android:textColor="#AAAAAA"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Авто-синхронизация при запуске"
+                        android:textColor="#CCCCCC"
+                        android:textSize="13sp" />
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/switchAutoSync"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="8dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Только по Wi-Fi"
+                        android:textColor="#CCCCCC"
+                        android:textSize="13sp" />
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/switchSyncWifiOnly"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtSyncSettingsHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#666666"
+                    android:textSize="11sp"
+                    android:layout_marginTop="6dp"
+                    android:visibility="gone" />
+
+            </LinearLayout>
+
+            <!-- Block 4: Backup -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:background="#1E1E1E"
                 android:padding="16dp"
+                android:layout_marginTop="2dp"
                 android:tag="tab:network">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Email (для восстановления на новом устройстве)"
-                    android:textColor="#888888"
-                    android:textSize="12sp"
-                    android:layout_marginBottom="6dp" />
+                    android:text="Безопасность"
+                    android:textColor="#AAAAAA"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
 
+                <!-- Hidden email field — shares email from account block -->
                 <EditText
                     android:id="@+id/editBackupEmail"
                     android:layout_width="match_parent"
-                    android:layout_height="44dp"
-                    android:hint="your@email.com"
-                    android:textColor="#FFFFFF"
-                    android:textColorHint="#555555"
-                    android:textSize="14sp"
-                    android:background="#2A2A2A"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:inputType="textEmailAddress"
-                    android:maxLines="1"
-                    android:imeOptions="actionDone" />
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:layout_marginTop="10dp">
+                    android:layout_marginTop="4dp">
 
                     <Button
                         android:id="@+id/btnBackupCreate"
@@ -2252,6 +2451,54 @@
                 android:letterSpacing="0.1"
                 android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp" />
+
+            <!-- License Card -->
+            <LinearLayout
+                android:id="@+id/licenseCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#1A1A2E"
+                android:padding="16dp"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:id="@+id/txtLicenseBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Navigator Pro"
+                    android:textColor="#FFD700"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/txtLicenseLine"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="📱 Navigator Pro — нет лицензии"
+                    android:textColor="#CCCCCC"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="4dp" />
+
+                <TextView
+                    android:id="@+id/txtServerLine"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="📡 Server — нет подписки"
+                    android:textColor="#CCCCCC"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="4dp" />
+
+                <TextView
+                    android:id="@+id/txtLicenseDeviceId"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="#666666"
+                    android:textSize="11sp"
+                    android:layout_marginTop="4dp" />
+
+            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -2309,6 +2556,50 @@
                     android:textSize="12sp"
                     android:lineSpacingExtra="3dp"
                     android:layout_marginTop="8dp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#333333"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="12dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Контакты"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/txtContactEmail"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="info@trophynav.ru"
+                    android:textColor="#FF6F00"
+                    android:textSize="14sp"
+                    android:layout_marginTop="6dp"
+                    android:autoLink="email"
+                    android:linksClickable="true" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Контакты и поддержка — на сайте"
+                    android:textColor="#AAAAAA"
+                    android:textSize="12sp"
+                    android:layout_marginTop="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="https://trophynav.ru"
+                    android:textColor="#FF6F00"
+                    android:textSize="14sp"
+                    android:layout_marginTop="4dp"
+                    android:autoLink="web"
+                    android:linksClickable="true" />
 
             </LinearLayout>
 

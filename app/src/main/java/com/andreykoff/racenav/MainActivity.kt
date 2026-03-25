@@ -13,6 +13,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Head units (Li Auto, Chinese tablets) have large screens with low density (160dpi),
+        // making everything tiny. Scale up density only for this app.
+        // User needs to press "fullscreen" button on Li Auto to avoid letterboxing.
+        val metrics = resources.displayMetrics
+        if (metrics.densityDpi <= 160 && maxOf(metrics.widthPixels, metrics.heightPixels) >= 1920) {
+            val scale = 2.0f
+            metrics.density = scale
+            metrics.scaledDensity = scale
+            metrics.densityDpi = (160 * scale).toInt()
+        }
+
         super.onCreate(savedInstanceState)
 
         // Crash logger — saves stacktrace to /sdcard/Download/racenav_crash.txt
@@ -38,44 +49,41 @@ class MainActivity : AppCompatActivity() {
         // License system
         LicenseManager.ensureInstallTime(this)
 
-        // Anonymous analytics
+        // Anonymous analytics — app always loads (free mode after trial)
         if (savedInstanceState == null) {
-            if (LicenseManager.canUse(this)) {
-                Analytics.sendEvent(this, "launch")
-                // Send diagnostics on every app start (fire-and-forget, non-blocking)
-                DiagnosticsCollector.rotateLog(this)
-                DiagnosticsCollector.sendToServer(this)
-                DiagnosticsCollector.sendPendingIfNeeded(this)
-                supportFragmentManager.beginTransaction()
-                    .replace(R.id.container, MapFragment())
-                    .commit()
-                // Handle file open intent (GPX/WPT/RTE/PLT)
-                handleFileIntent(intent)
+            Analytics.sendEvent(this, if (LicenseManager.hasFullAccess(this)) "launch" else "launch_free")
+            DiagnosticsCollector.rotateLog(this)
+            DiagnosticsCollector.sendToServer(this)
+            DiagnosticsCollector.sendPendingIfNeeded(this)
+            supportFragmentManager.beginTransaction()
+                .replace(R.id.container, MapFragment())
+                .commit()
+            handleFileIntent(intent)
 
-                // Auto-check for updates (non-blocking, 3s delay)
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    checkForAppUpdate()
-                }, 3000)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                checkForAppUpdate()
+            }, 3000)
 
-                // Check license from server in background (non-blocking)
-                Thread {
-                    val ok = LicenseManager.checkLicenseFromServer(this)
-                    if (!ok) {
-                        runOnUiThread {
-                            // License expired on server -- show expired screen
-                            try {
-                                supportFragmentManager.beginTransaction()
-                                    .replace(R.id.container, androidx.fragment.app.Fragment())
-                                    .commitAllowingStateLoss()
-                            } catch (_: Exception) {}
-                            showTrialExpired()
-                        }
+            // Trial warning (5 days or less left)
+            if (LicenseManager.shouldShowTrialWarning(this)) {
+                val days = LicenseManager.trialDaysLeft(this)
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("Пробный период заканчивается")
+                    .setMessage("Осталось $days дн.\n\nПосле окончания запись треков, экспорт, синхронизация и другие функции будут заблокированы.\n\nКарта и навигация продолжат работать.")
+                    .setPositiveButton("Подробнее") { _, _ ->
+                        try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
+                        catch (_: Exception) {}
                     }
-                }.start()
-            } else {
-                Analytics.sendEvent(this, "trial_expired")
-                showTrialExpired()
+                    .setNegativeButton("Позже", null)
+                    .show()
             }
+            // Free mode notification (trial expired)
+            else if (LicenseManager.isFreeMode(this)) {
+                showTrialExpiredDialog()
+            }
+
+            // Check license from server in background
+            Thread { LicenseManager.checkLicenseFromServer(this) }.start()
         }
     }
 
@@ -90,6 +98,10 @@ class MainActivity : AppCompatActivity() {
 
         // Delay slightly to let MapFragment initialize
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!LicenseManager.hasFullAccess(this)) {
+                LicenseManager.showLicenseRequired(this)
+                return@postDelayed
+            }
             try {
                 val fileName = uri.lastPathSegment?.lowercase() ?: ""
                 val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
@@ -166,6 +178,22 @@ class MainActivity : AppCompatActivity() {
         }, 1500)  // wait for MapFragment to fully load
     }
 
+    private fun showTrialExpiredDialog() {
+        val userEmail = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("sync_email", null) ?: ""
+        val emailLine = if (userEmail.isNotEmpty()) "\nВаш email: $userEmail\n" else ""
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Пробный период завершён")
+            .setMessage("Запись треков, экспорт, синхронизация отключены.\nКарта и навигация работают.$emailLine\nДля полного доступа — info@trophynav.ru")
+            .setPositiveButton("trophynav.ru") { _, _ ->
+                try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
+                catch (_: Exception) {}
+            }
+            .setNegativeButton("OK", null)
+            .show()
+    }
+
+    @Deprecated("Use showTrialExpiredDialog() instead")
     private fun showTrialExpired() {
         val pad = 32
         val root = android.widget.LinearLayout(this).apply {
@@ -189,148 +217,68 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 24)
         })
 
+        // Show registered email if any
+        val userEmail = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("sync_email", null) ?: ""
+        if (userEmail.isNotEmpty()) {
+            root.addView(android.widget.TextView(this).apply {
+                text = "Ваш email: $userEmail"
+                setTextColor(0xFF888888.toInt())
+                textSize = 14f
+                setPadding(0, 0, 0, 16)
+            })
+        }
+
         root.addView(android.widget.TextView(this).apply {
-            text = "Для продолжения работы приобретите лицензию или введите ключ активации."
+            text = "Для продолжения работы приобретите лицензию.\nСвяжитесь с нами:"
             setTextColor(0xFFCCCCCC.toInt())
             textSize = 14f
             setPadding(0, 0, 0, 32)
         })
 
-        // License key input
-        val inputKey = android.widget.EditText(this).apply {
-            hint = "TNAV-XXXX-XXXX-XXXX"
-            setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF666666.toInt())
-            textSize = 16f
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-            setBackgroundColor(0xFF1E1E1E.toInt())
-            setPadding(24, 20, 24, 20)
-        }
-        root.addView(inputKey)
-
-        val statusText = android.widget.TextView(this).apply {
-            text = ""
-            setTextColor(0xFFFF4444.toInt())
-            textSize = 13f
-            setPadding(0, 8, 0, 16)
-        }
-        root.addView(statusText)
-
-        // Activate button
-        root.addView(android.widget.Button(this).apply {
-            text = "Активировать"
-            textSize = 15f
-            isAllCaps = false
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFFFF6F00.toInt())
-            setPadding(0, 16, 0, 16)
-            setOnClickListener {
-                val key = inputKey.text.toString()
-                if (LicenseManager.activate(this@MainActivity, key)) {
-                    Analytics.sendEvent(this@MainActivity, "activated")
-                    statusText.text = "✓ Активировано!"
-                    statusText.setTextColor(0xFF22C55E.toInt())
-                    // Restart into map
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        supportFragmentManager.beginTransaction()
-                            .replace(R.id.container, MapFragment())
-                            .commit()
-                    }, 800)
-                } else {
-                    statusText.text = "Неверный ключ"
-                    statusText.setTextColor(0xFFFF4444.toInt())
-                }
-            }
-        })
-
-        // Spacer
-        root.addView(android.view.View(this).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 24)
-        })
-
-        // Device ID display (copyable)
-        val deviceId = LicenseManager.getShortDeviceId(this@MainActivity)
-
+        // Contact: Email
         root.addView(android.widget.TextView(this).apply {
-            text = "ID устройства: $deviceId"
-            setTextColor(0xFF999999.toInt())
-            textSize = 13f
-            setPadding(0, 0, 0, 4)
-        })
-
-        root.addView(android.widget.Button(this).apply {
-            text = "📋 Скопировать ID"
-            textSize = 13f
-            isAllCaps = false
-            setTextColor(0xFFCCCCCC.toInt())
-            setBackgroundColor(0xFF2A2A2A.toInt())
-            setPadding(0, 12, 0, 12)
-            setOnClickListener {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Device ID", deviceId))
-                android.widget.Toast.makeText(this@MainActivity,
-                    "ID скопирован: $deviceId", android.widget.Toast.LENGTH_SHORT).show()
-            }
-        })
-
-        // Spacer
-        root.addView(android.view.View(this).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 16)
-        })
-
-        // Buy via Telegram
-        root.addView(android.widget.Button(this).apply {
-            text = "Написать в Telegram"
-            textSize = 15f
-            isAllCaps = false
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF0088CC.toInt())
-            setPadding(0, 16, 0, 16)
-            setOnClickListener {
-                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse(LicenseManager.getContactUrl()))
-                try { startActivity(intent) } catch (_: Exception) {
-                    android.widget.Toast.makeText(this@MainActivity,
-                        "Telegram не установлен", android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
-        })
-
-        // Spacer
-        root.addView(android.view.View(this).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 8)
-        })
-
-        // Buy via Email
-        root.addView(android.widget.Button(this).apply {
-            text = "Написать на Email"
-            textSize = 15f
-            isAllCaps = false
+            text = "info@trophynav.ru"
             setTextColor(0xFFFF6F00.toInt())
-            setBackgroundColor(0xFF1E1E1E.toInt())
-            setPadding(0, 16, 0, 16)
+            textSize = 16f
+            setPadding(0, 0, 0, 8)
             setOnClickListener {
+                val deviceId = LicenseManager.getShortDeviceId(this@MainActivity)
                 val emailIntent = android.content.Intent(android.content.Intent.ACTION_SENDTO).apply {
-                    data = android.net.Uri.parse("mailto:${LicenseManager.getContactEmail()}")
-                    putExtra(android.content.Intent.EXTRA_SUBJECT, "RaceNav лицензия")
-                    putExtra(android.content.Intent.EXTRA_TEXT, "ID устройства: $deviceId\n\nХочу приобрести лицензию RaceNav.")
+                    data = android.net.Uri.parse("mailto:info@trophynav.ru")
+                    putExtra(android.content.Intent.EXTRA_SUBJECT, "Trophy Navigator — лицензия")
+                    putExtra(android.content.Intent.EXTRA_TEXT, "ID устройства: $deviceId\n\nХочу приобрести лицензию.")
                 }
                 try { startActivity(emailIntent) } catch (_: Exception) {
-                    android.widget.Toast.makeText(this@MainActivity,
-                        "Почтовый клиент не найден", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(this@MainActivity, "Почтовый клиент не найден", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
         })
 
-        // Instructions
+        // Contact: Website
         root.addView(android.widget.TextView(this).apply {
-            text = "Скопируйте ID устройства и отправьте его через Telegram или Email для получения ключа активации."
+            text = "trophynav.ru"
+            setTextColor(0xFFFF6F00.toInt())
+            textSize = 16f
+            setPadding(0, 0, 0, 24)
+            setOnClickListener {
+                try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
+                catch (_: Exception) {}
+            }
+        })
+
+        // Device ID (small, copyable)
+        val deviceId = LicenseManager.getShortDeviceId(this@MainActivity)
+        root.addView(android.widget.TextView(this).apply {
+            text = "ID устройства: $deviceId (нажмите чтобы скопировать)"
             setTextColor(0xFF666666.toInt())
             textSize = 12f
             setPadding(0, 16, 0, 0)
+            setOnClickListener {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Device ID", deviceId))
+                android.widget.Toast.makeText(this@MainActivity, "ID скопирован: $deviceId", android.widget.Toast.LENGTH_SHORT).show()
+            }
         })
 
         val scroll = android.widget.ScrollView(this).apply {
@@ -378,11 +326,6 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Идёт запись трека")
                 .setMessage("Трек записывается. Что сделать перед выходом?")
                 .setPositiveButton("Сохранить и выйти") { _, _ ->
-                    val ctx = this
-                    ctx.startService(
-                        android.content.Intent(ctx, TrackingService::class.java)
-                            .apply { action = TrackingService.ACTION_STOP }
-                    )
                     mapFrag?.saveTrackToFile()
                     stopAllServices()
                     finishAndRemoveTask()
@@ -406,22 +349,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopAllServices()
         super.onDestroy()
     }
 
     private fun stopAllServices() {
-        if (TrackingService.isRunning) {
-            startService(
-                android.content.Intent(this, TrackingService::class.java)
-                    .apply { action = TrackingService.ACTION_STOP }
-            )
-        }
+        // Stop TraccarService FIRST — so when TrackingService stops,
+        // it won't restore notification (TraccarService already dead)
         if (TraccarService.isRunning) {
-            startService(
-                android.content.Intent(this, TraccarService::class.java)
-                    .apply { action = TraccarService.ACTION_STOP }
-            )
+            stopService(android.content.Intent(this, TraccarService::class.java))
         }
+        if (TrackingService.isRunning) {
+            stopService(android.content.Intent(this, TrackingService::class.java))
+        }
+        // Force remove notification in case of race condition
+        NotificationHelper.cancel(this)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {

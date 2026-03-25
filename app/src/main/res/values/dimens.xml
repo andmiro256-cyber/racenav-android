@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MapLibre gesture tuning: Yandex Navigator-like responsiveness -->
+    <!-- Rotation momentum: higher = more inertia after finger release (default 1.3dp) -->
+    <dimen name="maplibre_angular_velocity_multiplier">2.0dp</dimen>
+    <!-- Lower = rotation momentum triggers more easily (default 0.10dp) -->
+    <dimen name="maplibre_minimum_angular_velocity">0.05dp</dimen>
+    <!-- Lower = zoom gesture starts faster (default 0.6dp) -->
+    <dimen name="maplibre_minimum_scale_speed">0.3dp</dimen>
+    <!-- Lower = zoom during rotation starts faster (default 0.9dp) -->
+    <dimen name="maplibre_minimum_angled_scale_speed">0.5dp</dimen>
+    <!-- Lower = zoom momentum triggers more easily (default 225dp) -->
+    <dimen name="maplibre_minimum_scale_velocity">150dp</dimen>
+    <!-- Lower = panning starts sooner (default 4dp) -->
+    <dimen name="maplibre_minimum_move_threshold">2dp</dimen>
+    <!-- Lower = rotate+zoom simultaneous easier (default 75dp) -->
+    <dimen name="maplibre_minimum_scale_span_when_rotating">40dp</dimen>
+</resources>

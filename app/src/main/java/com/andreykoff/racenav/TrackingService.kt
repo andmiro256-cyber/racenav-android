@@ -45,6 +45,7 @@ class TrackingService : Service() {
     private var fusedClient: com.google.android.gms.location.FusedLocationProviderClient? = null
     private var fusedCallback: com.google.android.gms.location.LocationCallback? = null
     private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var lastLocationTimeMs = 0L
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
@@ -66,6 +67,7 @@ class TrackingService : Service() {
         val minAccuracy = prefs.getInt(MapFragment.PREF_TRACK_MIN_ACCURACY, 50).toFloat()
         val minDistance = prefs.getInt(MapFragment.PREF_TRACK_MIN_DISTANCE, 2).toDouble()
         val onlyMoving = prefs.getBoolean(MapFragment.PREF_TRACK_ONLY_MOVING, false)
+        val stopFilter = prefs.getInt(MapFragment.PREF_TRACK_STOP_FILTER, MapFragment.DEFAULT_TRACK_STOP_FILTER).toDouble()
 
         // Skip points with poor accuracy
         if (loc.hasAccuracy() && loc.accuracy > minAccuracy) return
@@ -74,16 +76,28 @@ class TrackingService : Service() {
         if (onlyMoving && loc.hasSpeed() && loc.speed < 0.3f) return
 
         val newPoint = Pair(loc.latitude, loc.longitude)
+        val now = System.currentTimeMillis()
+        val dist = if (trackPoints.isEmpty()) Double.MAX_VALUE else distanceM(trackPoints.last(), newPoint)
+
+        // Stop filter: standing still (speed < 1 m/s) AND distance < threshold => skip
+        val isStationary = loc.hasSpeed() && loc.speed < 1.0f
+        if (stopFilter > 0 && isStationary && dist < stopFilter) return
+
+        // Segment break: big gap (>200m) + time pause (>30s) → insert NaN marker
+        if (trackPoints.isNotEmpty() && dist > 200 && lastLocationTimeMs > 0 && (now - lastLocationTimeMs) > 30_000) {
+            trackPoints.add(Pair(Double.NaN, Double.NaN))
+        }
 
         // Distance filter
-        if (trackPoints.isEmpty() || distanceM(trackPoints.last(), newPoint) > minDistance) {
-            if (trackPoints.isNotEmpty()) trackLengthM += distanceM(trackPoints.last(), newPoint)
+        if (trackPoints.isEmpty() || dist > minDistance) {
+            if (trackPoints.isNotEmpty() && !trackPoints.last().first.isNaN()) trackLengthM += dist
             trackPoints.add(newPoint)
             updateNotification()
 
             // Auto-save every 10 points to survive app restarts
             if (trackPoints.size % 10 == 0) autoSaveTrack()
         }
+        lastLocationTimeMs = now
 
         // Широковещание для MapFragment (обновление UI)
         sendBroadcast(Intent(BROADCAST_LOCATION).apply {
@@ -151,12 +165,20 @@ class TrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START  -> startTracking(clearPoints = true)
-            ACTION_RESUME -> startTracking(clearPoints = false)
-            ACTION_STOP   -> stopTracking()
+        if (intent == null) {
+            // Android restarted the service after kill — resume if was recording
+            val wasRecording = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(MapFragment.PREF_WAS_RECORDING, false)
+            if (wasRecording && !isRunning) startTracking(clearPoints = false)
+            else stopSelf()
+        } else {
+            when (intent.action) {
+                ACTION_START  -> startTracking(clearPoints = true)
+                ACTION_RESUME -> startTracking(clearPoints = false)
+                ACTION_STOP   -> stopTracking()
+            }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -165,11 +187,12 @@ class TrackingService : Service() {
     }
 
     private fun startTracking(clearPoints: Boolean) {
+        if (isRunning && !clearPoints) return  // guard against double start on resume
         if (clearPoints) {
             trackPoints.clear()
             trackLengthM = 0.0
         }
-        startTimeMs = System.currentTimeMillis()
+        if (clearPoints || startTimeMs == 0L) startTimeMs = System.currentTimeMillis()
         isRunning   = true
 
         // Mark recording active in prefs so app knows to offer resume on restart
@@ -182,6 +205,7 @@ class TrackingService : Service() {
         // Acquire WakeLock to prevent GPS stopping in deep sleep
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "RaceNav::GPS")
+        wakeLock?.setReferenceCounted(false)
         wakeLock?.acquire(30 * 60 * 1000L) // 30 min timeout, re-acquired on next location update
 
         val intervalSec = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
@@ -201,6 +225,9 @@ class TrackingService : Service() {
         isRunning = false
         NotificationHelper.trackingText = null
         autoSaveTrack()  // Final save before stopping
+        // Clear recording flag so START_STICKY doesn't auto-resume after explicit stop
+        getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, false).apply()
 
         // Release WakeLock
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -231,6 +258,7 @@ class TrackingService : Service() {
     }
 
     private fun distanceM(a: Pair<Double, Double>, b: Pair<Double, Double>): Double {
+        if (a.first.isNaN() || b.first.isNaN()) return Double.MAX_VALUE
         val R    = 6371000.0
         val lat1 = Math.toRadians(a.first);  val lat2 = Math.toRadians(b.first)
         val dLat = lat2 - lat1;              val dLon = Math.toRadians(b.second - a.second)
@@ -239,7 +267,8 @@ class TrackingService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (isRunning) stopTracking()
+        // Don't stop tracking — Samsung/Vivo call onTaskRemoved on swipe-away
+        if (isRunning) autoSaveTrack()  // checkpoint only
         super.onTaskRemoved(rootIntent)
     }
 

@@ -26,14 +26,20 @@ class LiveUsersPoller(
         val course: Double,
         val battery: Int?,
         val status: String,
-        val lastUpdate: String?
+        val lastUpdate: String?,
+        val plan: String? = null
     )
 
     companion object {
         const val POLL_INTERVAL_MS = 4000L
     }
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
+        .build()
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
 
@@ -100,8 +106,9 @@ class LiveUsersPoller(
                             val battery = if (d.isNull("battery")) null else d.optInt("battery")
                             val status = d.optString("status", "unknown")
                             val lastUpdate = if (d.isNull("lastUpdate")) null else d.optString("lastUpdate")
+                            val plan = d.optString("plan", "").ifEmpty { null }
 
-                            devices.add(LiveDevice(deviceId, name, lat, lon, speed, course, battery, status, lastUpdate))
+                            devices.add(LiveDevice(deviceId, name, lat, lon, speed, course, battery, status, lastUpdate, plan))
 
                             val feature = JSONObject()
                                 .put("type", "Feature")

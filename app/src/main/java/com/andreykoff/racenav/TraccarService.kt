@@ -76,11 +76,19 @@ class TraccarService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> startTraccar()
-            ACTION_STOP  -> stopTraccar()
+        if (intent == null) {
+            // Android restarted service — resume if was enabled
+            val wasEnabled = getSharedPreferences(MapFragment.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                .getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
+            if (wasEnabled && !isRunning) startTraccar()
+            else stopSelf()
+        } else {
+            when (intent.action) {
+                ACTION_START -> startTraccar()
+                ACTION_STOP  -> stopTraccar()
+            }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun startTraccar() {
@@ -92,7 +100,7 @@ class TraccarService : Service() {
         // Acquire WakeLock to keep CPU running in background
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RaceNav::TraccarLive")
-            .apply { acquire() }
+            .apply { setReferenceCounted(false); acquire(60 * 60 * 1000L) }
 
         NotificationHelper.traccarText = "📡 Ожидание GPS"
         startForeground(NotificationHelper.NOTIF_ID, NotificationHelper.buildNotification(this))
@@ -174,7 +182,7 @@ class TraccarService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (isRunning) stopTraccar()
+        // Don't stop Traccar — Samsung/Vivo call this on swipe-away
         super.onTaskRemoved(rootIntent)
     }
 
