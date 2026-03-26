@@ -14,7 +14,7 @@ import java.net.URL
 
 object BackupManager {
 
-    const val BACKUP_SERVER = "http://87.120.84.254:9222"
+    const val BACKUP_SERVER = "http://87.120.84.254"
     private const val TAG = "BackupManager"
 
     // Keys excluded from backup (device-specific, should not be restored)

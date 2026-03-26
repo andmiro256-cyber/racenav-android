@@ -289,6 +289,8 @@ class MapFragment : Fragment() {
     private var isDownloadSelecting = false
     private var downloadFirstCorner: LatLng? = null
     private var downloadBounds: BoundsRect? = null
+    private var polygonPicker: PolygonAreaPicker? = null
+    private var polygonSnackbar: com.google.android.material.snackbar.Snackbar? = null
     private var downloadRectSource: GeoJsonSource? = null
 
     companion object {
@@ -1205,12 +1207,22 @@ class MapFragment : Fragment() {
         layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
 
         overlayKeys.filter { it != "none" }.forEachIndexed { idx, key ->
-            val ov = overlaySources[key] ?: return@forEachIndexed
-            if (ov.urls.isEmpty()) return@forEachIndexed
-            val ovTiles = ov.urls.joinToString(",") { "\"$it\"" }
-            val ovScheme = if (ov.tms) ",\"scheme\":\"tms\"" else ""
-            sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
-            layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
+            // Try online overlay first, then offline tile source
+            val ov = overlaySources[key]
+            val offlineSrc = if (ov == null) tileSources[key] else null
+            if (ov != null) {
+                if (ov.urls.isEmpty()) return@forEachIndexed
+                val ovTiles = ov.urls.joinToString(",") { "\"$it\"" }
+                val ovScheme = if (ov.tms) ",\"scheme\":\"tms\"" else ""
+                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
+                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
+            } else if (offlineSrc != null) {
+                // Offline overlay — use tile source URL (localhost tile server)
+                val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
+                val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
+                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$ovScheme}")
+                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":0.7}}")
+            }
         }
 
         return """{"version":8,"glyphs":"https://fonts.openmaptiles.org/{fontstack}/{range}.pbf","sources":{$sources},"layers":[$layers]}"""
@@ -2968,6 +2980,32 @@ class MapFragment : Fragment() {
         binding.btnLayers.setOnClickListener { showLayerPicker() }
 
         // Quick map switch button
+        binding.btnMapSwitch.setOnLongClickListener {
+            // Long press: show offline layers submenu if current map is offline
+            val current = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getString(PREF_TILE_KEY, "") ?: ""
+            if (current.startsWith(OFFLINE_TILE_KEY)) {
+                val info = offlineMaps.find { it.key == current }
+                if (info != null) {
+                    // Extract area name from displayName (before " (")
+                    val areaName = info.name.substringBefore(" (").trim()
+                    showOfflineLayersMenu(areaName)
+                    return@setOnLongClickListener true
+                }
+            }
+            // Show list of all offline areas with layer toggles
+            val ctx = context ?: return@setOnLongClickListener false
+            val areas = OfflineAreasManager.loadAreas(ctx)
+            if (areas.isEmpty()) {
+                Toast.makeText(ctx, "Нет скачанных карт", Toast.LENGTH_SHORT).show()
+                return@setOnLongClickListener true
+            }
+            val names = areas.map { "${it.name} (${it.layersDescription()})" }.toTypedArray()
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("Оффлайн карты — слои")
+                .setItems(names) { _, which -> showOfflineLayersMenu(areas[which].name) }
+                .show()
+            true
+        }
         binding.btnMapSwitch.setOnClickListener {
             val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return@setOnClickListener
             val mapA = prefs.getString(PREF_MAP_SWITCH_A, "ggc500") ?: "ggc500"
@@ -3183,6 +3221,49 @@ class MapFragment : Fragment() {
     }
 
     fun getOfflineMaps(): List<OfflineMapInfo> = offlineMaps.toList()
+
+    /** Show submenu for offline map: toggle overlay layers on/off */
+    fun showOfflineLayersMenu(areaName: String) {
+        val ctx = context ?: return
+        val area = OfflineAreasManager.loadAreas(ctx).find { it.name == areaName } ?: run {
+            Toast.makeText(ctx, "Область не найдена", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (area.overlays.isEmpty()) {
+            Toast.makeText(ctx, "Нет оверлейных слоёв", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = area.overlays.map { it.label }.toTypedArray()
+        val checked = area.overlays.map { it.enabled }.toBooleanArray()
+
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Слои: ${area.name}")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                checked[which] = isChecked
+            }
+            .setPositiveButton("Применить") { _, _ ->
+                area.overlays.forEachIndexed { i, ov ->
+                    if (ov.enabled != checked[i]) {
+                        OfflineAreasManager.updateOverlayEnabled(ctx, area.id, ov.key, checked[i])
+                        // Toggle overlay visibility in tile sources
+                        val ovKey = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }?.key
+                        if (ovKey != null) {
+                            if (checked[i]) {
+                                // Re-enable: add to current overlays
+                                currentOverlayKeys.add(ovKey)
+                            } else {
+                                currentOverlayKeys.remove(ovKey)
+                            }
+                        }
+                    }
+                }
+                // Reload style with updated overlays
+                loadTileStyle(currentTileKey, currentOverlayKeys)
+                Toast.makeText(ctx, "Слои обновлены", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
 
     fun getTileSources(): Map<String, TileSource> = tileSources.toMap()
 
@@ -6743,17 +6824,45 @@ class MapFragment : Fragment() {
                 setPadding(16, 14, 16, 14)
             })
         } else {
-            offlineMaps.forEach { info ->
-                offlineGroup.addView(RadioButton(requireContext()).apply {
+            // Group offline maps by area (base maps only, skip overlays)
+            val areas = context?.let { OfflineAreasManager.loadAreas(it).filter { a -> a.status == "complete" } } ?: emptyList()
+            val areaBaseKeys = areas.map { a -> offlineMaps.find { it.name.startsWith(a.name) && !it.name.contains("_слой_") }?.key }.filterNotNull().toSet()
+
+            val dp = resources.displayMetrics.density
+            offlineMaps.filter { info -> !info.name.contains("_слой_") }.forEach { info ->
+                val rb = RadioButton(requireContext()).apply {
                     text = info.name; tag = info.key
                     isChecked = info.key == currentTileKey
                     setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
                     setPadding(16, 14, 16, 14); id = View.generateViewId()
-                })
+                }
+                offlineGroup.addView(rb)
+                // Show ⚙️ gear button below radio if area has overlays
+                val area = areas.find { a -> info.name.startsWith(a.name) && a.overlays.isNotEmpty() }
+                if (area != null) {
+                    offlineGroup.addView(android.widget.TextView(requireContext()).apply {
+                        text = "   ⚙️ Слои (${area.enabledOverlays().size}/${area.overlays.size})"
+                        setTextColor(0xFF888888.toInt()); textSize = 11f
+                        setPadding((40 * dp).toInt(), 0, 16, (4 * dp).toInt())
+                        setOnClickListener {
+                            dialog.dismiss()
+                            showOfflineLayersMenu(area.name)
+                        }
+                    })
+                }
             }
             offlineGroup.setOnCheckedChangeListener { group, id ->
                 val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
-                loadTileStyle(key, currentOverlayKeys)
+                val info = offlineMaps.find { it.key == key }
+                val area = info?.let { i -> areas.find { a -> i.name.startsWith(a.name) } }
+                val overlayKeys = mutableSetOf<String>()
+                if (area != null) {
+                    area.enabledOverlays().forEach { ov ->
+                        val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
+                        if (ovInfo != null) overlayKeys.add(ovInfo.key)
+                    }
+                }
+                loadTileStyle(key, overlayKeys)
                 dialog.dismiss()
             }
         }
@@ -7232,22 +7341,145 @@ class MapFragment : Fragment() {
         if (!LicenseManager.hasFullAccess(ctx0)) { LicenseManager.showLicenseRequired(ctx0); return }
         // Request storage permission on Android 9 and below
         if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
-            val ctx = context ?: return
-            if (androidx.core.content.ContextCompat.checkSelfPermission(ctx,
-                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != 
+            if (androidx.core.content.ContextCompat.checkSelfPermission(ctx0,
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
                     android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 300)
-                Toast.makeText(ctx, "Разрешите доступ к хранилищу", Toast.LENGTH_LONG).show()
+                Toast.makeText(ctx0, "Разрешите доступ к хранилищу", Toast.LENGTH_LONG).show()
                 return
             }
         }
+        // Start polygon picker mode
+        val map = mapboxMap ?: return
+        val style = map.style ?: return
+        polygonPicker = PolygonAreaPicker(map).also { it.start(style) }
         isDownloadSelecting = true
-        downloadFirstCorner = null
-        downloadBounds = null
-        Toast.makeText(context, "Нажмите на карту — первый угол области", Toast.LENGTH_LONG).show()
+        showHint("Поставьте 3-8 точек на карте для обозначения области")
+        showPolygonControls()
+    }
+
+    private fun showPolygonControls() {
+        val picker = polygonPicker ?: return
+        val text = "Точек: ${picker.points.size} / ${PolygonAreaPicker.MAX_POINTS}" +
+            if (picker.canFinish()) " • Нажмите Готово" else ""
+
+        val existing = polygonSnackbar
+        if (existing != null && existing.isShown) {
+            // Update text of existing snackbar
+            existing.setText(text)
+            return
+        }
+        // Create new snackbar
+        val snackbar = com.google.android.material.snackbar.Snackbar.make(
+            _binding?.root ?: return, text,
+            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
+        )
+        snackbar.setAction("Готово") { finishPolygonSelection() }
+        snackbar.view.setBackgroundColor(0xFF1A1A2E.toInt())
+        polygonSnackbar = snackbar
+        snackbar.show()
+    }
+
+    fun stopDownloadMode() {
+        polygonPicker?.stop()
+        polygonPicker = null
+        polygonSnackbar?.dismiss()
+        polygonSnackbar = null
+        isDownloadSelecting = false
+        removeDownloadRect()
+    }
+
+    private fun finishPolygonSelection() {
+        val ctx = context ?: return
+        val picker = polygonPicker ?: return
+        if (!picker.canFinish()) {
+            Toast.makeText(ctx, "Минимум ${PolygonAreaPicker.MIN_POINTS} точки", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val area = picker.finish() ?: return
+        isDownloadSelecting = false
+
+        // Build tile source list for LayerSelector (base + overlays)
+        val sources = linkedMapOf<String, Pair<String, Boolean>>()
+        tileSources.forEach { (key, src) -> sources[key] = Pair(src.label, false) }
+        overlaySources.filter { it.key != "none" }.forEach { (key, src) -> sources[key] = Pair(src.label, true) }
+
+        LayerSelectorBottomSheet(ctx, area, sources, onCancel = { stopDownloadMode() }) { config ->
+            // TODO Sprint 2: enqueue download task
+            Toast.makeText(ctx, "Загрузка ${config.allLayers.size} слоёв, z${config.minZoom}-z${config.maxZoom}...", Toast.LENGTH_LONG).show()
+            val polygonPairsForEstimate = area.polygon.map { Pair(it.latitude, it.longitude) }
+            val estimate = SizeEstimator.estimate(area.boundingBox, listOf(config.selectedBase), config.selectedOverlays, config.minZoom, config.maxZoom, polygonPairsForEstimate)
+            Log.i("TileDownload", "Download: ${estimate.totalTiles} tiles, ${estimate.formatSize()}, area=${String.format("%.0f", area.areaKm2)}km²")
+
+            // Build download task with proper file naming
+            val mapsDir = getRaceNavDir(ctx, "maps").absolutePath
+            val mapName = config.name
+            val baseLabel = tileSources[config.selectedBase]?.label ?: config.selectedBase
+            val layers = mutableListOf<LayerDownload>()
+            // Base layer: "Карелия.mbtiles"
+            val baseFile = OfflineAreasManager.baseFileName(mapName, ctx)
+            layers.add(LayerDownload(config.selectedBase, baseLabel, "$mapsDir/$baseFile"))
+            // Overlay layers: "Карелия_слой_Топо 250м.mbtiles"
+            config.selectedOverlays.forEach { key ->
+                val ovLabel = overlaySources[key]?.label ?: key
+                val ovFile = OfflineAreasManager.overlayFileName(mapName, ovLabel, ctx)
+                layers.add(LayerDownload(key, ovLabel, "$mapsDir/$ovFile"))
+            }
+            val polygonPairs = area.polygon.map { Pair(it.latitude, it.longitude) }
+            val task = DownloadTask(mapName, layers, area.boundingBox, polygonPairs, config.minZoom, config.maxZoom)
+
+            // Save to areas.json registry
+            val areaId = java.util.UUID.randomUUID().toString().take(8)
+            val offlineArea = OfflineAreasManager.OfflineArea(
+                id = areaId, name = mapName,
+                baseKey = config.selectedBase, baseLabel = baseLabel,
+                baseFile = baseFile,
+                overlays = config.selectedOverlays.mapIndexed { i, key ->
+                    val ovLabel = overlaySources[key]?.label ?: key
+                    val ovFileName = java.io.File(layers[i + 1].outputPath).name
+                    OfflineAreasManager.OfflineOverlay(key, ovLabel, ovFileName)
+                }.toMutableList(),
+                minZoom = config.minZoom, maxZoom = config.maxZoom,
+                areaKm2 = area.areaKm2,
+                createdAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            )
+            OfflineAreasManager.saveArea(ctx, offlineArea)
+            TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
+            TileDownloadManager.onProgressUpdate = { progress -> updateDownloadIndicator(progress) }
+            TileDownloadManager.onComplete = { onDownloadComplete() }
+            TileDownloadManager.startDownload(ctx, task)
+            _binding?.downloadIndicator?.visibility = View.VISIBLE
+            _binding?.downloadIndicator?.setOnClickListener {
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle("Отменить загрузку?")
+                    .setMessage("Загружено ${TileDownloadManager.downloaded.get()} / ${TileDownloadManager.totalTiles.get()} тайлов")
+                    .setPositiveButton("Отменить") { _, _ ->
+                        TileDownloadManager.stopDownload()
+                        _binding?.downloadIndicator?.visibility = View.GONE
+                        Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Продолжить", null)
+                    .show()
+            }
+            polygonPicker?.stop()
+            polygonPicker = null
+        }.show()
     }
 
     private fun handleDownloadTap(latLng: LatLng) {
+        val picker = polygonPicker
+        if (picker != null && picker.isActive) {
+            // Polygon mode — add point
+            if (picker.addPoint(latLng)) {
+                showHint("Точек: ${picker.points.size} / ${PolygonAreaPicker.MAX_POINTS}" +
+                    if (picker.canFinish()) " • Нажмите Готово" else "")
+                showPolygonControls()
+            } else {
+                Toast.makeText(context, "Максимум ${PolygonAreaPicker.MAX_POINTS} точек", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        // Legacy rectangle mode (fallback)
         if (downloadFirstCorner == null) {
             downloadFirstCorner = latLng
             Toast.makeText(context, "Нажмите на карту — второй угол", Toast.LENGTH_SHORT).show()
@@ -7609,7 +7841,7 @@ class MapFragment : Fragment() {
                 layers.add(LayerDownload(key, label, java.io.File(mapsDir, "$safeName.mbtiles").absolutePath))
             }
 
-            val task = DownloadTask(mapName, layers, bounds, minZoom, maxZoom)
+            val task = DownloadTask(mapName, layers, bounds, null, minZoom, maxZoom)
 
             // Provide tile source info to download manager
             TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
@@ -7654,6 +7886,11 @@ class MapFragment : Fragment() {
         context?.let { ctx ->
             val task = TileDownloadManager.lastTask
             DiagnosticsCollector.logEvent(ctx, "DL complete: ${task?.name ?: "?"}")
+            // Mark area as complete in registry
+            val areas = OfflineAreasManager.loadAreas(ctx)
+            areas.find { it.name == task?.name && it.status == "downloading" }?.let {
+                OfflineAreasManager.markComplete(ctx, it.id)
+            }
         }
         b.dlProgressText.text = "✅ Готово!"
         b.dlProgress.visibility = View.GONE
@@ -7663,41 +7900,25 @@ class MapFragment : Fragment() {
             b.dlProgress.visibility = View.VISIBLE
         }, 3000)
 
-        // Register downloaded maps: only the base layer as offline map,
-        // overlay names included in display name for reference
+        // Register downloaded maps using OfflineAreasManager
         val task = TileDownloadManager.lastTask
         if (task != null && task.layers.isNotEmpty()) {
-            // First layer is always the base map
             val baseLayer = task.layers.first()
             val baseFile = java.io.File(baseLayer.outputPath)
             if (baseFile.exists() && baseFile.length() > 0) {
-                // Build display name: "Name (BaseLabel + overlay1, overlay2)"
-                val overlayLabels = task.layers.drop(1).filter {
-                    val f = java.io.File(it.outputPath)
-                    f.exists() && f.length() > 0
-                }.map { it.layerLabel }
-
-                val displayName = if (overlayLabels.isNotEmpty()) {
-                    "${task.name} (${baseLayer.layerLabel} + ${overlayLabels.joinToString(", ")})"
-                } else {
-                    "${task.name} (${baseLayer.layerLabel})"
-                }
-
+                // Register base map as offline tile source (for MapLibre)
+                val area = context?.let { OfflineAreasManager.loadAreas(it).find { a -> a.name == task.name } }
+                val displayName = area?.let { "${it.name} (${it.layersDescription()})" }
+                    ?: "${task.name} (${baseLayer.layerLabel})"
                 val key = addOfflineMap(baseFile.absolutePath, displayName)
                 if (key != null) {
-                    Log.d("TileDownload", "Registered offline map: $displayName -> $key (${baseFile.length()} bytes)")
-                    // Save overlay paths keyed by offline map key for future use
-                    val overlayPaths = task.layers.drop(1).filter {
-                        val f = java.io.File(it.outputPath)
-                        f.exists() && f.length() > 0
-                    }.map { org.json.JSONObject().put("key", it.layerKey).put("path", it.outputPath) }
-                    // Also register each overlay .mbtiles as a separate offline map
-                    task.layers.drop(1).forEach { overlayLayer ->
-                        val overlayFile = java.io.File(overlayLayer.outputPath)
-                        if (overlayFile.exists() && overlayFile.length() > 0) {
-                            val overlayName = "${task.name} — ${overlayLayer.layerLabel}"
-                            addOfflineMap(overlayFile.absolutePath, overlayName)
-                            Log.d("TileDownload", "Registered overlay: $overlayName (${overlayFile.length()} bytes)")
+                    Log.d("TileDownload", "Registered offline: $displayName → $key")
+                    // Register overlays as separate offline sources (for layer toggling)
+                    task.layers.drop(1).forEach { ovLayer ->
+                        val ovFile = java.io.File(ovLayer.outputPath)
+                        if (ovFile.exists() && ovFile.length() > 0) {
+                            addOfflineMap(ovFile.absolutePath, "${task.name}_слой_${ovLayer.layerLabel}")
+                            Log.d("TileDownload", "Registered overlay: ${ovLayer.layerLabel}")
                         }
                     }
                 }

@@ -58,4 +58,11 @@ object NotificationHelper {
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .notify(NOTIF_ID, buildNotification(context))
     }
+
+    fun cancel(context: Context) {
+        trackingText = null
+        traccarText = null
+        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .cancel(NOTIF_ID)
+    }
 }

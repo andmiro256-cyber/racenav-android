@@ -65,7 +65,7 @@ class NavigationCompassView @JvmOverloads constructor(
         const val COLOR_TICK     = 0xFFFFFFFF.toInt()  // white ticks
         const val COLOR_WHITE    = 0xFFFFFFFF.toInt()
         const val COLOR_GREEN    = 0xFF4CAF50.toInt()
-        const val LERP_SPEED     = 15f   // degrees per frame
+        const val LERP_SPEED     = 30f   // degrees per frame
     }
 
     /** Currently displayed arrow angle — lerped toward [relativeBearing]. */

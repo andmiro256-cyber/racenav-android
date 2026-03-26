@@ -1147,6 +1147,40 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Clear cache button
+        view.findViewById<View>(R.id.btnClearCache)?.setOnClickListener {
+            val ctx = requireContext()
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("Очистить кеш карт?")
+                .setMessage("Кешированные тайлы будут удалены. Скачанные оффлайн-карты останутся.")
+                .setPositiveButton("Очистить") { _, _ ->
+                    try {
+                        // MapLibre tile cache: filesDir/.mapbox/ (only cache files, not offline DB)
+                        val mapboxDir = java.io.File(ctx.filesDir, ".mapbox")
+                        var cleared = 0L
+                        if (mapboxDir.exists()) {
+                            mapboxDir.walkBottomUp().forEach { f ->
+                                // Keep mbgl-offline.db (downloaded offline maps)
+                                if (f.isFile && !f.name.contains("offline")) {
+                                    cleared += f.length()
+                                    f.delete()
+                                }
+                            }
+                        }
+                        // Also clear app's internal cache dir
+                        ctx.cacheDir.listFiles()?.forEach { f ->
+                            if (f.isFile) { cleared += f.length(); f.delete() }
+                        }
+                        val mb = cleared / 1_048_576
+                        Toast.makeText(ctx, "Кеш очищен ($mb МБ)", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+
         // ── Account & Data ──
         val editSyncEmail = view.findViewById<EditText>(R.id.editSyncEmail)
         val editApiKey = view.findViewById<EditText>(R.id.editSyncApiKey)

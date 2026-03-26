@@ -14,6 +14,7 @@ data class DownloadTask(
     val name: String,
     val layers: List<LayerDownload>,
     val bounds: BoundsRect,
+    val polygon: List<Pair<Double, Double>>? = null,  // lat/lon pairs for polygon filter
     val minZoom: Int,
     val maxZoom: Int
 )
@@ -92,7 +93,18 @@ object TileDownloadManager {
         downloaded.set(0)
         error = null
 
-        val tilesPerLayer = estimateTiles(task.bounds, task.minZoom, task.maxZoom)
+        val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
+            var count = 0
+            for (z in task.minZoom..task.maxZoom) {
+                val n = 1 shl z
+                for (x in lonToTileX(task.bounds.west, n)..lonToTileX(task.bounds.east, n)) {
+                    for (y in latToTileY(task.bounds.north, n)..latToTileY(task.bounds.south, n)) {
+                        if (pointInPolygon(tileCenterLat(y, z), tileCenterLon(x, z), task.polygon)) count++
+                    }
+                }
+            }
+            count
+        } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
         totalTiles.set(tilesPerLayer * task.layers.size)
         bytesTotal.set(0)
         Log.d("TileDownload", "startDownload: ${task.layers.size} layers, $tilesPerLayer tiles/layer, zoom ${task.minZoom}-${task.maxZoom}")
@@ -143,6 +155,30 @@ object TileDownloadManager {
         )
     }
 
+    /** Ray-casting point-in-polygon test */
+    private fun pointInPolygon(lat: Double, lon: Double, polygon: List<Pair<Double, Double>>): Boolean {
+        var inside = false
+        var j = polygon.size - 1
+        for (i in polygon.indices) {
+            val yi = polygon[i].first; val xi = polygon[i].second
+            val yj = polygon[j].first; val xj = polygon[j].second
+            if ((yi > lat) != (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+                inside = !inside
+            }
+            j = i
+        }
+        return inside
+    }
+
+    /** Get center lat/lon of a tile */
+    private fun tileCenterLat(y: Int, z: Int): Double {
+        val n = Math.PI - 2.0 * Math.PI * (y.toDouble() + 0.5) / (1 shl z)
+        return Math.toDegrees(Math.atan(Math.sinh(n)))
+    }
+    private fun tileCenterLon(x: Int, z: Int): Double {
+        return (x.toDouble() + 0.5) / (1 shl z) * 360.0 - 180.0
+    }
+
     private fun downloadLayerSync(context: Context, layer: LayerDownload, bounds: BoundsRect, minZoom: Int, maxZoom: Int) {
         val dbFile = File(layer.outputPath)
         dbFile.parentFile?.mkdirs()
@@ -170,12 +206,19 @@ object TileDownloadManager {
             return
         }
 
-        // Collect tiles
+        // Collect tiles (filtered by polygon if available)
+        val polygon = lastTask?.polygon
         val tiles = mutableListOf<Triple<Int, Int, Int>>()
         for (z in minZoom..maxZoom) {
             val n = 1 shl z
             for (x in lonToTileX(bounds.west, n)..lonToTileX(bounds.east, n)) {
                 for (y in latToTileY(bounds.north, n)..latToTileY(bounds.south, n)) {
+                    if (polygon != null && polygon.size >= 3) {
+                        // Filter: only tiles whose center falls inside the polygon
+                        val centerLat = tileCenterLat(y, z)
+                        val centerLon = tileCenterLon(x, z)
+                        if (!pointInPolygon(centerLat, centerLon, polygon)) continue
+                    }
                     tiles.add(Triple(x, y, z))
                 }
             }

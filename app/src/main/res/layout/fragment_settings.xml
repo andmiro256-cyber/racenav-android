@@ -1873,6 +1873,21 @@
                     android:tint="#FFFFFF" />
             </LinearLayout>
 
+            <Button
+                android:id="@+id/btnClearCache"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Очистить кеш"
+                android:textColor="#FF5252"
+                android:textSize="12sp"
+                android:backgroundTint="#2A2A2A"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="4dp"
+                android:minWidth="0dp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                style="@style/Widget.MaterialComponents.Button.TextButton" />
+
             <!-- Section: Download maps -->
             <TextView
                 android:layout_width="wrap_content"
