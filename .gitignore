@@ -13,3 +13,4 @@ app/build/
 *.aab
 firebase-debug.log
 server/
+app/google-services.json
