@@ -18,16 +18,18 @@ import com.mapbox.mapboxsdk.geometry.LatLng
  * - Оценка размера (обновляется в реальном времени)
  * - Кнопка "Скачать"
  */
+data class SourceInfo(val label: String, val isOverlay: Boolean, val maxZoom: Int = 19)
+
 class LayerSelectorBottomSheet(
     private val context: Context,
     private val area: PolygonArea,
-    private val tileSources: Map<String, Pair<String, Boolean>>,  // key → (label, isOverlay)
+    private val tileSources: Map<String, SourceInfo>,  // key → SourceInfo
     private val onCancel: (() -> Unit)? = null,
     private val onDownload: (config: LayerSelectionConfig) -> Unit
 ) {
     companion object {
         const val MIN_ZOOM = 8
-        const val MAX_ZOOM = 17
+        const val MAX_ZOOM = 19
         const val DEFAULT_MIN_ZOOM = 10
         const val DEFAULT_MAX_ZOOM = 15
     }
@@ -41,8 +43,17 @@ class LayerSelectorBottomSheet(
 
     private var nameInput: EditText? = null
     private var downloadClicked = false
+    private var seekMaxRef: SeekBar? = null
 
     fun show() {
+        // Reset state for fresh show
+        downloadClicked = false
+        selectedBase = ""
+        selectedOverlays.clear()
+        minZoom = DEFAULT_MIN_ZOOM
+        maxZoom = DEFAULT_MAX_ZOOM
+        seekMaxRef = null
+
         val dp = context.resources.displayMetrics.density
         val dialog = BottomSheetDialog(context, com.google.android.material.R.style.Theme_Design_BottomSheetDialog)
 
@@ -93,13 +104,13 @@ class LayerSelectorBottomSheet(
         })
 
         // Base maps section
-        val baseMaps = tileSources.filter { !it.value.second }
+        val baseMaps = tileSources.filter { !it.value.isOverlay }
         if (baseMaps.isNotEmpty()) {
             root.addView(sectionLabel("БАЗОВАЯ КАРТА", dp))
             val radioGroup = RadioGroup(context)
-            baseMaps.entries.forEachIndexed { i, (key, pair) ->
+            baseMaps.entries.forEachIndexed { i, (key, info) ->
                 val rb = RadioButton(context).apply {
-                    text = pair.first
+                    text = "${info.label} (z${info.maxZoom})"
                     setTextColor(Color.WHITE)
                     textSize = 15f
                     buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF9800.toInt())
@@ -115,18 +126,24 @@ class LayerSelectorBottomSheet(
             radioGroup.setOnCheckedChangeListener { group, checkedId ->
                 val rb = group.findViewById<RadioButton>(checkedId)
                 selectedBase = rb?.tag as? String ?: ""
+                // Update max zoom slider to match selected base map
+                val baseMaxZ = tileSources[selectedBase]?.maxZoom ?: MAX_ZOOM
+                if (maxZoom > baseMaxZ || maxZoom == DEFAULT_MAX_ZOOM) {
+                    maxZoom = baseMaxZ.coerceAtMost(MAX_ZOOM)
+                    seekMaxRef?.progress = maxZoom - MIN_ZOOM
+                }
                 updateEstimate()
             }
             root.addView(radioGroup)
         }
 
         // Overlays section
-        val overlays = tileSources.filter { it.value.second }
+        val overlays = tileSources.filter { it.value.isOverlay }
         if (overlays.isNotEmpty()) {
             root.addView(sectionLabel("СЛОИ (можно несколько)", dp))
-            for ((key, pair) in overlays) {
+            for ((key, info) in overlays) {
                 val cb = CheckBox(context).apply {
-                    text = pair.first
+                    text = "${info.label} (z${info.maxZoom})"
                     setTextColor(Color.WHITE)
                     textSize = 15f
                     buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF9800.toInt())
@@ -151,7 +168,6 @@ class LayerSelectorBottomSheet(
         root.addView(txtZoomRange)
 
         // Min/Max zoom seekbars
-        var seekMaxRef: SeekBar? = null
 
         root.addView(TextView(context).apply {
             text = "Минимум"

@@ -98,6 +98,7 @@ object OfflineAreasManager {
         return File(dir, AREAS_FILE)
     }
 
+    @Synchronized
     fun loadAreas(context: Context): List<OfflineArea> {
         val file = getAreasFile(context)
         if (!file.exists()) return emptyList()
@@ -125,9 +126,13 @@ object OfflineAreasManager {
         val areas = loadAreas(context).toMutableList()
         val area = areas.find { it.id == areaId } ?: return
         val mapsDir = MapFragment.getRaceNavDir(context, "maps")
-        // Remove from runtime (tileSources, tileServer)
-        onRemoveOfflineMap?.invoke(area.baseFile)
-        area.overlays.forEach { onRemoveOfflineMap?.invoke("${area.name}_слой_${it.label}") }
+        // Remove from runtime — pass display names matching offlineMaps registration
+        val namesToRemove = mutableListOf<String>()
+        // Base map was registered with display name containing area name
+        namesToRemove.add(area.name)
+        // Overlays registered as "{name}_слой_{label}"
+        area.overlays.forEach { namesToRemove.add("${area.name}_слой_${it.label}") }
+        namesToRemove.forEach { onRemoveOfflineMap?.invoke(it) }
         // Delete files
         File(mapsDir, area.baseFile).delete()
         area.overlays.forEach { File(mapsDir, it.file).delete() }

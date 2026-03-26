@@ -71,9 +71,20 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         val x   = parts[2].toIntOrNull() ?: return notFound()
         val y   = parts[3].removeSuffix(".png").toIntOrNull() ?: return notFound()
 
-        val data = queryTile(idx, z, x, y) ?: return notFound()
+        val data = queryTile(idx, z, x, y)
+        if (data == null || data.isEmpty()) return notFound()
+        // Detect image format by magic bytes
+        val mime = when {
+            data.size >= 2 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() -> "image/jpeg"
+            data.size >= 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() -> "image/png"
+            data.size >= 12 && data[0] == 0x52.toByte() && data[1] == 0x49.toByte()
+                && data[2] == 0x46.toByte() && data[3] == 0x46.toByte()
+                && data[8] == 0x57.toByte() && data[9] == 0x45.toByte()
+                && data[10] == 0x42.toByte() && data[11] == 0x50.toByte() -> "image/webp"
+            else -> "image/png"
+        }
         return newFixedLengthResponse(
-            Response.Status.OK, "image/png",
+            Response.Status.OK, mime,
             ByteArrayInputStream(data), data.size.toLong()
         )
     }

@@ -89,6 +89,7 @@ class PolygonAreaPicker(
     fun finish(): PolygonArea? {
         if (!canFinish()) return null
         val hull = ConvexHull.compute(points)
+        if (hull.size < 3) return null  // collinear points — degenerate polygon
         val bbox = hull.toBoundingBox()
         val areaKm2 = hull.calculateAreaKm2()
         return PolygonArea(hull, bbox, areaKm2)

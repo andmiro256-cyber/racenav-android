@@ -756,6 +756,8 @@ class MapFragment : Fragment() {
             checkEmailPrompt()
             // Warn if battery optimization is active (kills GPS in background)
             checkBatteryOptimization()
+            // Cleanup incomplete offline map downloads from previous session
+            context?.let { OfflineAreasManager.cleanupIncomplete(it) }
             // Tap on live user marker → show info card
             map.addOnMapClickListener { latLng ->
                 if (trackEditorMode && !editMoveMode) {
@@ -3207,6 +3209,12 @@ class MapFragment : Fragment() {
         tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"))
         saveOfflineMapsToPrefs()
         return key
+    }
+
+    /** Remove offline map by display name (searches offlineMaps by name) */
+    fun removeOfflineMapByName(displayName: String) {
+        val info = offlineMaps.find { it.name.startsWith(displayName) } ?: return
+        removeOfflineMap(info.key)
     }
 
     fun removeOfflineMap(key: String) {
@@ -7396,13 +7404,19 @@ class MapFragment : Fragment() {
             Toast.makeText(ctx, "Минимум ${PolygonAreaPicker.MIN_POINTS} точки", Toast.LENGTH_SHORT).show()
             return
         }
-        val area = picker.finish() ?: return
+        val area = picker.finish()
+        if (area == null) {
+            Toast.makeText(ctx, "Точки на одной линии — расставьте шире", Toast.LENGTH_LONG).show()
+            return
+        }
         isDownloadSelecting = false
 
-        // Build tile source list for LayerSelector (base + overlays)
-        val sources = linkedMapOf<String, Pair<String, Boolean>>()
-        tileSources.forEach { (key, src) -> sources[key] = Pair(src.label, false) }
-        overlaySources.filter { it.key != "none" }.forEach { (key, src) -> sources[key] = Pair(src.label, true) }
+        // Build tile source list for LayerSelector (online base + overlays, no offline/custom)
+        val sources = linkedMapOf<String, SourceInfo>()
+        tileSources.filter { !it.key.startsWith(OFFLINE_TILE_KEY) && !it.key.startsWith("custom_") }
+            .forEach { (key, src) -> sources[key] = SourceInfo(src.label, false, src.maxZoom) }
+        overlaySources.filter { it.key != "none" }
+            .forEach { (key, src) -> sources[key] = SourceInfo(src.label, true, src.maxZoom) }
 
         LayerSelectorBottomSheet(ctx, area, sources, onCancel = { stopDownloadMode() }) { config ->
             // TODO Sprint 2: enqueue download task
@@ -7463,6 +7477,8 @@ class MapFragment : Fragment() {
             }
             polygonPicker?.stop()
             polygonPicker = null
+            polygonSnackbar?.dismiss()
+            polygonSnackbar = null
         }.show()
     }
 
