@@ -198,6 +198,16 @@ object LicenseManager {
             .apply()
     }
 
+    /** Activate license from server response (email-based multi-device) */
+    fun activateFromServer(context: Context, plan: String) {
+        getPrefs(context).edit()
+            .putBoolean(KEY_ACTIVATED, true)
+            .putString(KEY_LICENSE_STATUS, "active")
+            .putString(KEY_PLAN, plan.ifEmpty { null })
+            .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
+            .apply()
+    }
+
     /** Generate a valid license key for a given device ID */
     fun generateKeyForDevice(deviceId: String): String {
         val input = "$deviceId:racenav-salt-2026"

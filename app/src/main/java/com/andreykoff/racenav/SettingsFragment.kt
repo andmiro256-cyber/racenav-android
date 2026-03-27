@@ -1267,8 +1267,11 @@ class SettingsFragment : Fragment() {
                             }
                             val licensed = result.optBoolean("licensed", false)
                             val plan = result.optString("plan", "")
+                            val ctx = context ?: return@launch
                             if (licensed) {
-                                txtAccountStatus.text = "Лицензия: $plan"
+                                // Activate license locally — email has active license on another device
+                                LicenseManager.activateFromServer(ctx, plan)
+                                txtAccountStatus.text = "Лицензия: ${plan.ifEmpty { "активна" }}"
                                 txtAccountStatus.setTextColor(0xFF4CAF50.toInt())
                             } else {
                                 txtAccountStatus.text = "Email зарегистрирован"
