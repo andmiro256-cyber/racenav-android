@@ -1219,11 +1219,13 @@ class MapFragment : Fragment() {
                 sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
                 layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
             } else if (offlineSrc != null) {
-                // Offline overlay — use tile source URL (localhost tile server)
+                // Offline source — base maps at full opacity, sub-overlays at 0.7
+                val isSubOverlay = offlineMaps.find { it.key == key }?.name?.contains("_слой_") == true
+                val opacity = if (isSubOverlay) 0.7 else 1.0
                 val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
                 sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$ovScheme}")
-                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":0.7}}")
+                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
             }
         }
 
@@ -1241,19 +1243,12 @@ class MapFragment : Fragment() {
 
     private fun loadTileStyle(baseKey: String, overlayKeys: Set<String>) {
         currentTileKey = baseKey
-        // Filter out offline overlays when switching to online base map
-        val filtered = if (!baseKey.startsWith(OFFLINE_TILE_KEY)) {
-            overlayKeys.filter { !it.startsWith(OFFLINE_TILE_KEY) }.toMutableSet()
-        } else {
-            overlayKeys.toMutableSet()
-        }
-        currentOverlayKeys = filtered
-        // Save ORIGINAL overlayKeys (not filtered) so offline overlays survive round-trip
+        currentOverlayKeys = overlayKeys.toMutableSet()
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putString(PREF_TILE_KEY, baseKey)
             ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
             ?.apply()
-        val json = buildStyleJson(baseKey, filtered)
+        val json = buildStyleJson(baseKey, overlayKeys)
         // Warn if offline and using online tiles
         if (!baseKey.startsWith(OFFLINE_TILE_KEY) && !isNetworkAvailable()) {
             Toast.makeText(context, "Нет интернета — тайлы из кэша", Toast.LENGTH_SHORT).show()
@@ -6833,7 +6828,7 @@ class MapFragment : Fragment() {
         }
 
         // Offline layers (right column)
-        val offlineGroup = view.findViewById<RadioGroup>(R.id.offlineRadioGroup)
+        val offlineGroup = view.findViewById<android.widget.LinearLayout>(R.id.offlineRadioGroup)
         if (offlineMaps.isEmpty()) {
             offlineGroup.addView(android.widget.TextView(requireContext()).apply {
                 text = "Не загружено"; setTextColor(0xFF888888.toInt()); textSize = 12f
@@ -6842,18 +6837,37 @@ class MapFragment : Fragment() {
         } else {
             // Group offline maps by area (base maps only, skip overlays)
             val areas = context?.let { OfflineAreasManager.loadAreas(it).filter { a -> a.status == "complete" } } ?: emptyList()
-            val areaBaseKeys = areas.map { a -> offlineMaps.find { it.name.startsWith(a.name) && !it.name.contains("_слой_") }?.key }.filterNotNull().toSet()
 
             val dp = resources.displayMetrics.density
             offlineMaps.filter { info -> !info.name.contains("_слой_") }.forEach { info ->
-                val rb = RadioButton(requireContext()).apply {
+                val cb = android.widget.CheckBox(requireContext()).apply {
                     text = info.name; tag = info.key
-                    isChecked = info.key == currentTileKey
+                    isChecked = info.key in currentOverlayKeys
                     setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
                     setPadding(16, 14, 16, 14); id = View.generateViewId()
+                    buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+                    setOnCheckedChangeListener { _, checked ->
+                        val area = areas.find { a -> info.name.startsWith(a.name) }
+                        if (checked) {
+                            currentOverlayKeys.add(info.key)
+                            // Auto-enable area overlays (sub-layers)
+                            area?.enabledOverlays()?.forEach { ov ->
+                                val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
+                                if (ovInfo != null) currentOverlayKeys.add(ovInfo.key)
+                            }
+                        } else {
+                            currentOverlayKeys.remove(info.key)
+                            // Remove area overlays too
+                            area?.enabledOverlays()?.forEach { ov ->
+                                val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
+                                if (ovInfo != null) currentOverlayKeys.remove(ovInfo.key)
+                            }
+                        }
+                        loadTileStyle(currentTileKey, currentOverlayKeys)
+                    }
                 }
-                offlineGroup.addView(rb)
-                // Show ⚙️ gear button below radio if area has overlays
+                offlineGroup.addView(cb)
+                // Show ⚙️ gear button below checkbox if area has overlays
                 val area = areas.find { a -> info.name.startsWith(a.name) && a.overlays.isNotEmpty() }
                 if (area != null) {
                     offlineGroup.addView(android.widget.TextView(requireContext()).apply {
@@ -6867,24 +6881,10 @@ class MapFragment : Fragment() {
                     })
                 }
             }
-            offlineGroup.setOnCheckedChangeListener { group, id ->
-                val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
-                val info = offlineMaps.find { it.key == key }
-                val area = info?.let { i -> areas.find { a -> i.name.startsWith(a.name) } }
-                val overlayKeys = mutableSetOf<String>()
-                if (area != null) {
-                    area.enabledOverlays().forEach { ov ->
-                        val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
-                        if (ovInfo != null) overlayKeys.add(ovInfo.key)
-                    }
-                }
-                loadTileStyle(key, overlayKeys)
-                dialog.dismiss()
-            }
         }
 
         // Overlay layers — checkboxes (multiple selection)
-        val overlayContainer = view.findViewById<RadioGroup>(R.id.overlayRadioGroup)
+        val overlayContainer = view.findViewById<android.widget.LinearLayout>(R.id.overlayRadioGroup)
         // Replace RadioGroup with plain LinearLayout behavior — add CheckBoxes
         overlaySources.filter { it.key != "none" && it.key !in hiddenMaps }.forEach { (key, source) ->
             overlayContainer.addView(android.widget.CheckBox(requireContext()).apply {

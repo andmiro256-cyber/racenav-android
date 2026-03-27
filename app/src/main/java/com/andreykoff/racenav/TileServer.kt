@@ -181,6 +181,27 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         databases.clear()
     }
 
-    private fun notFound() =
-        newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "tile not found")
+    /** Return 1x1 transparent PNG so MapLibre shows the layer below instead of error */
+    private fun notFound(): Response {
+        val png = TRANSPARENT_PNG
+        return newFixedLengthResponse(
+            Response.Status.OK, "image/png",
+            ByteArrayInputStream(png), png.size.toLong()
+        )
+    }
+
+    companion object {
+        /** 1x1 transparent PNG (67 bytes) */
+        private val TRANSPARENT_PNG = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,            // IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,            // 1x1
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15.toByte(), 0xC4.toByte(), 0x89.toByte(),
+            0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,            // IDAT chunk
+            0x78, 0x9C.toByte(), 0x62, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+            0xE5.toByte(), 0x27.toByte(), 0xDE.toByte(), 0xFC.toByte(),
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,            // IEND chunk
+            0xAE.toByte(), 0x42.toByte(), 0x60.toByte(), 0x82.toByte()
+        )
+    }
 }
