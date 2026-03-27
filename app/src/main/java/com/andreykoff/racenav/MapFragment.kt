@@ -135,6 +135,14 @@ class MapFragment : Fragment() {
         // Battery
         updateBatteryLevel()
     }
+    // BroadcastReceiver для обновления виджета заряда батареи
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+            updateBatteryLevel()
+        }
+    }
+
     // BroadcastReceiver для статуса синхронизации с сервером
     private val traccarStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -3209,7 +3217,8 @@ class MapFragment : Fragment() {
         if (!ok) return null
         val info = OfflineMapInfo(key, displayName, path)
         offlineMaps.add(info)
-        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"))
+        val maxZoom = tileServer?.getMaxZoom(index) ?: 19
+        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom)
         saveOfflineMapsToPrefs()
         return key
     }
@@ -3321,7 +3330,8 @@ class MapFragment : Fragment() {
                     ensureTileServer()
                     if (tileServer?.openDatabase(idx, path) == true) {
                         offlineMaps.add(OfflineMapInfo(key, name, path))
-                        tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$idx/{z}/{x}/{y}.png"))
+                        val maxZoom = tileServer?.getMaxZoom(idx) ?: 19
+                        tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom)
                     }
                 }
             }
@@ -7222,6 +7232,8 @@ class MapFragment : Fragment() {
             context?.registerReceiver(locationReceiver, filter)
             context?.registerReceiver(traccarStatusReceiver, traccarFilter)
         }
+        // ACTION_BATTERY_CHANGED — sticky broadcast, не требует exported флага
+        context?.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         // StateFlow collector — works even when broadcast is blocked (Vivo/Android 16)
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -7313,6 +7325,7 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onPause()
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(traccarStatusReceiver) } catch (_: Exception) {}
+        try { context?.unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
     }
     override fun onStop() {
         super.onStop()

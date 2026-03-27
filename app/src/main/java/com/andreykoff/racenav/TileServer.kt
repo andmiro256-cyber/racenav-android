@@ -62,6 +62,35 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         databases.remove(index)?.db?.close()
     }
 
+    /** Read effective max zoom from MBTiles metadata, fallback to MAX(zoom_level) from tiles table.
+     *  For RMaps uses MAX(z). Returns 19 if nothing found. */
+    fun getMaxZoom(index: Int): Int {
+        val entry = databases[index] ?: return 19
+        val db = entry.db
+        // MBTiles: try metadata table first
+        if (entry.format == DbFormat.MBTILES) {
+            try {
+                db.rawQuery("SELECT value FROM metadata WHERE name='maxzoom'", null).use { c ->
+                    if (c.moveToFirst()) c.getString(0).toIntOrNull()?.let { return it }
+                }
+            } catch (_: Exception) {}
+            try {
+                db.rawQuery("SELECT MAX(zoom_level) FROM tiles", null).use { c ->
+                    if (c.moveToFirst()) return c.getInt(0)
+                }
+            } catch (_: Exception) {}
+        }
+        // RMaps: MAX(z)
+        if (entry.format == DbFormat.RMAPS) {
+            try {
+                db.rawQuery("SELECT MAX(z) FROM tiles", null).use { c ->
+                    if (c.moveToFirst()) return c.getInt(0)
+                }
+            } catch (_: Exception) {}
+        }
+        return 19
+    }
+
     override fun serve(session: IHTTPSession): Response {
         // Expect URI: /{mapIndex}/{z}/{x}/{y}.png
         val parts = session.uri.trim('/').split("/")
