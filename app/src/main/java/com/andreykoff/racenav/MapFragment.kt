@@ -1241,13 +1241,19 @@ class MapFragment : Fragment() {
 
     private fun loadTileStyle(baseKey: String, overlayKeys: Set<String>) {
         currentTileKey = baseKey
-        currentOverlayKeys = overlayKeys.toMutableSet()
-        // Save selection so it survives rotation/restart
+        // Filter out offline overlays when switching to online base map
+        val filtered = if (!baseKey.startsWith(OFFLINE_TILE_KEY)) {
+            overlayKeys.filter { !it.startsWith(OFFLINE_TILE_KEY) }.toMutableSet()
+        } else {
+            overlayKeys.toMutableSet()
+        }
+        currentOverlayKeys = filtered
+        // Save ORIGINAL overlayKeys (not filtered) so offline overlays survive round-trip
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putString(PREF_TILE_KEY, baseKey)
             ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
             ?.apply()
-        val json = buildStyleJson(baseKey, overlayKeys)
+        val json = buildStyleJson(baseKey, filtered)
         // Warn if offline and using online tiles
         if (!baseKey.startsWith(OFFLINE_TILE_KEY) && !isNetworkAvailable()) {
             Toast.makeText(context, "Нет интернета — тайлы из кэша", Toast.LENGTH_SHORT).show()
@@ -3013,10 +3019,11 @@ class MapFragment : Fragment() {
             val mapA = prefs.getString(PREF_MAP_SWITCH_A, "ggc500") ?: "ggc500"
             val mapB = prefs.getString(PREF_MAP_SWITCH_B, "google") ?: "google"
             val current = prefs.getString(PREF_TILE_KEY, "osm") ?: "osm"
-            val overlayKeys = prefs.getString(PREF_OVERLAY_KEY, "none") ?: "none"
+            val overlayKeys = prefs.getString(PREF_OVERLAY_KEY, "")?.split(",")
+                ?.filter { it.isNotBlank() && it != "none" }?.toSet() ?: emptySet()
             val next = if (current == mapA) mapB else mapA
             val nextName = tileSources[next]?.label ?: next
-            loadTileStyle(next, overlayKeys.split(",").toSet())
+            loadTileStyle(next, overlayKeys)
             showHint("🗺 $nextName")
         }
 
@@ -3165,10 +3172,11 @@ class MapFragment : Fragment() {
         val mapA = prefs.getString(PREF_MAP_SWITCH_A, firstKey) ?: firstKey
         val mapB = prefs.getString(PREF_MAP_SWITCH_B, secondKey) ?: secondKey
         val current = prefs.getString(PREF_TILE_KEY, "osm") ?: "osm"
-        val overlayKeys = prefs.getString(PREF_OVERLAY_KEY, "none") ?: "none"
+        val overlayKeys = prefs.getString(PREF_OVERLAY_KEY, "")?.split(",")
+            ?.filter { it.isNotBlank() && it != "none" }?.toSet() ?: emptySet()
         val next = if (current == mapA) mapB else mapA
         val nextName = tileSources[next]?.label ?: next
-        loadTileStyle(next, overlayKeys.split(",").toSet())
+        loadTileStyle(next, overlayKeys)
         showHint("🗺 $nextName")
     }
 
