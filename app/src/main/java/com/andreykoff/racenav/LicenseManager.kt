@@ -2,7 +2,10 @@ package com.andreykoff.racenav
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.MediaDrm
+import android.os.Build
 import android.provider.Settings
+import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -66,6 +69,14 @@ object LicenseManager {
             return uuid
         }
 
+        // Check external file (survives Clear Data, not uninstall)
+        uuid = readExternalUuid(context)
+        if (uuid != null) {
+            prefs.edit().putString(KEY_DEVICE_UUID, uuid).apply()
+            backupPrefs.edit().putString(KEY_BACKUP_UUID, uuid).apply()
+            return uuid
+        }
+
         // Generate new UUID, seeded with ANDROID_ID for extra uniqueness
         val androidId = getAndroidId(context)
         uuid = if (androidId.isNotEmpty() && androidId != "9774d56d682e549c") {
@@ -76,10 +87,57 @@ object LicenseManager {
             UUID.randomUUID().toString()
         }
 
-        // Store in both prefs
+        // Store in all three locations
         prefs.edit().putString(KEY_DEVICE_UUID, uuid).apply()
         backupPrefs.edit().putString(KEY_BACKUP_UUID, uuid).apply()
+        writeExternalUuid(context, uuid)
         return uuid
+    }
+
+    private fun readExternalUuid(context: Context): String? {
+        return try {
+            val file = File(context.getExternalFilesDir(null), "device_id.txt")
+            if (file.exists()) {
+                val id = file.readText().trim()
+                if (id.length >= 32) id else null
+            } else null
+        } catch (_: Exception) { null }
+    }
+
+    private fun writeExternalUuid(context: Context, uuid: String) {
+        try {
+            val file = File(context.getExternalFilesDir(null), "device_id.txt")
+            file.writeText(uuid)
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * Hardware fingerprint: SHA-256 of stable device properties.
+     * Survives Clear Data and reinstall. Used for server-side deduplication.
+     */
+    @SuppressLint("HardwareIds")
+    fun getHardwareFingerprint(context: Context): String {
+        val parts = mutableListOf<String>()
+        parts.add(Build.MANUFACTURER)
+        parts.add(Build.MODEL)
+        parts.add(Build.BOARD)
+        parts.add(Build.HARDWARE)
+        parts.add(getAndroidId(context))
+        // MediaDrm Widevine ID — stable across reinstalls
+        try {
+            val widevineUuid = UUID(-0x121074568629b532L, -0x5c37d8232ae2de13L)
+            val drm = MediaDrm(widevineUuid)
+            try {
+                val id = drm.getPropertyByteArray(MediaDrm.PROPERTY_DEVICE_UNIQUE_ID)
+                parts.add(id.joinToString("") { "%02x".format(it) })
+            } finally {
+                drm.close()
+            }
+        } catch (_: Exception) { }
+
+        val input = parts.joinToString("|")
+        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     @SuppressLint("HardwareIds")

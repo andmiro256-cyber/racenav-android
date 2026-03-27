@@ -1255,7 +1255,13 @@ class SettingsFragment : Fragment() {
                                 conn.doOutput = true
                                 conn.connectTimeout = 10000; conn.readTimeout = 10000
                                 val model = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
-                                conn.outputStream.write("""{"email":"$email","deviceId":"$deviceId","deviceType":"android","model":"$model"}""".toByteArray())
+                                val hwFp = LicenseManager.getHardwareFingerprint(requireContext())
+                                val payload = org.json.JSONObject().apply {
+                                    put("email", email); put("deviceId", deviceId)
+                                    put("deviceType", "android"); put("model", model)
+                                    put("hwFingerprint", hwFp)
+                                }
+                                conn.outputStream.write(payload.toString().toByteArray())
                                 try {
                                     val body = conn.inputStream.bufferedReader().readText()
                                     org.json.JSONObject(body)
