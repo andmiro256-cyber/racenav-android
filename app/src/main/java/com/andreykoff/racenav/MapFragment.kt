@@ -212,6 +212,8 @@ class MapFragment : Fragment() {
     private var userBaseZoom = -1.0 // user's preferred zoom; auto-zoom adjusts relative to this
     private var userDragged = false  // true = user moved map manually, pause following
     private var smoothedBearing = -1.0  // EMA-сглаженный курс, -1 = не инициализирован
+    private var smoothedZoom = -1.0      // EMA-сглаженный зум, -1 = не инициализирован
+    private var smoothedTilt = 0.0       // EMA-сглаженный 3D-наклон
     private var bearingFrozen = true      // true = курсор заморожен (стоим)
     private var lastValidBearing = 0f     // последний валидный bearing для freeze
     private var prevFreezeCheckLat = 0.0
@@ -3489,10 +3491,16 @@ class MapFragment : Fragment() {
         updateLoadedTrackOnMap()
         applyLoadedTrackStyle()
         if (points.isNotEmpty()) {
-            mapboxMap?.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(loadedTrackPoints.first(), 12.0), 1000
-            )
-            Toast.makeText(context, "Трек загружен: ${points.size} точек", Toast.LENGTH_SHORT).show()
+            val firstValid = loadedTrackPoints.firstOrNull { !it.latitude.isNaN() && !it.longitude.isNaN() }
+            if (firstValid != null) {
+                mapboxMap?.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(firstValid, 12.0), 1000
+                )
+            }
+            val realCount = points.count { !it.first.isNaN() && !it.second.isNaN() }
+            val segCount = points.count { it.first.isNaN() } + 1
+            val segInfo = if (segCount > 1) ", $segCount сегментов" else ""
+            Toast.makeText(context, "Трек загружен: $realCount точек$segInfo", Toast.LENGTH_SHORT).show()
         }
         saveTrackToPrefs()
     }
@@ -3500,13 +3508,32 @@ class MapFragment : Fragment() {
     private fun updateLoadedTrackOnMap() {
         val style = mapboxMap?.style ?: return
         if (loadedTrackPoints.size < 2) return
-        val coords = JSONArray()
-        loadedTrackPoints.forEach { coords.put(JSONArray().put(it.longitude).put(it.latitude)) }
-        style.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)?.setGeoJson(
+        // Split by NaN markers into separate segments (same logic as recording track)
+        val segments = mutableListOf<JSONArray>()
+        var current = JSONArray()
+        for (pt in loadedTrackPoints) {
+            if (pt.latitude.isNaN() || pt.longitude.isNaN()) {
+                if (current.length() >= 2) segments.add(current)
+                current = JSONArray()
+            } else {
+                current.put(JSONArray().put(pt.longitude).put(pt.latitude))
+            }
+        }
+        if (current.length() >= 2) segments.add(current)
+        if (segments.isEmpty()) return
+
+        val geojson = if (segments.size == 1) {
             JSONObject().put("type", "Feature")
-                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", coords))
-                .put("properties", JSONObject()).toString()
-        )
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", segments[0]))
+                .put("properties", JSONObject())
+        } else {
+            val multiCoords = JSONArray()
+            segments.forEach { multiCoords.put(it) }
+            JSONObject().put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "MultiLineString").put("coordinates", multiCoords))
+                .put("properties", JSONObject())
+        }
+        style.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
     }
 
     private fun advanceWaypoint() {
@@ -5484,7 +5511,13 @@ class MapFragment : Fragment() {
         // Save up to 5000 points to avoid prefs size limits
         val pts = if (loadedTrackPoints.size > 5000) loadedTrackPoints.take(5000) else loadedTrackPoints
         val arr = org.json.JSONArray()
-        pts.forEach { arr.put(org.json.JSONArray().put(it.latitude).put(it.longitude)) }
+        pts.forEach {
+            if (it.latitude.isNaN() || it.longitude.isNaN()) {
+                arr.put(org.json.JSONObject.NULL)  // segment separator (NaN is invalid JSON)
+            } else {
+                arr.put(org.json.JSONArray().put(it.latitude).put(it.longitude))
+            }
+        }
         prefs.edit().putString(PREF_SAVED_TRACK_JSON, arr.toString()).apply()
     }
 
@@ -5525,8 +5558,13 @@ class MapFragment : Fragment() {
             val arr = org.json.JSONArray(json)
             val pts = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
             for (i in 0 until arr.length()) {
-                val pt = arr.getJSONArray(i)
-                pts.add(com.mapbox.mapboxsdk.geometry.LatLng(pt.getDouble(0), pt.getDouble(1)))
+                if (arr.isNull(i)) {
+                    // Segment separator — restore as NaN LatLng
+                    pts.add(com.mapbox.mapboxsdk.geometry.LatLng(Double.NaN, Double.NaN))
+                } else {
+                    val pt = arr.getJSONArray(i)
+                    pts.add(com.mapbox.mapboxsdk.geometry.LatLng(pt.getDouble(0), pt.getDouble(1)))
+                }
             }
             if (pts.isNotEmpty()) {
                 loadedTrackPoints.clear()
@@ -5686,12 +5724,13 @@ class MapFragment : Fragment() {
                     val gpsAccuracy = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 10.0
                     val stopThreshold = maxOf(cursorStopFilter, gpsAccuracy)
                     val wasFrozen = bearingFrozen
-                    if (movedM < stopThreshold) {
-                        // Movement within noise threshold — freeze
-                        bearingFrozen = true
-                    } else if (computedSpeedKmh > 3.0 && movedM > stopThreshold * 1.5) {
-                        // Real movement: hysteresis (3 km/h + 1.5x threshold) prevents oscillation
+                    if (computedSpeedKmh > 3.0 || (loc.hasSpeed() && loc.speed * 3.6 > 3.0)) {
+                        // Any meaningful movement — unfreeze (fixes stuck bearing at 15-30 km/h
+                        // where movedM per 1s GPS fix < stopThreshold)
                         bearingFrozen = false
+                    } else if (movedM < stopThreshold && computedSpeedKmh < 3.0) {
+                        // Stationary or GPS noise — freeze
+                        bearingFrozen = true
                     }
 
                     // Bearing selection: frozen → keep last GPS bearing (stable), moving → computed bearing
@@ -6378,14 +6417,21 @@ class MapFragment : Fragment() {
         chronoRunnable = null
     }
 
-    private fun updateTrackOnMap() {
+    // Cached track GeoJSON — rebuilt only on GPS fix, reused for extrapolation
+    private var cachedTrackSegments: List<JSONArray>? = null
+    private var cachedTrackPointCount = 0
+
+    private fun updateTrackOnMap(extrapolateLat: Double = Double.NaN, extrapolateLon: Double = Double.NaN) {
         val style = mapboxMap?.style ?: return
-        val rawPoints = TrackingService.trackPoints
-        if (rawPoints.size >= 2) {
-            // Split by NaN markers into segments
+        // Snapshot to avoid ConcurrentModificationException (TrackingService writes from GPS thread)
+        val snapshot = try { ArrayList(TrackingService.trackPoints) } catch (_: Exception) { return }
+        if (snapshot.size < 2) return
+
+        // Rebuild segment cache only when new points arrive (not every frame)
+        if (cachedTrackSegments == null || snapshot.size != cachedTrackPointCount) {
             val segments = mutableListOf<JSONArray>()
             var current = JSONArray()
-            for (pt in rawPoints) {
+            for (pt in snapshot) {
                 if (pt.first.isNaN() || pt.second.isNaN()) {
                     if (current.length() >= 2) segments.add(current)
                     current = JSONArray()
@@ -6394,21 +6440,34 @@ class MapFragment : Fragment() {
                 }
             }
             if (current.length() >= 2) segments.add(current)
-
-            val geojson = if (segments.size == 1) {
-                JSONObject().put("type", "Feature")
-                    .put("geometry", JSONObject().put("type", "LineString").put("coordinates", segments[0]))
-                    .put("properties", JSONObject())
-            } else if (segments.size > 1) {
-                val multiCoords = JSONArray()
-                segments.forEach { multiCoords.put(it) }
-                JSONObject().put("type", "Feature")
-                    .put("geometry", JSONObject().put("type", "MultiLineString").put("coordinates", multiCoords))
-                    .put("properties", JSONObject())
-            } else return
-
-            style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
+            cachedTrackSegments = segments
+            cachedTrackPointCount = snapshot.size
         }
+
+        val segments = cachedTrackSegments ?: return
+        if (segments.isEmpty()) return
+
+        // For extrapolation: clone only the last segment and append tip point
+        val outputSegments = if (!extrapolateLat.isNaN() && !extrapolateLon.isNaN() && segments.isNotEmpty()) {
+            val lastIdx = segments.size - 1
+            val lastClone = JSONArray(segments[lastIdx].toString())
+            lastClone.put(JSONArray().put(extrapolateLon).put(extrapolateLat))
+            segments.toMutableList().also { it[lastIdx] = lastClone }
+        } else segments
+
+        val geojson = if (outputSegments.size == 1) {
+            JSONObject().put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", outputSegments[0]))
+                .put("properties", JSONObject())
+        } else {
+            val multiCoords = JSONArray()
+            outputSegments.forEach { multiCoords.put(it) }
+            JSONObject().put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "MultiLineString").put("coordinates", multiCoords))
+                .put("properties", JSONObject())
+        }
+
+        style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
     }
 
     /** Inertia snap to GPS: quick overshoot → bounce back. No zoom-out step. */
@@ -8215,9 +8274,12 @@ class MapFragment : Fragment() {
         val speedKmh = lastGpsSpeedKmh
 
         // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
-        val tilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
+        // EMA smoothing prevents jerky tilt changes from GPS speed noise
+        val targetTilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
             (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
         else 0.0
+        smoothedTilt += (targetTilt - smoothedTilt) * 0.05
+        val tilt = smoothedTilt
 
         // Auto-zoom
         val targetZoom = if (autoZoomLevel > 0) {
@@ -8255,13 +8317,24 @@ class MapFragment : Fragment() {
             }
             FollowMode.FREE -> return
         }
-        if (targetZoom != null) builder.zoom(targetZoom)
+        if (targetZoom != null) {
+            // EMA smoothing prevents jerky zoom from GPS speed noise
+            // Re-init if unset or if user changed zoom manually (large jump)
+            if (smoothedZoom < 0 || Math.abs(targetZoom - smoothedZoom) > 2.0) smoothedZoom = targetZoom
+            smoothedZoom += (targetZoom - smoothedZoom) * 0.05
+            builder.zoom(smoothedZoom)
+        }
 
         // moveCamera (instant) — Choreographer already provides smooth 60 FPS cadence
         map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
 
         // Move GPS arrow to extrapolated position (no persist — 60 FPS would thrash disk)
         updateGpsArrow(extLat, extLon, lastGpsBearing, persist = false)
+
+        // Extrapolate track tip so polyline follows camera smoothly between GPS fixes
+        if (TrackingService.trackPoints.size >= 2 && speedMs > 0.5) {
+            updateTrackOnMap(extrapolateLat = extLat, extrapolateLon = extLon)
+        }
     }
 
     override fun onDestroyView() {

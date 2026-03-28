@@ -50,9 +50,12 @@ object GpxParser {
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                             name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
-                        "trkseg" -> {
-                            // Insert NaN marker between segments
-                            if (trackPoints.isNotEmpty()) trackPoints.add(Pair(Double.NaN, Double.NaN))
+                        "trk", "trkseg" -> {
+                            // Insert NaN marker between tracks/segments (avoid double NaN)
+                            if (trackPoints.isNotEmpty() &&
+                                !(trackPoints.last().first.isNaN() && trackPoints.last().second.isNaN())) {
+                                trackPoints.add(Pair(Double.NaN, Double.NaN))
+                            }
                         }
                         "trkpt" -> {
                             inTrkpt = true
