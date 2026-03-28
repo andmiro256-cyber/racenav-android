@@ -7109,7 +7109,7 @@ class MapFragment : Fragment() {
                 val json = withContext(Dispatchers.IO) {
                     JSONObject(URL(UpdateManager.UPDATE_URL).readText())
                 }
-                val latestVersion = json.getString("version")
+                val latestVersion = json.optString("versionName", json.optString("version", ""))
                 val apkUrl = json.optString("apkUrl", json.optString("url", ""))
                 val changelog = json.optString("changelog", null)
                 val hasUpdate = UpdateManager.isNewer(latestVersion, current)
