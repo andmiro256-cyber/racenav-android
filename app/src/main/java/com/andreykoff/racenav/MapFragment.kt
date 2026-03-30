@@ -221,6 +221,7 @@ class MapFragment : Fragment() {
     private var prevFreezeCheckTime = 0L
 
     private var unfreezeConsecutiveCount = 0  // debounce: consecutive GPS fixes showing movement
+    private var freezeConsecutiveCount = 0      // debounce: consecutive GPS fixes showing standstill
     // Magnetometer compass — provides heading when stopped
     private var sensorManager: android.hardware.SensorManager? = null
     @Volatile private var magneticHeading = -1f  // last magnetic heading (true north, 0-360, -1 = no data)
@@ -309,6 +310,8 @@ class MapFragment : Fragment() {
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
         const val TRACK_ARROW_ICON = "track-arrow-icon"
+        const val TRACK_TAIL_SOURCE_ID = "track-tail-source"
+        const val TRACK_TAIL_LAYER_ID  = "track-tail-layer"
         const val MAX_WAYPOINTS = 200
         const val WP_SOURCE_ID = "wp-source"
         const val WP_CIRCLE_LAYER_ID = "wp-circle-layer"
@@ -1728,12 +1731,13 @@ class MapFragment : Fragment() {
     }
 
     /** EMA-сглаживание курса с корректной обработкой перехода 0°/360° */
-    private fun smoothBearing(raw: Float, alpha: Float = 0.4f): Double {
+    private fun smoothBearing(raw: Float, alpha: Float = 0.35f): Double {
+        val effectiveAlpha = alpha
         if (smoothedBearing < 0) { smoothedBearing = raw.toDouble(); return smoothedBearing }
         var delta = raw - smoothedBearing
         while (delta > 180) delta -= 360
         while (delta < -180) delta += 360
-        smoothedBearing = (smoothedBearing + alpha * delta + 360) % 360
+        smoothedBearing = (smoothedBearing + effectiveAlpha * delta + 360) % 360
         return smoothedBearing
     }
 
@@ -1832,6 +1836,14 @@ class MapFragment : Fragment() {
             PropertyFactory.iconIgnorePlacement(true),
             PropertyFactory.iconRotationAlignment("map"),
             PropertyFactory.iconSize(0.22f)
+        ))
+        // Live tail — extrapolated position bridge (2-pt line, 60 FPS)
+        style.addSource(GeoJsonSource(TRACK_TAIL_SOURCE_ID))
+        style.addLayer(LineLayer(TRACK_TAIL_LAYER_ID, TRACK_TAIL_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#FF3322"),
+            PropertyFactory.lineWidth(6f),
+            PropertyFactory.lineCap("round"),
+            PropertyFactory.lineJoin("round")
         ))
         // Loaded track layer (color/width from prefs, default blue)
         style.addSource(GeoJsonSource(LOADED_TRACK_SOURCE_ID))
@@ -5725,19 +5737,20 @@ class MapFragment : Fragment() {
                     val gpsAccuracy = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 10.0
                     val stopThreshold = maxOf(cursorStopFilter, gpsAccuracy)
                     val wasFrozen = bearingFrozen
-                    if (movedM < stopThreshold) {
-                        // Movement within noise threshold — freeze immediately
-                        bearingFrozen = true
-                        unfreezeConsecutiveCount = 0
-                    } else if (computedSpeedKmh > 3.0 && movedM > stopThreshold * 1.5) {
-                        // Debounce: require 3 consecutive GPS fixes showing real movement
+                    if (movedM < stopThreshold && computedSpeedKmh < 2.0) {
+                        // Freeze only if clearly stationary: no movement AND very low speed
+                        freezeConsecutiveCount++
+                        if (freezeConsecutiveCount >= 2) {
+                            bearingFrozen = true
+                            unfreezeConsecutiveCount = 0
+                        }
+                    } else if (movedM >= stopThreshold || computedSpeedKmh > 1.5) {
+                        // Unfreeze on any sign of movement
+                        freezeConsecutiveCount = 0
                         unfreezeConsecutiveCount++
-                        if (unfreezeConsecutiveCount >= 3) {
+                        if (unfreezeConsecutiveCount >= 2) {
                             bearingFrozen = false
                         }
-                    } else {
-                        // Between thresholds — reset debounce counter
-                        unfreezeConsecutiveCount = 0
                     }
 
                     // Bearing selection: frozen → keep last GPS bearing (stable), moving → computed bearing
@@ -5746,7 +5759,8 @@ class MapFragment : Fragment() {
                     if (bearingFrozen) {
                         effectiveBearing = lastValidBearing  // keep last known direction, don't jump to magnetometer
                     } else {
-                        // Don't reset EMA on unfreeze — continue smoothing from current value
+                        // On unfreeze: sync EMA to lastValidBearing to avoid jump from stale smoothedBearing
+                        if (wasFrozen) smoothedBearing = lastValidBearing.toDouble()
                         val bearing = if (rawBearing >= 0) smoothBearing(rawBearing).toFloat() else lastValidBearing
                         lastValidBearing = bearing
                         effectiveBearing = bearing
@@ -8319,9 +8333,7 @@ class MapFragment : Fragment() {
                 // Higher speed → faster rotation (responsive at 60+ km/h)
                 // Large angle delta → faster catch-up
                 val absDelta = Math.abs(delta)
-                val speedFactor = (lastGpsSpeedKmh / 80.0).coerceIn(0.0, 1.0)  // 0..1 over 0..80 km/h
-                val angleFactor = if (absDelta > 60) 0.5 else if (absDelta > 30) 0.3 else 0.15
-                val lerpFactor = (angleFactor + speedFactor * 0.35).coerceAtMost(0.85)
+                val lerpFactor = if (absDelta > 60) 0.6 else if (absDelta > 30) 0.4 else 0.25
                 displayBearing = (displayBearing + delta * lerpFactor + 360) % 360
                 builder.bearing(displayBearing)
             }
