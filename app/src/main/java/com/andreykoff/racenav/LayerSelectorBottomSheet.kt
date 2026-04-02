@@ -1,6 +1,9 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import android.graphics.Color
 import android.view.Gravity
 import android.view.View
@@ -280,10 +283,12 @@ class LayerSelectorBottomSheet(
     private fun updateEstimate() {
         val baseLayers = if (selectedBase.isNotEmpty()) listOf(selectedBase) else emptyList()
         val polygonPairs = area.polygon.map { Pair(it.latitude, it.longitude) }
-        val estimate = SizeEstimator.estimate(area.boundingBox, baseLayers, selectedOverlays.toList(), minZoom, maxZoom, polygonPairs)
-        txtEstimate?.text = "${estimate.totalTiles} тайлов • ${estimate.formatSize()}"
-        txtEstimate?.setTextColor(if (estimate.isLarge) 0xFFFF5252.toInt() else Color.WHITE)
-        btnDownload?.isEnabled = estimate.totalTiles > 0 && selectedBase.isNotEmpty()
+        CoroutineScope(Dispatchers.Main).launch {
+            val estimate = SizeEstimator.estimate(area.boundingBox, baseLayers, selectedOverlays.toList(), minZoom, maxZoom, polygonPairs)
+            txtEstimate?.text = "${estimate.totalTiles} тайлов • ${estimate.formatSize()}"
+            txtEstimate?.setTextColor(if (estimate.isLarge) 0xFFFF5252.toInt() else Color.WHITE)
+            btnDownload?.isEnabled = estimate.totalTiles > 0 && selectedBase.isNotEmpty()
+        }
     }
 }
 

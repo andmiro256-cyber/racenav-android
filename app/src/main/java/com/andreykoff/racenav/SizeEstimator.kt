@@ -1,6 +1,8 @@
 package com.andreykoff.racenav
 
 import kotlin.math.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Оценка количества тайлов и размера загрузки для заданной области и слоёв.
@@ -11,14 +13,14 @@ object SizeEstimator {
     const val OVERLAY_TILE_BYTES = 8_000L  // векторный оверлей ~8 КБ
     const val WARNING_THRESHOLD_MB = 500.0
 
-    fun estimate(
+    suspend fun estimate(
         bounds: BoundsRect,
         baseLayers: List<String>,
         overlayLayers: List<String>,
         minZoom: Int,
         maxZoom: Int,
         polygon: List<Pair<Double, Double>>? = null
-    ): SizeEstimate {
+    ): SizeEstimate = withContext(Dispatchers.Default) {
         var totalTiles = 0L
         var totalBytes = 0L
         val perLayer = mutableMapOf<String, LayerEstimate>()
@@ -42,7 +44,7 @@ object SizeEstimator {
                 totalTiles += n; totalBytes += bytes
             }
         }
-        return SizeEstimate(totalTiles, totalBytes, perLayer)
+        SizeEstimate(totalTiles, totalBytes, perLayer)
     }
 
     fun countTilesAtZoom(bounds: BoundsRect, zoom: Int): Long {

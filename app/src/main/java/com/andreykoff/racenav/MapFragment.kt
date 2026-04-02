@@ -71,8 +71,17 @@ class MapFragment : Fragment() {
         private set
 
     private val filePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? -> if (uri != null) loadFileFromPicker(uri) }
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        val limited = uris.take(50)
+        if (limited.size < uris.size) {
+            Toast.makeText(context, "Максимум 50 файлов, загружены первые 50", Toast.LENGTH_LONG).show()
+        }
+        limited.forEach { uri -> loadFileFromPicker(uri) }
+        if (limited.size > 1) {
+            Toast.makeText(context, "Загружено файлов: ${limited.size}", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     enum class FollowMode { FREE, FOLLOW_NORTH, FOLLOW_COURSE }
     var followMode = FollowMode.FREE
@@ -306,6 +315,8 @@ class MapFragment : Fragment() {
     private var downloadRectSource: GeoJsonSource? = null
 
     companion object {
+        /** Sentinel LatLng used as segment separator (South Pole - never appears in real tracks) */
+        val SEGMENT_BREAK = LatLng(-90.0, 0.0)
         const val TRACK_SOURCE_ID = "track-source"
         const val TRACK_LAYER_ID = "track-layer"
         const val TRACK_ARROWS_LAYER_ID = "track-arrows-layer"
@@ -366,6 +377,7 @@ class MapFragment : Fragment() {
         const val PREF_RECENTER_DELAY = "recenter_delay" // seconds, default 3
         const val PREF_TILE_CACHE_MB  = "tile_cache_mb"  // MB, default 200
         const val PREF_3D_TILT        = "3d_tilt_enabled"  // bool, default false
+        const val PREF_MAP_TILT_ENABLED = "map_tilt_enabled" // bool, default false — allow tilt gesture
         const val PREF_AUTO_ZOOM      = "auto_zoom_level"   // 0=disabled, 1-10
         const val PREF_AUTO_RECORD    = "auto_record"        // bool: auto-start recording, default true
         const val PREF_WAS_RECORDING  = "was_recording"     // bool: app was closed during recording
@@ -676,7 +688,8 @@ class MapFragment : Fragment() {
                 isAttributionEnabled = false
                 isLogoEnabled = false
                 isRotateGesturesEnabled = true
-                isTiltGesturesEnabled = true
+                val tiltAllowed = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_MAP_TILT_ENABLED, false) ?: false
+                isTiltGesturesEnabled = tiltAllowed
                 // Yandex-like smooth & fast gestures
                 zoomRate = 1.0f                    // default 0.65 — faster pinch-to-zoom
                 flingThreshold = 400L              // default ~1000 — more sensitive fling
@@ -947,6 +960,24 @@ class MapFragment : Fragment() {
             lp.marginEnd   = (1 * dp + 0.5f).toInt()
             layoutParams = lp
             setBackgroundColor(0xFF333333.toInt())
+        }
+    }
+
+    /**
+     * Read map_tilt_enabled preference and apply:
+     * - enable/disable tilt gestures on map
+     * - reset pitch to 0 if tilt is disabled
+     */
+    fun applyTiltPref() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val map = mapboxMap ?: return
+        val tiltAllowed = prefs.getBoolean(PREF_MAP_TILT_ENABLED, false)
+        map.uiSettings.isTiltGesturesEnabled = tiltAllowed
+        if (!tiltAllowed && (map.cameraPosition?.tilt ?: 0.0) > 0.0) {
+            val cam = com.mapbox.mapboxsdk.camera.CameraPosition.Builder(map.cameraPosition)
+                .tilt(0.0).build()
+            map.moveCamera(CameraUpdateFactory.newCameraPosition(cam))
+            smoothedTilt = 0.0
         }
     }
 
@@ -3500,11 +3531,14 @@ class MapFragment : Fragment() {
 
     fun loadTrack(points: List<Pair<Double, Double>>) {
         loadedTrackPoints.clear()
-        loadedTrackPoints.addAll(points.map { LatLng(it.first, it.second) })
+        loadedTrackPoints.addAll(points.map {
+            if (it.first.isNaN() || it.second.isNaN()) SEGMENT_BREAK
+            else LatLng(it.first, it.second)
+        })
         updateLoadedTrackOnMap()
         applyLoadedTrackStyle()
         if (points.isNotEmpty()) {
-            val firstValid = loadedTrackPoints.firstOrNull { !it.latitude.isNaN() && !it.longitude.isNaN() }
+            val firstValid = loadedTrackPoints.firstOrNull { it != SEGMENT_BREAK }
             if (firstValid != null) {
                 mapboxMap?.animateCamera(
                     CameraUpdateFactory.newLatLngZoom(firstValid, 12.0), 1000
@@ -3525,7 +3559,7 @@ class MapFragment : Fragment() {
         val segments = mutableListOf<JSONArray>()
         var current = JSONArray()
         for (pt in loadedTrackPoints) {
-            if (pt.latitude.isNaN() || pt.longitude.isNaN()) {
+            if (pt == SEGMENT_BREAK) {
                 if (current.length() >= 2) segments.add(current)
                 current = JSONArray()
             } else {
@@ -3759,8 +3793,9 @@ class MapFragment : Fragment() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val bytes = ctx.contentResolver.openInputStream(uri)?.readBytes()
+                val inputStream = ctx.contentResolver.openInputStream(uri)
                     ?: throw Exception("Не удалось открыть файл")
+                val bytes = inputStream.buffered(65536).use { it.readBytes() }
 
                 when (ext) {
                     "gpx" -> {
@@ -5525,8 +5560,8 @@ class MapFragment : Fragment() {
         val pts = if (loadedTrackPoints.size > 5000) loadedTrackPoints.take(5000) else loadedTrackPoints
         val arr = org.json.JSONArray()
         pts.forEach {
-            if (it.latitude.isNaN() || it.longitude.isNaN()) {
-                arr.put(org.json.JSONObject.NULL)  // segment separator (NaN is invalid JSON)
+            if (it == SEGMENT_BREAK) {
+                arr.put(org.json.JSONObject.NULL)  // segment separator
             } else {
                 arr.put(org.json.JSONArray().put(it.latitude).put(it.longitude))
             }
@@ -5572,8 +5607,8 @@ class MapFragment : Fragment() {
             val pts = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
             for (i in 0 until arr.length()) {
                 if (arr.isNull(i)) {
-                    // Segment separator — restore as NaN LatLng
-                    pts.add(com.mapbox.mapboxsdk.geometry.LatLng(Double.NaN, Double.NaN))
+                    // Segment separator
+                    pts.add(SEGMENT_BREAK)
                 } else {
                     val pt = arr.getJSONArray(i)
                     pts.add(com.mapbox.mapboxsdk.geometry.LatLng(pt.getDouble(0), pt.getDouble(1)))
@@ -7128,7 +7163,19 @@ class MapFragment : Fragment() {
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.IO) {
-                    JSONObject(URL(UpdateManager.UPDATE_URL).readText())
+                    // Check if user is a beta tester by email
+                    val email = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getString("sync_email", null)
+                    var updateUrl = UpdateManager.UPDATE_URL
+                    if (!email.isNullOrBlank()) {
+                        try {
+                            val encodedEmail = java.net.URLEncoder.encode(email, "UTF-8")
+                            val channelJson = JSONObject(URL("$SYNC_BASE_URL/api/update-channel?email=$encodedEmail").readText())
+                            if (channelJson.optString("channel") == "beta") {
+                                updateUrl = UpdateManager.BETA_UPDATE_URL
+                            }
+                        } catch (_: Exception) { /* fallback to stable */ }
+                    }
+                    JSONObject(URL(updateUrl).readText())
                 }
                 val latestVersion = json.optString("versionName", json.optString("version", ""))
                 val apkUrl = json.optString("apkUrl", json.optString("url", ""))
@@ -7316,6 +7363,8 @@ class MapFragment : Fragment() {
         applyUiScale()
         applyWidgetFontScale()
         applyTopBarPrefs()
+        // Apply tilt gesture preference (user may have changed it in Settings)
+        applyTiltPref()
         // Регистрируем приёмник GPS от сервиса
         val filter = IntentFilter(TrackingService.BROADCAST_LOCATION)
         val traccarFilter = IntentFilter(TraccarService.BROADCAST_TRACCAR_STATUS)
@@ -7537,7 +7586,8 @@ class MapFragment : Fragment() {
             // TODO Sprint 2: enqueue download task
             Toast.makeText(ctx, "Загрузка ${config.allLayers.size} слоёв, z${config.minZoom}-z${config.maxZoom}...", Toast.LENGTH_LONG).show()
             val polygonPairsForEstimate = area.polygon.map { Pair(it.latitude, it.longitude) }
-            val estimate = SizeEstimator.estimate(area.boundingBox, listOf(config.selectedBase), config.selectedOverlays, config.minZoom, config.maxZoom, polygonPairsForEstimate)
+            lifecycleScope.launch {
+            val estimate = withContext(Dispatchers.IO) { SizeEstimator.estimate(area.boundingBox, listOf(config.selectedBase), config.selectedOverlays, config.minZoom, config.maxZoom, polygonPairsForEstimate) }
             Log.i("TileDownload", "Download: ${estimate.totalTiles} tiles, ${estimate.formatSize()}, area=${String.format("%.0f", area.areaKm2)}km²")
 
             // Build download task with proper file naming
@@ -7594,6 +7644,7 @@ class MapFragment : Fragment() {
             polygonPicker = null
             polygonSnackbar?.dismiss()
             polygonSnackbar = null
+            } // lifecycleScope.launch
         }.show()
     }
 
@@ -8296,7 +8347,8 @@ class MapFragment : Fragment() {
 
         // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
         // EMA smoothing prevents jerky tilt changes from GPS speed noise
-        val targetTilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
+        val mapTiltAllowed = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_MAP_TILT_ENABLED, false) ?: false
+        val targetTilt = if (mapTiltAllowed && tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
             (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
         else 0.0
         smoothedTilt += (targetTilt - smoothedTilt) * 0.05
@@ -8323,17 +8375,21 @@ class MapFragment : Fragment() {
         when (followMode) {
             FollowMode.FOLLOW_NORTH -> builder.bearing(0.0)
             FollowMode.FOLLOW_COURSE -> {
-                // Smooth bearing interpolation: lerp toward target bearing each frame
-                val targetBearing = lastGpsBearing.toDouble()
+                // Blend magnetometer (50Hz) with GPS bearing by speed to eliminate 1-sec GPS ratchet
+                // At low speed (<2 m/s): use magnetometer; at speed (>2 m/s): use GPS bearing
+                val targetBearing: Double = if (magneticHeading >= 0f) {
+                    val blend = (lastGpsSpeedKmh / 7.2).coerceIn(0.0, 1.0)
+                    var d = lastGpsBearing.toDouble() - magneticHeading.toDouble()
+                    while (d > 180) d -= 360.0; while (d < -180) d += 360.0
+                    ((magneticHeading.toDouble() + d * blend + 360.0) % 360.0)
+                } else lastGpsBearing.toDouble()
                 if (displayBearing < 0) displayBearing = targetBearing
                 var delta = targetBearing - displayBearing
                 while (delta > 180) delta -= 360
                 while (delta < -180) delta += 360
-                // Adaptive lerp: speed + angle based
-                // Higher speed → faster rotation (responsive at 60+ km/h)
-                // Large angle delta → faster catch-up
-                val absDelta = Math.abs(delta)
-                val lerpFactor = if (absDelta > 60) 0.6 else if (absDelta > 30) 0.4 else 0.25
+                // Adaptive lerp: angle based — increased factors for snappier response
+                val absDelta = Math.abs(delta.toDouble())
+                val lerpFactor = if (absDelta > 60) 0.7 else if (absDelta > 30) 0.5 else 0.35
                 displayBearing = (displayBearing + delta * lerpFactor + 360) % 360
                 builder.bearing(displayBearing)
             }

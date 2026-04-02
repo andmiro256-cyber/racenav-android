@@ -181,10 +181,21 @@ object OfflineAreasManager {
     // ── Serialization ──
 
     private fun saveAll(context: Context, areas: List<OfflineArea>) {
-        val file = getAreasFile(context)
         val arr = JSONArray()
         areas.forEach { arr.put(areaToJson(it)) }
-        file.writeText(JSONObject().put("areas", arr).toString(2))
+        try {
+            val file = getAreasFile(context)
+            file.writeText(JSONObject().put("areas", arr).toString(2))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save areas.json: " + e.message)
+            try {
+                val fallback = java.io.File(context.filesDir, "RaceNav/maps").also { it.mkdirs() }
+                java.io.File(fallback, "areas.json").writeText(JSONObject().put("areas", arr).toString(2))
+                Log.i(TAG, "Saved areas.json to internal storage fallback")
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback save also failed: " + e2.message)
+            }
+        }
     }
 
     private fun areaToJson(a: OfflineArea) = JSONObject().apply {

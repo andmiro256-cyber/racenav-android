@@ -15,7 +15,8 @@ import java.net.URL
 
 object UpdateManager {
 
-    const val UPDATE_URL = "http://87.120.84.254/updates/latest.json"
+    const val UPDATE_URL = "https://trophynav.ru/updates/latest.json"
+    const val BETA_UPDATE_URL = "http://87.120.84.254/api/update/beta"
 
     // Pending APK path for retry after permission grant
     var pendingApkFile: File? = null
@@ -72,9 +73,13 @@ object UpdateManager {
         }
     }
 
+    private val SUFFIX_REGEX = Regex("-.*")
+
     fun isNewer(remote: String, local: String): Boolean {
-        val r = remote.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
-        val l = local.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
+        val rClean = remote.removePrefix("v")
+        val lClean = local.removePrefix("v")
+        val r = rClean.split(".").map { it.replace(SUFFIX_REGEX, "").toIntOrNull() ?: 0 }
+        val l = lClean.split(".").map { it.replace(SUFFIX_REGEX, "").toIntOrNull() ?: 0 }
         val maxLen = maxOf(r.size, l.size)
         for (i in 0 until maxLen) {
             val rv = r.getOrElse(i) { 0 }
@@ -82,7 +87,10 @@ object UpdateManager {
             if (rv > lv) return true
             if (rv < lv) return false
         }
-        return false
+        // Same numeric version: stable (no suffix) is newer than prerelease (has suffix)
+        val remoteIsPrerelease = rClean.contains("-")
+        val localIsPrerelease = lClean.contains("-")
+        return !remoteIsPrerelease && localIsPrerelease
     }
 
     private fun installApk(context: Context, apkFile: File) {

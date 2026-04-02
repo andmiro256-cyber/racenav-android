@@ -54,6 +54,7 @@ import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_3D_TILT
+import com.andreykoff.racenav.MapFragment.Companion.PREF_MAP_TILT_ENABLED
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
 import com.andreykoff.racenav.MapFragment.Companion.PREF_SYNC_API_KEY
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_APPROACH_RADIUS
@@ -441,6 +442,13 @@ class SettingsFragment : Fragment() {
                 }
                 mapFrag.applyFollowMode()
             }
+        }
+
+        // Map tilt gesture
+        val switchMapTilt = view.findViewById<SwitchCompat>(R.id.switchMapTilt)
+        switchMapTilt.isChecked = prefs.getBoolean(PREF_MAP_TILT_ENABLED, false)
+        switchMapTilt.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_MAP_TILT_ENABLED, checked).apply()
         }
 
         // 3D tilt on speed
@@ -1128,7 +1136,13 @@ class SettingsFragment : Fragment() {
 
         // Tile cache size
         val txtCache = view.findViewById<TextView>(R.id.txtCacheMb)
-        var cacheMb = prefs.getInt(MapFragment.PREF_TILE_CACHE_MB, 200).coerceIn(100, 4000)
+        var cacheMb = try {
+            prefs.getInt(MapFragment.PREF_TILE_CACHE_MB, 200)
+        } catch (_: ClassCastException) {
+            val parsed = prefs.getString(MapFragment.PREF_TILE_CACHE_MB, "200")?.toIntOrNull() ?: 200
+            prefs.edit().putInt(MapFragment.PREF_TILE_CACHE_MB, parsed).apply()
+            parsed
+        }.coerceIn(100, 4000)
         txtCache.text = cacheMb.toString()
         view.findViewById<ImageButton>(R.id.btnCacheMinus).setOnClickListener {
             if (cacheMb > 100) {

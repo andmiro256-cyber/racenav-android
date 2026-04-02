@@ -64,26 +64,28 @@ class MainActivity : AppCompatActivity() {
                 checkForAppUpdate()
             }, 3000)
 
-            // Trial warning (5 days or less left)
-            if (LicenseManager.shouldShowTrialWarning(this)) {
-                val days = LicenseManager.trialDaysLeft(this)
-                androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle("Пробный период заканчивается")
-                    .setMessage("Осталось $days дн.\n\nПосле окончания запись треков, экспорт, синхронизация и другие функции будут заблокированы.\n\nКарта и навигация продолжат работать.")
-                    .setPositiveButton("Подробнее") { _, _ ->
-                        try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
-                        catch (_: Exception) {}
+            // Check beta tester + license from server, then show trial dialogs
+            Thread {
+                LicenseManager.checkBetaTester(this)
+                LicenseManager.checkLicenseFromServer(this)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (LicenseManager.shouldShowTrialWarning(this)) {
+                        val days = LicenseManager.trialDaysLeft(this)
+                        androidx.appcompat.app.AlertDialog.Builder(this)
+                            .setTitle("Пробный период заканчивается")
+                            .setMessage("Осталось $days дн.\n\nПосле окончания запись треков, экспорт, синхронизация и другие функции будут заблокированы.\n\nКарта и навигация продолжат работать.")
+                            .setPositiveButton("Подробнее") { _, _ ->
+                                try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
+                                catch (_: Exception) {}
+                            }
+                            .setNegativeButton("Позже", null)
+                            .show()
+                    } else if (LicenseManager.isFreeMode(this)) {
+                        showTrialExpiredDialog()
                     }
-                    .setNegativeButton("Позже", null)
-                    .show()
-            }
-            // Free mode notification (trial expired)
-            else if (LicenseManager.isFreeMode(this)) {
-                showTrialExpiredDialog()
-            }
-
-            // Check license from server in background
-            Thread { LicenseManager.checkLicenseFromServer(this) }.start()
+                }
+            }.start()
         }
     }
 

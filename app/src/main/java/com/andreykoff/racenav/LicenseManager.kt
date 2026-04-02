@@ -306,6 +306,33 @@ object LicenseManager {
             .apply()
     }
 
+    /** Check if user is a beta tester by email. If so, auto-activate. Call from background thread. */
+    fun checkBetaTester(context: Context) {
+        // Don't downgrade paid license to beta
+        if (isActivated(context) && getPlan(context) in listOf("full", "license")) return
+        try {
+            val email = context.getSharedPreferences("racenav_prefs", Context.MODE_PRIVATE)
+                .getString("sync_email", null) ?: return
+            val url = java.net.URL("http://87.120.84.254/api/update-channel?email=${java.net.URLEncoder.encode(email, "UTF-8")}")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 5_000
+            val response = try {
+                if (conn.responseCode !in 200..299) return
+                conn.inputStream.bufferedReader().readText()
+            } finally { conn.disconnect() }
+            val json = org.json.JSONObject(response)
+            if (json.optString("channel") == "beta") {
+                getPrefs(context).edit()
+                    .putBoolean(KEY_ACTIVATED, true)
+                    .putString(KEY_LICENSE_STATUS, "active")
+                    .putString(KEY_PLAN, "beta")
+                    .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
+                    .apply()
+            }
+        } catch (_: Exception) { }
+    }
+
     /** Check license from server. Call from background thread. */
     fun checkLicenseFromServer(context: Context): Boolean {
         val deviceId = getOrCreateDeviceId(context).replace("-", "").take(8).uppercase()
