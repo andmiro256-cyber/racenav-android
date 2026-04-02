@@ -10,9 +10,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
 /**
- * Foreground service placeholder for tile downloading.
- * Currently downloads run via TileDownloadManager coroutines while activity is alive.
- * This service can be started to keep the process alive during long downloads.
+ * Foreground service that keeps the process alive during tile downloads.
+ * Started by TileDownloadManager.startDownload(), stopped when download completes or is cancelled.
  */
 class TileDownloadService : Service() {
 
@@ -20,6 +19,9 @@ class TileDownloadService : Service() {
         const val CHANNEL_ID = "tile_download_channel"
         const val NOTIFICATION_ID = 9001
     }
+
+    private var progressHandler: android.os.Handler? = null
+    private var progressRunnable: Runnable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -30,17 +32,24 @@ class TileDownloadService : Service() {
         val notification = buildNotification("Загрузка карт...")
         startForeground(NOTIFICATION_ID, notification)
 
-        TileDownloadManager.onProgressUpdate = { progress ->
-            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(NOTIFICATION_ID, buildNotification(
-                "Загрузка: ${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
-            ))
+        // Poll progress every 2 seconds to update notification (don't override TileDownloadManager callbacks)
+        progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        progressRunnable = object : Runnable {
+            override fun run() {
+                val progress = TileDownloadManager.getProgress()
+                if (progress.isRunning) {
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    nm.notify(NOTIFICATION_ID, buildNotification(
+                        "Загрузка: ${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+                    ))
+                    progressHandler?.postDelayed(this, 2000)
+                } else {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
         }
-
-        TileDownloadManager.onComplete = {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }
+        progressHandler?.postDelayed(progressRunnable!!, 2000)
 
         return START_NOT_STICKY
     }
@@ -48,6 +57,9 @@ class TileDownloadService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        progressRunnable?.let { progressHandler?.removeCallbacks(it) }
+        progressHandler = null
+        progressRunnable = null
         super.onDestroy()
     }
 

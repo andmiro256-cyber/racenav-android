@@ -387,7 +387,7 @@ object LicenseManager {
                     val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
                     fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
                     val date = fmt.parse(clean)
-                    if (date != null && date.time > System.currentTimeMillis()) return true
+                    if (date != null) return date.time > System.currentTimeMillis()
                 } catch (_: Exception) {}
             }
             return true // If can't parse date, trust the status

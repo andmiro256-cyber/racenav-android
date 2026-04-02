@@ -29,6 +29,7 @@ object UpdateManager {
         onComplete: ((success: Boolean, error: String?) -> Unit)? = null
     ) {
         val apkFile = File(context.externalCacheDir ?: context.filesDir, "racenav-update.apk")
+        val tmpFile = File(apkFile.absolutePath + ".tmp")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -40,7 +41,7 @@ object UpdateManager {
                 var bytesRead = 0L
 
                 conn.inputStream.use { input ->
-                    apkFile.outputStream().use { output ->
+                    tmpFile.outputStream().use { output ->
                         val buf = ByteArray(8192)
                         var n: Int
                         while (input.read(buf).also { n = it } != -1) {
@@ -54,6 +55,13 @@ object UpdateManager {
                         }
                     }
                 }
+                // Validate: check file size matches Content-Length (if known)
+                if (totalBytes > 0 && tmpFile.length() != totalBytes) {
+                    tmpFile.delete()
+                    throw Exception("Incomplete download: ${tmpFile.length()} / $totalBytes bytes")
+                }
+                // Atomic rename: only replace target if download was complete
+                tmpFile.renameTo(apkFile)
                 withContext(Dispatchers.Main) {
                     onComplete?.invoke(true, null)
                     installApk(context, apkFile)
@@ -76,6 +84,7 @@ object UpdateManager {
     private val SUFFIX_REGEX = Regex("-.*")
 
     fun isNewer(remote: String, local: String): Boolean {
+        if (remote.isBlank() || local.isBlank()) return false
         val rClean = remote.removePrefix("v")
         val lClean = local.removePrefix("v")
         val r = rClean.split(".").map { it.replace(SUFFIX_REGEX, "").toIntOrNull() ?: 0 }

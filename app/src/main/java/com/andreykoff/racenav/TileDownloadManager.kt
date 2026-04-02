@@ -1,6 +1,10 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import android.content.Intent
+import android.net.wifi.WifiManager
+import android.os.PowerManager
+import android.os.StatFs
 import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -14,7 +18,7 @@ data class DownloadTask(
     val name: String,
     val layers: List<LayerDownload>,
     val bounds: BoundsRect,
-    val polygon: List<Pair<Double, Double>>? = null,  // lat/lon pairs for polygon filter
+    val polygon: List<Pair<Double, Double>>? = null,
     val minZoom: Int,
     val maxZoom: Int
 )
@@ -63,13 +67,40 @@ object TileDownloadManager {
 
     private val client = OkHttpClient.Builder()
         .dispatcher(Dispatcher().apply {
-            maxRequests = 16
-            maxRequestsPerHost = 4
+            maxRequests = 24
+            maxRequestsPerHost = 6
         })
         .connectionPool(ConnectionPool(8, 30, java.util.concurrent.TimeUnit.SECONDS))
         .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    private fun acquireLocks(context: Context) {
+        try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RaceNav:TileDownload").apply {
+                setReferenceCounted(false)
+                acquire(4 * 60 * 60 * 1000L) // 4 hours max
+            }
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "RaceNav:TileDownload").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (e: Exception) {
+            Log.w("TileDownload", "Failed to acquire locks: ${e.message}")
+        }
+    }
+
+    private fun releaseLocks() {
+        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        wakeLock = null
+        wifiLock = null
+    }
 
     fun estimateTiles(bounds: BoundsRect, minZoom: Int, maxZoom: Int): Int {
         var total = 0
@@ -84,6 +115,29 @@ object TileDownloadManager {
         return total
     }
 
+    /** Check if enough disk space is available. Returns null if OK, error message if not. */
+    fun checkDiskSpace(context: Context, task: DownloadTask): String? {
+        val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
+            countPolygonTiles(task)
+        } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
+        val estimatedBytes = tilesPerLayer.toLong() * task.layers.size * 25_000L // ~25KB per tile avg
+        val mapsDir = getRaceNavDir(context)
+        val stat = StatFs(mapsDir.absolutePath)
+        val available = stat.availableBytes
+        if (estimatedBytes > available * 0.9) {
+            val needMB = estimatedBytes / 1_048_576
+            val freeMB = available / 1_048_576
+            return "Недостаточно места: нужно ~${needMB} МБ, доступно ${freeMB} МБ"
+        }
+        return null
+    }
+
+    private fun getRaceNavDir(context: Context): File {
+        val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, "RaceNav/maps")
+        dir.mkdirs()
+        return dir
+    }
+
     fun startDownload(context: Context, task: DownloadTask) {
         if (isDownloading.get()) return
 
@@ -94,22 +148,26 @@ object TileDownloadManager {
         error = null
 
         val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
-            var count = 0
-            for (z in task.minZoom..task.maxZoom) {
-                val n = 1 shl z
-                for (x in lonToTileX(task.bounds.west, n)..lonToTileX(task.bounds.east, n)) {
-                    for (y in latToTileY(task.bounds.north, n)..latToTileY(task.bounds.south, n)) {
-                        if (pointInPolygon(tileCenterLat(y, z), tileCenterLon(x, z), task.polygon)) count++
-                    }
-                }
-            }
-            count
+            countPolygonTiles(task)
         } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
         totalTiles.set(tilesPerLayer * task.layers.size)
         bytesTotal.set(0)
         Log.d("TileDownload", "startDownload: ${task.layers.size} layers, $tilesPerLayer tiles/layer, zoom ${task.minZoom}-${task.maxZoom}")
-        Log.d("TileDownload", "startDownload: layers=${task.layers.map { it.layerKey }}")
-        Log.d("TileDownload", "startDownload: tileSourcesRef keys=${tileSourcesRef?.keys}")
+
+        // Acquire WakeLock + WiFi lock
+        acquireLocks(context)
+
+        // Start foreground service to survive background
+        try {
+            val intent = Intent(context, TileDownloadService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (e: Exception) {
+            Log.w("TileDownload", "Failed to start ForegroundService: ${e.message}")
+        }
 
         Thread {
             try {
@@ -124,12 +182,29 @@ object TileDownloadManager {
                 try { DiagnosticsCollector.logEvent(context, "DL error: ${currentLayerName} - ${e.message}") } catch (_: Exception) {}
             } finally {
                 isDownloading.set(false)
+                releaseLocks()
+                // Stop foreground service
+                try { context.stopService(Intent(context, TileDownloadService::class.java)) } catch (_: Exception) {}
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     notifyProgress()
                     onComplete?.invoke()
                 }
             }
         }.start()
+    }
+
+    private fun countPolygonTiles(task: DownloadTask): Int {
+        var count = 0
+        val polygon = task.polygon ?: return 0
+        for (z in task.minZoom..task.maxZoom) {
+            val n = 1 shl z
+            for (x in lonToTileX(task.bounds.west, n)..lonToTileX(task.bounds.east, n)) {
+                for (y in latToTileY(task.bounds.north, n)..latToTileY(task.bounds.south, n)) {
+                    if (pointInPolygon(tileCenterLat(y, z), tileCenterLon(x, z), polygon)) count++
+                }
+            }
+        }
+        return count
     }
 
     val skippedLayers = mutableSetOf<String>()
@@ -170,7 +245,6 @@ object TileDownloadManager {
         return inside
     }
 
-    /** Get center lat/lon of a tile */
     private fun tileCenterLat(y: Int, z: Int): Double {
         val n = Math.PI - 2.0 * Math.PI * (y.toDouble() + 0.5) / (1 shl z)
         return Math.toDegrees(Math.atan(Math.sinh(n)))
@@ -182,10 +256,11 @@ object TileDownloadManager {
     private fun downloadLayerSync(context: Context, layer: LayerDownload, bounds: BoundsRect, minZoom: Int, maxZoom: Int) {
         val dbFile = File(layer.outputPath)
         dbFile.parentFile?.mkdirs()
-        
+
         val db = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbFile, null)
         db.rawQuery("PRAGMA journal_mode=WAL", null).close()
         db.rawQuery("PRAGMA cache_size=-8192", null).close()
+        db.rawQuery("PRAGMA synchronous=NORMAL", null).close()
         db.execSQL("CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB, PRIMARY KEY (zoom_level, tile_column, tile_row))")
         db.execSQL("CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT)")
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('name', ?)", arrayOf(layer.layerLabel))
@@ -197,6 +272,7 @@ object TileDownloadManager {
 
         if (layer.layerKey in skippedLayers) {
             Log.d("TileDownload", "Skipping layer: ${layer.layerKey}")
+            db.close()
             return
         }
         val sourceInfo = tileSourcesRef?.get(layer.layerKey)
@@ -214,7 +290,6 @@ object TileDownloadManager {
             for (x in lonToTileX(bounds.west, n)..lonToTileX(bounds.east, n)) {
                 for (y in latToTileY(bounds.north, n)..latToTileY(bounds.south, n)) {
                     if (polygon != null && polygon.size >= 3) {
-                        // Filter: only tiles whose center falls inside the polygon
                         val centerLat = tileCenterLat(y, z)
                         val centerLon = tileCenterLon(x, z)
                         if (!pointInPolygon(centerLat, centerLon, polygon)) continue
@@ -223,14 +298,52 @@ object TileDownloadManager {
                 }
             }
         }
+
+        // Filter out already downloaded tiles (resume support)
+        val existingCount = try {
+            db.rawQuery("SELECT COUNT(*) FROM tiles", null).use {
+                if (it.moveToFirst()) it.getInt(0) else 0
+            }
+        } catch (_: Exception) { 0 }
+        if (existingCount > 0) {
+            Log.d("TileDownload", "Resume: ${existingCount} tiles already in DB, filtering")
+        }
+
         Log.d("TileDownload", "downloadLayerSync: ${tiles.size} tiles for ${layer.layerKey}")
 
-        // Compile insert statement once (reused across threads with synchronization)
-        val stmt = db.compileStatement("INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?)")
-
         // Download tiles using thread pool
-        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
         val latch = java.util.concurrent.CountDownLatch(tiles.size)
+
+        // Batch insert buffer
+        val insertBuffer = java.util.Collections.synchronizedList(mutableListOf<Triple<Triple<Int, Int, Int>, ByteArray, Int>>())
+        val BATCH_SIZE = 200
+
+        fun flushBatch() {
+            val batch: List<Triple<Triple<Int, Int, Int>, ByteArray, Int>>
+            synchronized(insertBuffer) {
+                if (insertBuffer.isEmpty()) return
+                batch = ArrayList(insertBuffer)
+                insertBuffer.clear()
+            }
+            synchronized(db) {
+                db.beginTransaction()
+                try {
+                    val stmt = db.compileStatement("INSERT OR IGNORE INTO tiles VALUES (?, ?, ?, ?)")
+                    for ((tile, bytes, tmsY) in batch) {
+                        stmt.bindLong(1, tile.third.toLong())
+                        stmt.bindLong(2, tile.first.toLong())
+                        stmt.bindLong(3, tmsY.toLong())
+                        stmt.bindBlob(4, bytes)
+                        stmt.executeInsert()
+                        stmt.clearBindings()
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+        }
 
         for ((x, y, z) in tiles) {
             if (!isDownloading.get()) { latch.countDown(); continue }
@@ -238,27 +351,35 @@ object TileDownloadManager {
                 try {
                     val url = buildTileUrl(sourceInfo, x, y, z)
                     if (url == null) { downloaded.incrementAndGet(); notifyProgressThrottled(); latch.countDown(); return@submit }
-                    
-                    val request = Request.Builder().url(url)
-                        .header("User-Agent", "RaceNav/2.1 Android")
-                        .build()
-                    val response = client.newCall(request).execute()
-                    response.use { resp ->
-                        if (resp.isSuccessful) {
-                            val bytes = resp.body?.bytes()
-                            if (bytes != null && bytes.isNotEmpty()) {
-                                val tmsY = (1 shl z) - 1 - y
-                                synchronized(db) {
-                                    stmt.bindLong(1, z.toLong())
-                                    stmt.bindLong(2, x.toLong())
-                                    stmt.bindLong(3, tmsY.toLong())
-                                    stmt.bindBlob(4, bytes)
-                                    stmt.executeInsert()
-                                    stmt.clearBindings()
+
+                    // Retry up to 3 times with backoff
+                    var lastError: Exception? = null
+                    for (attempt in 1..3) {
+                        try {
+                            val request = Request.Builder().url(url)
+                                .header("User-Agent", "RaceNav/2.1 Android")
+                                .build()
+                            val response = client.newCall(request).execute()
+                            response.use { resp ->
+                                if (resp.isSuccessful) {
+                                    val bytes = resp.body?.bytes()
+                                    if (bytes != null && bytes.isNotEmpty()) {
+                                        val tmsY = (1 shl z) - 1 - y
+                                        insertBuffer.add(Triple(Triple(x, y, z), bytes, tmsY))
+                                        bytesTotal.addAndGet(bytes.size.toLong())
+                                        if (insertBuffer.size >= BATCH_SIZE) flushBatch()
+                                    }
                                 }
-                                bytesTotal.addAndGet(bytes.size.toLong())
                             }
+                            lastError = null
+                            break // success
+                        } catch (e: Exception) {
+                            lastError = e
+                            if (attempt < 3) Thread.sleep(1000L * attempt)
                         }
+                    }
+                    if (lastError != null) {
+                        Log.w("TileDownload", "Tile fail after 3 retries: z=$z x=$x y=$y: $lastError")
                     }
                 } catch (e: Exception) {
                     Log.w("TileDownload", "Tile fail: $e")
@@ -273,7 +394,8 @@ object TileDownloadManager {
         // Wait for ALL tiles to complete
         latch.await()
         executor.shutdown()
-        stmt.close()
+        // Flush remaining batch
+        flushBatch()
         db.close()
         Log.d("TileDownload", "downloadLayerSync DONE: ${layer.layerKey}, file size=${dbFile.length()}")
     }
@@ -296,10 +418,7 @@ object TileDownloadManager {
 
     /** Build a tile URL from the source info urls list, substituting {z}/{x}/{y} */
     private fun buildTileUrl(info: MapFragment.Companion.TileSourceInfo?, x: Int, y: Int, z: Int): String? {
-        if (info == null) {
-            Log.e("TileDownload", "buildTileUrl: info is null for tile z=$z x=$x y=$y")
-            return null
-        }
+        if (info == null) return null
         val urls = info.urls
         if (urls.isEmpty()) return null
         val template = urls[(x + y + z) % urls.size]

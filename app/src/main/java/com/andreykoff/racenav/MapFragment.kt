@@ -64,7 +64,7 @@ import kotlin.math.sqrt
 class MapFragment : Fragment() {
 
     private var _binding: FragmentMapBinding? = null
-    private val binding get() = _binding!!
+    private val binding get() = _binding ?: throw IllegalStateException("Binding accessed after onDestroyView")
     private var mapboxMap: MapboxMap? = null
     private var liveUsersPoller: LiveUsersPoller? = null
     var lastLiveDevices: List<LiveUsersPoller.LiveDevice> = emptyList()
@@ -523,7 +523,7 @@ class MapFragment : Fragment() {
         const val USER_MARKER_LAYER_ID = "user-marker-layer"
         const val USER_MARKER_ICON = "user-marker-icon"
 
-        data class TileSourceInfo(val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
+        data class TileSourceInfo(val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19, val minZoom: Int = 0)
 
         fun getRaceNavDir(ctx: android.content.Context, subfolder: String): java.io.File {
             val base = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS)
@@ -531,7 +531,7 @@ class MapFragment : Fragment() {
         }
     }
 
-    data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19)
+    data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19, val minZoom: Int = 0)
 
     // Minimal fallback — used only when no catalog and no cache available
     private val tileSources = linkedMapOf(
@@ -1248,7 +1248,8 @@ class MapFragment : Fragment() {
         val baseScheme = if (base.tms) ",\"scheme\":\"tms\"" else ""
 
         val sources = StringBuilder()
-        sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseScheme}")
+        val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
+        sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
 
         val layers = StringBuilder()
         layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
@@ -1269,7 +1270,8 @@ class MapFragment : Fragment() {
                 val opacity = if (isSubOverlay) 0.7 else 1.0
                 val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
-                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$ovScheme}")
+                val offMinZoom = if (offlineSrc.minZoom > 0) ",\"minzoom\":${offlineSrc.minZoom}" else ""
+                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
                 layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
             }
         }
@@ -3264,7 +3266,8 @@ class MapFragment : Fragment() {
         val info = OfflineMapInfo(key, displayName, path)
         offlineMaps.add(info)
         val maxZoom = tileServer?.getMaxZoom(index) ?: 19
-        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom)
+        val minZoom = tileServer?.getMinZoom(index) ?: 0
+        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
         saveOfflineMapsToPrefs()
         return key
     }
@@ -3336,7 +3339,7 @@ class MapFragment : Fragment() {
     fun getTileSourceInfoMap(): Map<String, Companion.TileSourceInfo> {
         val map = mutableMapOf<String, Companion.TileSourceInfo>()
         tileSources.filter { !it.key.startsWith(OFFLINE_TILE_KEY) && !it.key.startsWith("custom_") }
-            .forEach { (k, v) -> map[k] = Companion.TileSourceInfo(v.urls, v.tms, v.maxZoom) }
+            .forEach { (k, v) -> map[k] = Companion.TileSourceInfo(v.urls, v.tms, v.maxZoom, v.minZoom) }
         overlaySources.filter { it.key != "none" }
             .forEach { (k, v) -> map[k] = Companion.TileSourceInfo(v.urls, v.tms, v.maxZoom) }
         Log.d("TileDownload", "getTileSourceInfoMap: ${map.size} sources, keys=${map.keys}")
@@ -3377,7 +3380,8 @@ class MapFragment : Fragment() {
                     if (tileServer?.openDatabase(idx, path) == true) {
                         offlineMaps.add(OfflineMapInfo(key, name, path))
                         val maxZoom = tileServer?.getMaxZoom(idx) ?: 19
-                        tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom)
+                        val minZoom = tileServer?.getMinZoom(idx) ?: 0
+                        tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
                     }
                 }
             }
@@ -6011,11 +6015,13 @@ class MapFragment : Fragment() {
         if (!isRecording) {
             // Старт — запускаем foreground service
             val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_START }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
-            else ctx.startService(intent)
-            binding.btnRec.setImageResource(R.drawable.ic_rec)
-            binding.widgetTrackLen.text = "0.0"
-            binding.widgetChrono.text = "0:00"
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+                else ctx.startService(intent)
+            } catch (e: Exception) { Log.w("RaceNav", "startForegroundService failed: ${e.message}") }
+            _binding?.btnRec?.setImageResource(R.drawable.ic_rec)
+            _binding?.widgetTrackLen?.text = "0.0"
+            _binding?.widgetChrono?.text = "0:00"
             startChronoTicker()
             Toast.makeText(ctx, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
         } else {
@@ -6023,7 +6029,7 @@ class MapFragment : Fragment() {
             ctx.startService(Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_STOP })
             stopChronoTicker()
             updateTrackOnMap()
-            binding.btnRec.setImageResource(R.drawable.ic_rec_start)
+            _binding?.btnRec?.setImageResource(R.drawable.ic_rec_start)
             // Показываем диалог сохранения
             showSaveTrackDialog()
         }
@@ -6034,7 +6040,7 @@ class MapFragment : Fragment() {
     /** Called when user stops recording — offer to save GPX with name input */
     private fun showSaveTrackDialog() {
         val ctx = context ?: return
-        val pts = TrackingService.trackPoints.toList()
+        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
         val kmStr = String.format("%.1f", TrackingService.trackLengthM / 1000)
         if (pts.size < 2) {
             Toast.makeText(ctx, "⏹ Запись остановлена (нет точек)", Toast.LENGTH_SHORT).show()
@@ -6106,12 +6112,16 @@ class MapFragment : Fragment() {
             .setMessage("Найден трек: ${savedPoints.size} точек, ${String.format("%.1f", km)} км\n\nЧто сделать?")
             .setPositiveButton("Продолжить запись") { _, _ ->
                 // Restore points and resume recording
-                TrackingService.trackPoints.clear()
-                TrackingService.trackPoints.addAll(savedPoints)
+                synchronized(TrackingService.trackPoints) {
+                    TrackingService.trackPoints.clear()
+                    TrackingService.trackPoints.addAll(savedPoints)
+                }
                 TrackingService.trackLengthM = km * 1000.0
                 val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_RESUME }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
-                else ctx.startService(intent)
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+                    else ctx.startService(intent)
+                } catch (e: Exception) { Log.w("RaceNav", "startForegroundService failed: ${e.message}") }
                 _binding?.btnRec?.setImageResource(R.drawable.ic_rec)
                 _binding?.widgetChrono?.text = "0:00"
                 startChronoTicker()
@@ -6294,7 +6304,7 @@ class MapFragment : Fragment() {
     fun saveTrackToFile(points: List<Pair<Double, Double>>? = null, trackName: String? = null) {
         val ctx = context ?: return
         if (!LicenseManager.hasFullAccess(ctx)) { LicenseManager.showLicenseRequired(ctx); return }
-        val pts = points ?: TrackingService.trackPoints.toList()
+        val pts = points ?: synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
         if (pts.isEmpty()) {
             Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
             return
@@ -6333,7 +6343,7 @@ class MapFragment : Fragment() {
     fun shareRecordedTrack() {
         val ctx = context ?: return
         if (!LicenseManager.hasFullAccess(ctx)) { LicenseManager.showLicenseRequired(ctx); return }
-        val pts = TrackingService.trackPoints.toList()
+        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
         if (pts.isEmpty()) {
             Toast.makeText(ctx, "Нет точек для отправки", Toast.LENGTH_SHORT).show()
             return
@@ -6414,7 +6424,7 @@ class MapFragment : Fragment() {
 
     /** Clear recorded track from map and memory */
     fun clearRecordedTrack() {
-        TrackingService.trackPoints.clear()
+        synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.clear() }
         TrackingService.trackLengthM = 0.0
         // Clear track line on map
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(
@@ -6480,7 +6490,7 @@ class MapFragment : Fragment() {
     private fun updateTrackOnMap(extrapolateLat: Double = Double.NaN, extrapolateLon: Double = Double.NaN) {
         val style = mapboxMap?.style ?: return
         // Snapshot to avoid ConcurrentModificationException (TrackingService writes from GPS thread)
-        val snapshot = try { ArrayList(TrackingService.trackPoints) } catch (_: Exception) { return }
+        val snapshot = synchronized(TrackingService.trackPoints) { ArrayList(TrackingService.trackPoints) }
         if (snapshot.size < 2) return
 
         // Rebuild segment cache only when new points arrive (not every frame)
@@ -7294,7 +7304,7 @@ class MapFragment : Fragment() {
     fun syncPush(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
         val ctx = context ?: run { onResult(false, "Контекст недоступен"); return }
         if (!LicenseManager.hasFullAccess(ctx)) { onResult(false, "Требуется лицензия"); return }
-        val pts = TrackingService.trackPoints.toList()
+        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
         if (pts.isEmpty()) {
             onResult(false, "Нет активного трека для отправки")
             return
@@ -7424,11 +7434,13 @@ class MapFragment : Fragment() {
         val traccarCtx = context ?: return
         if (resumePrefs?.getBoolean(PREF_TRACCAR_ENABLED, false) == true && !TraccarService.isRunning
             && LicenseManager.hasFullAccess(traccarCtx)) {
-            traccarCtx.startForegroundService(
-                Intent(traccarCtx, TraccarService::class.java).apply {
-                    action = TraccarService.ACTION_START
-                }
-            )
+            try {
+                traccarCtx.startForegroundService(
+                    Intent(traccarCtx, TraccarService::class.java).apply {
+                        action = TraccarService.ACTION_START
+                    }
+                )
+            } catch (e: Exception) { Log.w("RaceNav", "TraccarService start failed: ${e.message}") }
             Log.d("LiveUsers", "Auto-started TraccarService (was enabled but not running)")
         }
         // Auto-sync on startup (if enabled and has full access)
@@ -7634,6 +7646,8 @@ class MapFragment : Fragment() {
                     .setMessage("Загружено ${TileDownloadManager.downloaded.get()} / ${TileDownloadManager.totalTiles.get()} тайлов")
                     .setPositiveButton("Отменить") { _, _ ->
                         TileDownloadManager.stopDownload()
+                        // Clean up incomplete area from registry
+                        OfflineAreasManager.deleteArea(ctx, offlineArea.id)
                         _binding?.downloadIndicator?.visibility = View.GONE
                         Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
                     }
