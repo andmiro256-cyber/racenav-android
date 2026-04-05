@@ -1705,6 +1705,78 @@ class SettingsFragment : Fragment() {
             })
             parentVg.addView(cbRow, idx)
 
+            // "Видимые на карте" — выбор активной группы избранных
+            val density = resources.displayMetrics.density
+            val groupsRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding((32 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                isClickable = true
+                setBackgroundResource(android.R.drawable.list_selector_background)
+            }
+            val groupsLabel = TextView(requireContext()).apply {
+                text = "Видимые на карте"
+                setTextColor(0xFFCCCCCC.toInt())
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val groupsValue = TextView(requireContext()).apply {
+                setTextColor(0xFFFF6F00.toInt())
+                textSize = 13f
+                gravity = android.view.Gravity.END
+            }
+            val groupsChevron = TextView(requireContext()).apply {
+                text = "  ›"
+                setTextColor(0xFF888888.toInt())
+                textSize = 15f
+            }
+            groupsRow.addView(groupsLabel)
+            groupsRow.addView(groupsValue)
+            groupsRow.addView(groupsChevron)
+            parentVg.addView(groupsRow, idx + 1)
+
+            fun refreshGroupsValueLabel() {
+                val ctx = context ?: return
+                val activeId = FavoritesGroupsRepository.getActiveGroupId(ctx)
+                val doc = FavoritesGroupsRepository.getCached(ctx)
+                groupsValue.text = if (activeId == FavoritesGroupsRepository.ACTIVE_ALL) {
+                    "Все участники"
+                } else {
+                    val g = doc.groups.firstOrNull { it.id == activeId }
+                    if (g != null) "${g.name} (${g.members.size})" else "Все участники"
+                }
+            }
+            refreshGroupsValueLabel()
+
+            groupsRow.setOnClickListener {
+                val ctx = requireContext()
+                val doc = FavoritesGroupsRepository.getCached(ctx)
+                val options = mutableListOf<Pair<String, String>>() // id → label
+                options.add(FavoritesGroupsRepository.ACTIVE_ALL to "Все участники")
+                doc.groups.forEach { g ->
+                    options.add(g.id to "${g.name} (${g.members.size})")
+                }
+                options.add("__manage__" to "⚙ Управление группами…")
+                val labels = options.map { it.second }.toTypedArray()
+                val currentId = FavoritesGroupsRepository.getActiveGroupId(ctx)
+                val checkedIdx = options.indexOfFirst { it.first == currentId }.coerceAtLeast(0)
+                android.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+                    .setTitle("Видимые на карте")
+                    .setSingleChoiceItems(labels, checkedIdx) { dlg, which ->
+                        val (id, _) = options[which]
+                        if (id == "__manage__") {
+                            dlg.dismiss()
+                            openFavoritesGroupsScreen()
+                        } else {
+                            FavoritesGroupsRepository.setActiveGroupId(ctx, id)
+                            refreshGroupsValueLabel()
+                            dlg.dismiss()
+                        }
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+
         // ── Live user marker size ──
         val txtLiveUserSize = view.findViewById<TextView>(R.id.txtLiveUserSize)
         var liveUserSize = prefs.getInt(MapFragment.PREF_LIVE_USER_SIZE, MapFragment.DEFAULT_LIVE_USER_SIZE).coerceIn(1, 10)
@@ -2247,7 +2319,7 @@ class SettingsFragment : Fragment() {
                     val deviceServerId = device.getInt("id")
                     device.put("uniqueId", newId)
                     if (deviceName.isNotBlank()) device.put("name", deviceName)
-                    if (!device.has("groupId") || device.optInt("groupId", 0) == 0) device.put("groupId", 66)
+                    if (!device.has("groupId") || device.isNull("groupId") || device.optInt("groupId", 0) == 0) device.put("groupId", 66)
                     val updateReq = okhttp3.Request.Builder()
                         .url("$apiBase/api/devices/$deviceServerId")
                         .put(device.toString().toRequestBody("application/json".toMediaType()))
@@ -2284,13 +2356,15 @@ class SettingsFragment : Fragment() {
 
                     val devices = org.json.JSONArray(body)
                     if (devices.length() > 0) {
-                        // Device exists — check name
+                        // Device exists — check name + group
                         val existing = devices.getJSONObject(0)
-                        val existingName = existing.getString("name")
+                        val existingName = existing.optString("name", "")
                         val deviceId = existing.getInt("id")
-                        if (deviceName.isNotBlank() && deviceName != existingName) {
-                            // Update name
-                            existing.put("name", deviceName)
+                        val needNameUpdate = deviceName.isNotBlank() && deviceName != existingName
+                        val needGroupUpdate = !existing.has("groupId") || existing.isNull("groupId") || existing.optInt("groupId", 0) == 0
+                        if (needNameUpdate || needGroupUpdate) {
+                            if (needNameUpdate) existing.put("name", deviceName)
+                            if (needGroupUpdate) existing.put("groupId", 66)  // Users group
                             val updateReq = okhttp3.Request.Builder()
                                 .url("$apiBase/api/devices/$deviceId")
                                                                 .put(existing.toString()
@@ -3972,5 +4046,12 @@ class SettingsFragment : Fragment() {
         liveUsersHandler?.removeCallbacksAndMessages(null)
         liveUsersHandler = null
         super.onDestroyView()
+    }
+
+    private fun openFavoritesGroupsScreen() {
+        parentFragmentManager.beginTransaction()
+            .add(R.id.container, FavoritesGroupsFragment())
+            .addToBackStack(null)
+            .commit()
     }
 }

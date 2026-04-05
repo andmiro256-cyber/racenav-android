@@ -69,6 +69,7 @@ class MapFragment : Fragment() {
     private var liveUsersPoller: LiveUsersPoller? = null
     var lastLiveDevices: List<LiveUsersPoller.LiveDevice> = emptyList()
         private set
+    private var favoritesPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -1630,46 +1631,58 @@ class MapFragment : Fragment() {
         Log.d("LiveUsers", "startLiveUsersPoller baseUrl=$liveBaseUrl myDeviceId=$myDeviceId")
         liveUsersPoller = LiveUsersPoller(liveBaseUrl, myDeviceId, onError = { err ->
             Log.w("LiveUsers", "poller error: $err")
-        }) { geoJson, devices ->
-            try {
-                lastLiveDevices = devices
-                val style = mapboxMap?.style ?: return@LiveUsersPoller
-                val onlineOnly = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    ?.getBoolean(PREF_LIVE_USERS_ONLINE_ONLY, false) ?: false
-                val filtered = if (onlineOnly) devices.filter { it.status == "online" } else devices
-                // Remove old layers/source
-                try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
-                try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
-                // Build GeoJSON with per-device bitmap icons
-                val features = JSONArray()
-                filtered.forEach { d ->
-                    val iconId = "live-user-${d.deviceId}"
-                    style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan))
-                    features.put(JSONObject()
-                        .put("type", "Feature")
-                        .put("geometry", JSONObject().put("type", "Point")
-                            .put("coordinates", JSONArray().put(d.lon).put(d.lat)))
-                        .put("properties", JSONObject()
-                            .put("icon", iconId)
-                            .put("name", d.name)
-                            .put("speed", d.speed)
-                            .put("status", d.status)
-                            .put("deviceId", d.deviceId)))
-                }
-                val fc = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
-                style.addSource(GeoJsonSource(LIVE_USERS_SOURCE_ID, fc))
-                style.addLayer(SymbolLayer(LIVE_USERS_LAYER_ID, LIVE_USERS_SOURCE_ID).withProperties(
-                    PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
-                    PropertyFactory.iconAllowOverlap(true),
-                    PropertyFactory.iconIgnorePlacement(true),
-                    PropertyFactory.iconAnchor("center"),
-                    *wpIconSizeProps()
-                ))
-            } catch (e: Exception) {
-                Log.w("LiveUsers", "update failed: ${e.message}")
-            }
+        }) { _, devices ->
+            lastLiveDevices = devices
+            refreshLiveUsersMarkers()
         }
         liveUsersPoller?.start()
+    }
+
+    /**
+     * Re-render live users layer from [lastLiveDevices], applying active group filter and onlineOnly.
+     * Can be called on every poll tick OR when active group changes via SharedPref.
+     */
+    fun refreshLiveUsersMarkers() {
+        try {
+            val style = mapboxMap?.style ?: return
+            val ctx = context ?: return
+            val p = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val onlineOnly = p.getBoolean(PREF_LIVE_USERS_ONLINE_ONLY, false)
+            val groupMembers = FavoritesGroupsRepository.getActiveGroupMembers(ctx)
+            val devices = lastLiveDevices
+            val groupFiltered = if (groupMembers != null) {
+                devices.filter { it.uniqueId.uppercase() in groupMembers }
+            } else devices
+            val filtered = if (onlineOnly) groupFiltered.filter { it.status == "online" } else groupFiltered
+            try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
+            try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
+            val features = JSONArray()
+            filtered.forEach { d ->
+                val iconId = "live-user-${d.deviceId}"
+                style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan))
+                features.put(JSONObject()
+                    .put("type", "Feature")
+                    .put("geometry", JSONObject().put("type", "Point")
+                        .put("coordinates", JSONArray().put(d.lon).put(d.lat)))
+                    .put("properties", JSONObject()
+                        .put("icon", iconId)
+                        .put("name", d.name)
+                        .put("speed", d.speed)
+                        .put("status", d.status)
+                        .put("deviceId", d.deviceId)))
+            }
+            val fc = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
+            style.addSource(GeoJsonSource(LIVE_USERS_SOURCE_ID, fc))
+            style.addLayer(SymbolLayer(LIVE_USERS_LAYER_ID, LIVE_USERS_SOURCE_ID).withProperties(
+                PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconAnchor("center"),
+                *wpIconSizeProps()
+            ))
+        } catch (e: Exception) {
+            Log.w("LiveUsers", "update failed: ${e.message}")
+        }
     }
 
     fun stopLiveUsersPoller() {
@@ -7372,6 +7385,19 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onResume()
         startMagnetometer()
         applyFullscreenPref()
+        // Register favorites-groups pref listener — re-render markers when active group changes
+        val ctx = context
+        if (ctx != null && favoritesPrefListener == null) {
+            val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key == PREF_LIVE_USERS_ACTIVE_GROUP_ID || key == PREF_LIVE_USERS_FAVORITES_CACHE) {
+                    FavoritesGroupsRepository.invalidateCache()
+                    refreshLiveUsersMarkers()
+                }
+            }
+            favoritesPrefListener = listener
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .registerOnSharedPreferenceChangeListener(listener)
+        }
         // Retry email registration if saved locally but not yet synced to server
         retryEmailRegistration()
         applyWidgetPrefs()
@@ -7486,6 +7512,12 @@ class MapFragment : Fragment() {
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(traccarStatusReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+        // Unregister favorites pref listener
+        favoritesPrefListener?.let {
+            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.unregisterOnSharedPreferenceChangeListener(it)
+        }
+        favoritesPrefListener = null
     }
     override fun onStop() {
         super.onStop()
