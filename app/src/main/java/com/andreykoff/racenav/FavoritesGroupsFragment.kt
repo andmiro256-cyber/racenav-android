@@ -9,7 +9,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
-import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,7 +44,7 @@ class FavoritesGroupsFragment : Fragment() {
         val ctx = requireContext()
         if (FavoritesGroupsRepository.hasSync(ctx)) {
             noSyncHint.visibility = View.GONE
-            CoroutineScope(Dispatchers.IO).launch {
+            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                 val result = FavoritesGroupsRepository.syncFromServer(ctx)
                 withContext(Dispatchers.Main) {
                     if (isAdded) {
@@ -162,7 +162,7 @@ class FavoritesGroupsFragment : Fragment() {
 
     private fun persistAndRender(doc: FavoritesDocument, onSuccess: (() -> Unit)? = null) {
         val ctx = requireContext()
-        CoroutineScope(Dispatchers.IO).launch {
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             val result = FavoritesGroupsRepository.saveToServer(ctx, doc)
             withContext(Dispatchers.Main) {
                 if (!isAdded) return@withContext
@@ -173,7 +173,7 @@ class FavoritesGroupsFragment : Fragment() {
                     }
                     is FavoritesResult.VersionConflict -> {
                         Toast.makeText(ctx, "Группы обновлены с другого устройства. Загружаю свежую версию.", Toast.LENGTH_LONG).show()
-                        CoroutineScope(Dispatchers.IO).launch {
+                        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                             FavoritesGroupsRepository.syncFromServer(ctx)
                             withContext(Dispatchers.Main) { if (isAdded) render() }
                         }

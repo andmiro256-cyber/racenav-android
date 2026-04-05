@@ -1647,6 +1647,12 @@ class MapFragment : Fragment() {
             val style = mapboxMap?.style ?: return
             val ctx = context ?: return
             val p = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            // Don't resurrect markers if live users are disabled (e.g. user toggled off but changed favorites)
+            if (!p.getBoolean(PREF_LIVE_USERS_ENABLED, false)) {
+                try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
+                try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
+                return
+            }
             val onlineOnly = p.getBoolean(PREF_LIVE_USERS_ONLINE_ONLY, false)
             val groupMembers = FavoritesGroupsRepository.getActiveGroupMembers(ctx)
             val devices = lastLiveDevices
