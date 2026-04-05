@@ -218,17 +218,18 @@ class GroupEditorFragment : Fragment() {
                 val newActive = if (currentDoc.activeGroupId == groupId) {
                     if (newGroups.isEmpty()) FavoritesGroupsRepository.ACTIVE_ALL else newGroups.first().id
                 } else currentDoc.activeGroupId
+                val wasActive = currentDoc.activeGroupId == groupId
                 val updated = currentDoc.copy(groups = newGroups, activeGroupId = newActive)
-                if (currentDoc.activeGroupId == groupId) {
-                    FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
-                }
-                persistAndClose(updated)
+                // active-group flip ONLY after successful save
+                persistAndClose(updated, onSaveSuccess = {
+                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
+                })
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
-    private fun persistAndClose(doc: FavoritesDocument) {
+    private fun persistAndClose(doc: FavoritesDocument, onSaveSuccess: (() -> Unit)? = null) {
         val ctx = requireContext()
         CoroutineScope(Dispatchers.IO).launch {
             val result = FavoritesGroupsRepository.saveToServer(ctx, doc)
@@ -236,6 +237,7 @@ class GroupEditorFragment : Fragment() {
                 if (!isAdded) return@withContext
                 when (result) {
                     is FavoritesResult.Success, FavoritesResult.NoSync -> {
+                        onSaveSuccess?.invoke()
                         parentFragmentManager.popBackStack()
                     }
                     is FavoritesResult.VersionConflict -> {
@@ -249,6 +251,7 @@ class GroupEditorFragment : Fragment() {
                     }
                     is FavoritesResult.NetworkError -> {
                         Toast.makeText(ctx, "Нет связи — сохранено локально", Toast.LENGTH_SHORT).show()
+                        onSaveSuccess?.invoke()
                         parentFragmentManager.popBackStack()
                     }
                     is FavoritesResult.AuthError -> {
@@ -256,6 +259,9 @@ class GroupEditorFragment : Fragment() {
                     }
                     is FavoritesResult.RateLimit -> {
                         Toast.makeText(ctx, "Слишком много изменений — подождите", Toast.LENGTH_SHORT).show()
+                    }
+                    is FavoritesResult.DocumentTooLarge -> {
+                        Toast.makeText(ctx, "Документ слишком большой — уменьшите количество участников", Toast.LENGTH_LONG).show()
                     }
                 }
             }

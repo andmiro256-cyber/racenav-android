@@ -1777,6 +1777,16 @@ class SettingsFragment : Fragment() {
                     .show()
             }
 
+            // Keep label fresh when active group / groups list changes from another screen
+            val favPrefListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key == MapFragment.PREF_LIVE_USERS_ACTIVE_GROUP_ID ||
+                    key == MapFragment.PREF_LIVE_USERS_FAVORITES_CACHE) {
+                    refreshGroupsValueLabel()
+                }
+            }
+            favoritesLabelPrefListener = favPrefListener
+            prefs.registerOnSharedPreferenceChangeListener(favPrefListener)
+
         // ── Live user marker size ──
         val txtLiveUserSize = view.findViewById<TextView>(R.id.txtLiveUserSize)
         var liveUserSize = prefs.getInt(MapFragment.PREF_LIVE_USER_SIZE, MapFragment.DEFAULT_LIVE_USER_SIZE).coerceIn(1, 10)
@@ -2417,6 +2427,7 @@ class SettingsFragment : Fragment() {
     )
 
     private var liveUsersHandler: android.os.Handler? = null
+    private var favoritesLabelPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var liveUsersRunnable: Runnable? = null
     private var currentSettingsTab = "main"
     private var scrollContentRef: android.view.ViewGroup? = null
@@ -4045,6 +4056,11 @@ class SettingsFragment : Fragment() {
     override fun onDestroyView() {
         liveUsersHandler?.removeCallbacksAndMessages(null)
         liveUsersHandler = null
+        favoritesLabelPrefListener?.let {
+            context?.getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+                ?.unregisterOnSharedPreferenceChangeListener(it)
+        }
+        favoritesLabelPrefListener = null
         super.onDestroyView()
     }
 

@@ -86,7 +86,6 @@ class FavoritesGroupsFragment : Fragment() {
 
     private fun buildGroupCard(g: FavoritesGroup, isActive: Boolean): View {
         val ctx = requireContext()
-        val density = resources.displayMetrics.density
         val inflater = LayoutInflater.from(ctx)
         val card = inflater.inflate(R.layout.item_group_card, listContainer, false)
         card.findViewById<View>(R.id.groupColorDot).setBackgroundColor(parseColor(g.color))
@@ -146,22 +145,27 @@ class FavoritesGroupsFragment : Fragment() {
                 val newActive = if (doc.activeGroupId == g.id) {
                     if (newGroups.isEmpty()) FavoritesGroupsRepository.ACTIVE_ALL else newGroups.first().id
                 } else doc.activeGroupId
-                persistAndRender(doc.copy(groups = newGroups, activeGroupId = newActive))
-                if (doc.activeGroupId == g.id) {
-                    FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
-                }
+                val wasActive = doc.activeGroupId == g.id
+                // active-group flip ONLY after successful save
+                persistAndRender(doc.copy(groups = newGroups, activeGroupId = newActive), onSuccess = {
+                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
+                })
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
-    private fun persistAndRender(doc: FavoritesDocument) {
+    private fun persistAndRender(doc: FavoritesDocument, onSuccess: (() -> Unit)? = null) {
         val ctx = requireContext()
         CoroutineScope(Dispatchers.IO).launch {
             val result = FavoritesGroupsRepository.saveToServer(ctx, doc)
             withContext(Dispatchers.Main) {
                 if (!isAdded) return@withContext
                 when (result) {
+                    is FavoritesResult.Success, FavoritesResult.NoSync -> {
+                        onSuccess?.invoke()
+                        render()
+                    }
                     is FavoritesResult.VersionConflict -> {
                         Toast.makeText(ctx, "Группы обновлены с другого устройства. Загружаю свежую версию.", Toast.LENGTH_LONG).show()
                         CoroutineScope(Dispatchers.IO).launch {
@@ -170,10 +174,19 @@ class FavoritesGroupsFragment : Fragment() {
                         }
                     }
                     is FavoritesResult.NetworkError -> {
-                        Toast.makeText(ctx, "Нет связи — изменения в кэше", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, "Нет связи — сохранено локально", Toast.LENGTH_SHORT).show()
+                        onSuccess?.invoke()
                         render()
                     }
-                    else -> render()
+                    is FavoritesResult.AuthError -> {
+                        Toast.makeText(ctx, "Ошибка авторизации — изменения не сохранены", Toast.LENGTH_LONG).show()
+                    }
+                    is FavoritesResult.RateLimit -> {
+                        Toast.makeText(ctx, "Слишком много изменений — подождите", Toast.LENGTH_SHORT).show()
+                    }
+                    is FavoritesResult.DocumentTooLarge -> {
+                        Toast.makeText(ctx, "Документ слишком большой — уменьшите количество групп/участников", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         }
