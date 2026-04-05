@@ -141,14 +141,16 @@ class FavoritesGroupsFragment : Fragment() {
             .setMessage("Удалить группу «${g.name}»?")
             .setPositiveButton("Удалить") { _, _ ->
                 val doc = FavoritesGroupsRepository.getCached(ctx)
+                val effectiveActiveId = FavoritesGroupsRepository.getActiveGroupId(ctx)
                 val newGroups = doc.groups.filter { it.id != g.id }
-                val newActive = if (doc.activeGroupId == g.id) {
-                    if (newGroups.isEmpty()) FavoritesGroupsRepository.ACTIVE_ALL else newGroups.first().id
-                } else doc.activeGroupId
-                val wasActive = doc.activeGroupId == g.id
+                val fallbackActive = if (newGroups.isEmpty()) {
+                    FavoritesGroupsRepository.ACTIVE_ALL
+                } else newGroups.first().id
+                val wasActive = effectiveActiveId == g.id
+                val newActive = if (wasActive) fallbackActive else doc.activeGroupId
                 // active-group flip ONLY after successful save
                 persistAndRender(doc.copy(groups = newGroups, activeGroupId = newActive), onSuccess = {
-                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
+                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, fallbackActive)
                 })
             }
             .setNegativeButton("Отмена", null)

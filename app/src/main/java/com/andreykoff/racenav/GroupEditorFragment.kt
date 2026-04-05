@@ -214,15 +214,17 @@ class GroupEditorFragment : Fragment() {
             .setTitle("Удалить группу")
             .setMessage("Удалить группу «${currentGroup.name}»?")
             .setPositiveButton("Удалить") { _, _ ->
+                val effectiveActiveId = FavoritesGroupsRepository.getActiveGroupId(ctx)
                 val newGroups = currentDoc.groups.filter { it.id != groupId }
-                val newActive = if (currentDoc.activeGroupId == groupId) {
-                    if (newGroups.isEmpty()) FavoritesGroupsRepository.ACTIVE_ALL else newGroups.first().id
-                } else currentDoc.activeGroupId
-                val wasActive = currentDoc.activeGroupId == groupId
+                val fallbackActive = if (newGroups.isEmpty()) {
+                    FavoritesGroupsRepository.ACTIVE_ALL
+                } else newGroups.first().id
+                val wasActive = effectiveActiveId == groupId
+                val newActive = if (wasActive) fallbackActive else currentDoc.activeGroupId
                 val updated = currentDoc.copy(groups = newGroups, activeGroupId = newActive)
                 // active-group flip ONLY after successful save
                 persistAndClose(updated, onSaveSuccess = {
-                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, newActive)
+                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, fallbackActive)
                 })
             }
             .setNegativeButton("Отмена", null)

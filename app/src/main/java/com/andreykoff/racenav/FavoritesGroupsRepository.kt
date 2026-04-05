@@ -121,7 +121,8 @@ object FavoritesGroupsRepository {
         return result
     }
 
-    /** Save doc to server (PUT), update cache on success. Blocking. */
+    /** Save doc to server (PUT), update cache on success OR on network error
+     *  (local-first — offline edits persist until next successful sync). Blocking. */
     fun saveToServer(ctx: Context, doc: FavoritesDocument): FavoritesResult {
         val (email, key) = credentials(ctx)
         if (email.isBlank() || key.isBlank()) {
@@ -130,8 +131,12 @@ object FavoritesGroupsRepository {
             return FavoritesResult.NoSync
         }
         val result = FavoritesApi.save(email, key, doc)
-        if (result is FavoritesResult.Success) {
-            synchronized(writeLock) { setCache(ctx, result.doc) }
+        synchronized(writeLock) {
+            when (result) {
+                is FavoritesResult.Success -> setCache(ctx, result.doc)
+                is FavoritesResult.NetworkError -> setCache(ctx, doc)  // offline: keep local
+                else -> { /* AuthError/RateLimit/VersionConflict/DocumentTooLarge — do NOT touch cache */ }
+            }
         }
         return result
     }
