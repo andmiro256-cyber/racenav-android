@@ -451,6 +451,11 @@ class MapFragment : Fragment() {
         const val DEFAULT_LIVE_USER_SIZE = 3
         const val DEFAULT_LIVE_USER_LABEL_SIZE = 3
 
+        // Favorites groups
+        const val PREF_LIVE_USERS_ACTIVE_GROUP_ID  = "live_users_active_group_id"   // String, default "all"
+        const val PREF_LIVE_USERS_FAVORITES_CACHE  = "live_users_favorites_cache"   // JSON string
+        const val PREF_LIVE_USERS_FAVORITES_VERSION = "live_users_favorites_version" // Int
+
         /** Convert 1-10 scale to dp for marker sizes: 1=24dp, 3=40dp, 5=56dp, 10=96dp */
         fun markerScaleToDp(scale: Int): Int = scale * 8 + 16
 

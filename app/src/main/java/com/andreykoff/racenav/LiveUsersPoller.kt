@@ -19,6 +19,7 @@ class LiveUsersPoller(
 ) {
     data class LiveDevice(
         val deviceId: Int,
+        val uniqueId: String,
         val name: String,
         val lat: Double,
         val lon: Double,
@@ -108,7 +109,7 @@ class LiveUsersPoller(
                             val lastUpdate = if (d.isNull("lastUpdate")) null else d.optString("lastUpdate")
                             val plan = d.optString("plan", "").ifEmpty { null }
 
-                            devices.add(LiveDevice(deviceId, name, lat, lon, speed, course, battery, status, lastUpdate, plan))
+                            devices.add(LiveDevice(deviceId, uniqueId, name, lat, lon, speed, course, battery, status, lastUpdate, plan))
 
                             val feature = JSONObject()
                                 .put("type", "Feature")
