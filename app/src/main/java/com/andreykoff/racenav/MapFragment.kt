@@ -392,6 +392,7 @@ class MapFragment : Fragment() {
 
         const val PREF_TILE_KEY = "tile_key"
         const val PREF_OVERLAY_KEY = "overlay_key"
+        const val PREF_HIDE_ONLINE_BASE = "hide_online_base"  // bool, default false
         const val PREF_WIDGET_FONT_SCALE = "widget_font_scale"  // 1-10, default 5
         const val PREF_WIDGET_SPEED = "widget_speed"
         const val PREF_WIDGET_BEARING = "widget_bearing"
@@ -1253,23 +1254,32 @@ class MapFragment : Fragment() {
         val baseTiles = base.urls.joinToString(",") { "\"$it\"" }
         val baseScheme = if (base.tms) ",\"scheme\":\"tms\"" else ""
 
-        val sources = StringBuilder()
-        val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
-        sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
+        val hideOnlineBase = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getBoolean(PREF_HIDE_ONLINE_BASE, false) ?: false
+        val hasOfflineOverlay = overlayKeys.any { tileSources.containsKey(it) }
+        // Only hide online base if user explicitly asked AND at least one offline is active
+        val skipBase = hideOnlineBase && hasOfflineOverlay
 
+        val sources = StringBuilder()
         val layers = StringBuilder()
-        layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
+        if (!skipBase) {
+            val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
+            sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
+            layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
+        }
 
         overlayKeys.filter { it != "none" }.forEachIndexed { idx, key ->
             // Try online overlay first, then offline tile source
             val ov = overlaySources[key]
             val offlineSrc = if (ov == null) tileSources[key] else null
+            val sep = if (sources.isEmpty()) "" else ","
+            val layerSep = if (layers.isEmpty()) "" else ","
             if (ov != null) {
                 if (ov.urls.isEmpty()) return@forEachIndexed
                 val ovTiles = ov.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (ov.tms) ",\"scheme\":\"tms\"" else ""
-                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
-                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
+                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
+                layers.append("$layerSep{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
             } else if (offlineSrc != null) {
                 // Offline source — base maps at full opacity, sub-overlays at 0.7
                 val isSubOverlay = offlineMaps.find { it.key == key }?.name?.contains("_слой_") == true
@@ -1277,8 +1287,8 @@ class MapFragment : Fragment() {
                 val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
                 val offMinZoom = if (offlineSrc.minZoom > 0) ",\"minzoom\":${offlineSrc.minZoom}" else ""
-                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
-                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
+                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
+                layers.append("$layerSep{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
             }
         }
 
@@ -3278,6 +3288,25 @@ class MapFragment : Fragment() {
         )
         // Flash yellow border to confirm lock activation
         flashScreenBorder(Color.parseColor("#FFD600"))
+    }
+
+    /** Animate camera to geographic bounds of the given offline map. */
+    private fun flyToOfflineMapBounds(index: Int) {
+        val bounds = tileServer?.getBounds(index) ?: return  // [north, south, east, west]
+        val north = bounds[0]; val south = bounds[1]; val east = bounds[2]; val west = bounds[3]
+        if (north.isNaN() || south.isNaN() || east.isNaN() || west.isNaN()) return
+        try {
+            val sw = com.mapbox.mapboxsdk.geometry.LatLng(south, west)
+            val ne = com.mapbox.mapboxsdk.geometry.LatLng(north, east)
+            val latLngBounds = com.mapbox.mapboxsdk.geometry.LatLngBounds.Builder().include(sw).include(ne).build()
+            val padding = (40 * resources.displayMetrics.density).toInt()
+            mapboxMap?.animateCamera(
+                com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngBounds(latLngBounds, padding),
+                600
+            )
+        } catch (e: Exception) {
+            Log.w("OfflineMap", "flyToBounds failed: ${e.message}")
+        }
     }
 
     /** Add an offline map and return its key. Returns null on failure. */
@@ -7002,6 +7031,20 @@ class MapFragment : Fragment() {
 
         // Offline layers (right column)
         val offlineGroup = view.findViewById<android.widget.LinearLayout>(R.id.offlineRadioGroup)
+        // Toggle: hide online base when offline is active
+        val ctxHide = requireContext()
+        val hidePrefs = ctxHide.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        offlineGroup.addView(android.widget.CheckBox(ctxHide).apply {
+            text = "Скрыть онлайн-базу"
+            setTextColor(0xFFFFEB3B.toInt()); textSize = 12f
+            setPadding(16, 8, 16, 8)
+            isChecked = hidePrefs.getBoolean(PREF_HIDE_ONLINE_BASE, false)
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFFEB3B.toInt())
+            setOnCheckedChangeListener { _, checked ->
+                hidePrefs.edit().putBoolean(PREF_HIDE_ONLINE_BASE, checked).apply()
+                loadTileStyle(currentTileKey, currentOverlayKeys)
+            }
+        })
         if (offlineMaps.isEmpty()) {
             offlineGroup.addView(android.widget.TextView(requireContext()).apply {
                 text = "Не загружено"; setTextColor(0xFF888888.toInt()); textSize = 12f
@@ -7028,6 +7071,8 @@ class MapFragment : Fragment() {
                                 val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
                                 if (ovInfo != null) currentOverlayKeys.add(ovInfo.key)
                             }
+                            // Jump camera to map bounds
+                            flyToOfflineMapBounds(info.index)
                         } else {
                             currentOverlayKeys.remove(info.key)
                             // Remove area overlays too

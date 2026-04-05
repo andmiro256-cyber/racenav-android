@@ -72,6 +72,24 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         databases.remove(index)?.db?.close()
     }
 
+    /** Detect if RMaps file uses inverted z convention (actual_z = 17 - stored_z).
+     *  Checks if max(x) at min(stored_z) exceeds what stored_z could naturally contain.
+     *  Returns true if inverted. */
+    private fun isRMapsInverted(db: SQLiteDatabase): Boolean {
+        try {
+            val storedMin = db.rawQuery("SELECT MIN(z) FROM tiles", null).use {
+                if (it.moveToFirst()) it.getInt(0) else return false
+            }
+            val maxX = db.rawQuery("SELECT MAX(x) FROM tiles WHERE z=?", arrayOf(storedMin.toString())).use {
+                if (it.moveToFirst()) it.getInt(0) else return false
+            }
+            // At actual zoom z, max valid x = (1 << z) - 1. If maxX exceeds this for storedMin,
+            // the real zoom must be higher → stored_z is inverted.
+            val nonInvertedMaxX = (1 shl storedMin) - 1
+            return maxX > nonInvertedMaxX
+        } catch (_: Exception) { return false }
+    }
+
     fun getMaxZoom(index: Int): Int {
         val entry = databases[index] ?: return 19
         val db = entry.db
@@ -89,8 +107,14 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         }
         if (entry.format == DbFormat.RMAPS) {
             try {
-                db.rawQuery("SELECT MAX(z) FROM tiles", null).use { c ->
-                    if (c.moveToFirst()) return c.getInt(0)
+                val inverted = isRMapsInverted(db)
+                db.rawQuery("SELECT MIN(z), MAX(z) FROM tiles", null).use { c ->
+                    if (c.moveToFirst()) {
+                        val minStored = c.getInt(0)
+                        val maxStored = c.getInt(1)
+                        // If inverted: max actual zoom = 17 - min stored zoom
+                        return if (inverted) 17 - minStored else maxStored
+                    }
                 }
             } catch (_: Exception) {}
         }
@@ -114,12 +138,86 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         }
         if (entry.format == DbFormat.RMAPS) {
             try {
-                db.rawQuery("SELECT MIN(z) FROM tiles", null).use { c ->
-                    if (c.moveToFirst()) return c.getInt(0)
+                val inverted = isRMapsInverted(db)
+                db.rawQuery("SELECT MIN(z), MAX(z) FROM tiles", null).use { c ->
+                    if (c.moveToFirst()) {
+                        val minStored = c.getInt(0)
+                        val maxStored = c.getInt(1)
+                        // If inverted: min actual zoom = 17 - max stored zoom
+                        return if (inverted) 17 - maxStored else minStored
+                    }
                 }
             } catch (_: Exception) {}
         }
         return 0
+    }
+
+    /** Returns geographic bounds (north, south, east, west) of all tiles in the database, or null. */
+    fun getBounds(index: Int): DoubleArray? {
+        val entry = databases[index] ?: return null
+        val db = entry.db
+        return try {
+            when (entry.format) {
+                DbFormat.MBTILES -> boundsMBTiles(db)
+                DbFormat.RMAPS -> boundsRMaps(db, isRMapsInverted(db))
+                DbFormat.UNKNOWN -> null
+            }
+        } catch (_: Exception) { null }
+    }
+
+    private fun boundsMBTiles(db: SQLiteDatabase): DoubleArray? {
+        // Try metadata bounds first
+        try {
+            db.rawQuery("SELECT value FROM metadata WHERE name='bounds'", null).use { c ->
+                if (c.moveToFirst()) {
+                    val parts = c.getString(0).split(",").mapNotNull { it.trim().toDoubleOrNull() }
+                    if (parts.size == 4) return doubleArrayOf(parts[3], parts[1], parts[2], parts[0]) // N,S,E,W
+                }
+            }
+        } catch (_: Exception) {}
+        // Fallback: compute from tiles at max zoom (TMS y-flipped)
+        db.rawQuery("SELECT MAX(zoom_level) FROM tiles", null).use { c ->
+            if (!c.moveToFirst()) return null
+            val z = c.getInt(0)
+            return boundsFromTileRange(db, z, xCol = "tile_column", yCol = "tile_row", tmsY = true, zCol = "zoom_level")
+        }
+    }
+
+    private fun boundsRMaps(db: SQLiteDatabase, inverted: Boolean): DoubleArray? {
+        val storedMin = db.rawQuery("SELECT MIN(z) FROM tiles", null).use {
+            if (it.moveToFirst()) it.getInt(0) else return null
+        }
+        val actualZ = if (inverted) 17 - storedMin else storedMin
+        return boundsFromTileRangeRaw(db, storedMin, actualZ, xCol = "x", yCol = "y", tmsY = false, zCol = "z")
+    }
+
+    private fun boundsFromTileRange(db: SQLiteDatabase, actualZ: Int, xCol: String, yCol: String, tmsY: Boolean, zCol: String): DoubleArray? {
+        return boundsFromTileRangeRaw(db, actualZ, actualZ, xCol, yCol, tmsY, zCol)
+    }
+
+    private fun boundsFromTileRangeRaw(db: SQLiteDatabase, storedZ: Int, actualZ: Int, xCol: String, yCol: String, tmsY: Boolean, zCol: String): DoubleArray? {
+        val sql = "SELECT MIN($xCol), MAX($xCol), MIN($yCol), MAX($yCol) FROM tiles WHERE $zCol=?"
+        db.rawQuery(sql, arrayOf(storedZ.toString())).use { c ->
+            if (!c.moveToFirst()) return null
+            val minX = c.getInt(0); val maxX = c.getInt(1)
+            val minY = c.getInt(2); val maxY = c.getInt(3)
+            val n = 1.0 * (1 shl actualZ)
+            val west  = minX / n * 360.0 - 180.0
+            val east  = (maxX + 1) / n * 360.0 - 180.0
+            val (north, south) = if (tmsY) {
+                val nTile = (1 shl actualZ) - 1 - minY
+                val sTile = (1 shl actualZ) - 1 - maxY
+                Pair(tileToLat(nTile, actualZ), tileToLat(sTile + 1, actualZ))
+            } else {
+                Pair(tileToLat(minY, actualZ), tileToLat(maxY + 1, actualZ))
+            }
+            return doubleArrayOf(north, south, east, west)
+        }
+    }
+
+    private fun tileToLat(y: Int, z: Int): Double {
+        val n = Math.PI - 2.0 * Math.PI * y / (1 shl z)
+        return Math.toDegrees(Math.atan(Math.sinh(n)))
     }
 
     override fun serve(session: IHTTPSession): Response {
