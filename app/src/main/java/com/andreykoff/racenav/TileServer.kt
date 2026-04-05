@@ -87,11 +87,17 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             when {
                 stats.isEmpty() -> true  // no data, assume RMaps default (inverted)
                 stats.size == 1 -> {
-                    // single zoom level — check if stored_z could naturally contain max_x
+                    // single zoom level — ambiguous cases default to inverted (RMaps convention)
                     val (z, maxX) = stats[0]
                     val fitsNormal = maxX < (1 shl z)
-                    // If doesn't fit as normal, must be inverted
-                    !fitsNormal
+                    val invertedZ = (17 - z).coerceAtLeast(0)
+                    val fitsInverted = maxX < (1 shl invertedZ)
+                    when {
+                        fitsNormal && !fitsInverted -> false  // unambiguously normal
+                        !fitsNormal && fitsInverted -> true   // unambiguously inverted
+                        !fitsNormal && !fitsInverted -> true  // both fail → default inverted
+                        else -> true  // both fit → ambiguous, default inverted (RMaps convention)
+                    }
                 }
                 else -> {
                     // Trend: does max(x) grow or shrink with stored_z?
