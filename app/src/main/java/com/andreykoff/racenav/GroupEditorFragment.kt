@@ -216,16 +216,18 @@ class GroupEditorFragment : Fragment() {
             .setPositiveButton("Удалить") { _, _ ->
                 val effectiveActiveId = FavoritesGroupsRepository.getActiveGroupId(ctx)
                 val newGroups = currentDoc.groups.filter { it.id != groupId }
-                val fallbackActive = if (newGroups.isEmpty()) {
+                val firstRemaining = if (newGroups.isEmpty()) {
                     FavoritesGroupsRepository.ACTIVE_ALL
                 } else newGroups.first().id
                 // Doc: if server-side activeGroupId pointed at deleted group, reset it
-                val newDocActive = if (currentDoc.activeGroupId == groupId) fallbackActive else currentDoc.activeGroupId
+                val newDocActive = if (currentDoc.activeGroupId == groupId) firstRemaining else currentDoc.activeGroupId
+                // Pref fallback follows the (now-valid) doc.activeGroupId to keep pref ↔ doc aligned
+                val prefFallback = newDocActive
                 // Pref: if user's local active was the deleted group, flip after save
                 val wasPrefActive = effectiveActiveId == groupId
                 val updated = currentDoc.copy(groups = newGroups, activeGroupId = newDocActive)
                 persistAndClose(updated, onSaveSuccess = {
-                    if (wasPrefActive) FavoritesGroupsRepository.setActiveGroupId(ctx, fallbackActive)
+                    if (wasPrefActive) FavoritesGroupsRepository.setActiveGroupId(ctx, prefFallback)
                 })
             }
             .setNegativeButton("Отмена", null)
