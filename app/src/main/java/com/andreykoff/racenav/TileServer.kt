@@ -12,7 +12,8 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     private data class DbEntry(
         val db: SQLiteDatabase,
         val format: DbFormat,
-        @Volatile var workingFormula: Pair<Boolean, Boolean>? = null
+        @Volatile var workingFormula: Pair<Boolean, Boolean>? = null,
+        @Volatile var rmapsInverted: Boolean? = null  // cached result of detectRMapsScheme
     )
 
     private val databases = mutableMapOf<Int, DbEntry>()
@@ -73,21 +74,33 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     }
 
     /** Detect if RMaps file uses inverted z convention (actual_z = 17 - stored_z).
-     *  Checks if max(x) at min(stored_z) exceeds what stored_z could naturally contain.
-     *  Returns true if inverted. */
-    private fun isRMapsInverted(db: SQLiteDatabase): Boolean {
-        try {
-            val storedMin = db.rawQuery("SELECT MIN(z) FROM tiles", null).use {
-                if (it.moveToFirst()) it.getInt(0) else return false
+     *  Uses trend analysis: in normal RMaps max(x) GROWS as stored_z grows; in inverted
+     *  max(x) SHRINKS as stored_z grows (because bigger stored_z = smaller actual_z).
+     *  Result is cached per DbEntry. */
+    private fun detectRMapsInverted(entry: DbEntry): Boolean {
+        entry.rmapsInverted?.let { return it }
+        val result = try {
+            val stats = mutableListOf<Pair<Int, Int>>()  // (z, max_x)
+            entry.db.rawQuery("SELECT z, MAX(x) FROM tiles GROUP BY z ORDER BY z", null).use { c ->
+                while (c.moveToNext()) stats.add(Pair(c.getInt(0), c.getInt(1)))
             }
-            val maxX = db.rawQuery("SELECT MAX(x) FROM tiles WHERE z=?", arrayOf(storedMin.toString())).use {
-                if (it.moveToFirst()) it.getInt(0) else return false
+            when {
+                stats.isEmpty() -> true  // no data, assume RMaps default (inverted)
+                stats.size == 1 -> {
+                    // single zoom level — check if stored_z could naturally contain max_x
+                    val (z, maxX) = stats[0]
+                    val fitsNormal = maxX < (1 shl z)
+                    // If doesn't fit as normal, must be inverted
+                    !fitsNormal
+                }
+                else -> {
+                    // Trend: does max(x) grow or shrink with stored_z?
+                    stats.last().second < stats.first().second
+                }
             }
-            // At actual zoom z, max valid x = (1 << z) - 1. If maxX exceeds this for storedMin,
-            // the real zoom must be higher → stored_z is inverted.
-            val nonInvertedMaxX = (1 shl storedMin) - 1
-            return maxX > nonInvertedMaxX
-        } catch (_: Exception) { return false }
+        } catch (_: Exception) { true }  // default to inverted (RMaps classical convention)
+        entry.rmapsInverted = result
+        return result
     }
 
     fun getMaxZoom(index: Int): Int {
@@ -107,7 +120,7 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         }
         if (entry.format == DbFormat.RMAPS) {
             try {
-                val inverted = isRMapsInverted(db)
+                val inverted = detectRMapsInverted(entry)
                 db.rawQuery("SELECT MIN(z), MAX(z) FROM tiles", null).use { c ->
                     if (c.moveToFirst()) {
                         val minStored = c.getInt(0)
@@ -138,7 +151,7 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         }
         if (entry.format == DbFormat.RMAPS) {
             try {
-                val inverted = isRMapsInverted(db)
+                val inverted = detectRMapsInverted(entry)
                 db.rawQuery("SELECT MIN(z), MAX(z) FROM tiles", null).use { c ->
                     if (c.moveToFirst()) {
                         val minStored = c.getInt(0)
@@ -159,7 +172,7 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         return try {
             when (entry.format) {
                 DbFormat.MBTILES -> boundsMBTiles(db)
-                DbFormat.RMAPS -> boundsRMaps(db, isRMapsInverted(db))
+                DbFormat.RMAPS -> boundsRMaps(db, detectRMapsInverted(entry))
                 DbFormat.UNKNOWN -> null
             }
         } catch (_: Exception) { null }
@@ -205,9 +218,10 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             val west  = minX / n * 360.0 - 180.0
             val east  = (maxX + 1) / n * 360.0 - 180.0
             val (north, south) = if (tmsY) {
-                val nTile = (1 shl actualZ) - 1 - minY
-                val sTile = (1 shl actualZ) - 1 - maxY
-                Pair(tileToLat(nTile, actualZ), tileToLat(sTile + 1, actualZ))
+                // TMS y-axis is flipped: tms y=0 is south, xyz y=0 is north
+                val minYxyz = (1 shl actualZ) - 1 - maxY  // max TMS y → north edge
+                val maxYxyz = (1 shl actualZ) - 1 - minY  // min TMS y → south edge
+                Pair(tileToLat(minYxyz, actualZ), tileToLat(maxYxyz + 1, actualZ))
             } else {
                 Pair(tileToLat(minY, actualZ), tileToLat(maxY + 1, actualZ))
             }

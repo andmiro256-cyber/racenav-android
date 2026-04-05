@@ -1256,9 +1256,11 @@ class MapFragment : Fragment() {
 
         val hideOnlineBase = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.getBoolean(PREF_HIDE_ONLINE_BASE, false) ?: false
-        val hasOfflineOverlay = overlayKeys.any { tileSources.containsKey(it) }
-        // Only hide online base if user explicitly asked AND at least one offline is active
-        val skipBase = hideOnlineBase && hasOfflineOverlay
+        // Only hide online base if user asked AND at least one offline key has renderable urls
+        val hasRenderableOffline = overlayKeys.any { key ->
+            tileSources[key]?.urls?.isNotEmpty() == true
+        }
+        val skipBase = hideOnlineBase && hasRenderableOffline
 
         val sources = StringBuilder()
         val layers = StringBuilder()
