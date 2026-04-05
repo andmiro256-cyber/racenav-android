@@ -98,14 +98,25 @@ object FavoritesGroupsRepository {
 
     // --- network ---
 
-    /** Fetch fresh doc from server, update cache on success. Blocking. */
+    private val writeLock = Any()
+
+    /** Fetch fresh doc from server, update cache on success. Blocking.
+     *  Guards against stale overwrite: if server's version < current cached version,
+     *  the cache is NOT overwritten (local save() probably completed while fetch was in flight). */
     fun syncFromServer(ctx: Context): FavoritesResult {
         val (email, key) = credentials(ctx)
         if (email.isBlank() || key.isBlank()) return FavoritesResult.NoSync
         val result = FavoritesApi.fetch(email, key)
         if (result is FavoritesResult.Success) {
-            cachedLimits = result.limits
-            setCache(ctx, result.doc)
+            synchronized(writeLock) {
+                cachedLimits = result.limits
+                val current = getCached(ctx)
+                if (result.doc.version >= current.version) {
+                    setCache(ctx, result.doc)
+                } else {
+                    Log.w(TAG, "skip stale sync: server v${result.doc.version} < cached v${current.version}")
+                }
+            }
         }
         return result
     }
@@ -115,12 +126,12 @@ object FavoritesGroupsRepository {
         val (email, key) = credentials(ctx)
         if (email.isBlank() || key.isBlank()) {
             // Local-only: just update cache
-            setCache(ctx, doc)
+            synchronized(writeLock) { setCache(ctx, doc) }
             return FavoritesResult.NoSync
         }
         val result = FavoritesApi.save(email, key, doc)
         if (result is FavoritesResult.Success) {
-            setCache(ctx, result.doc)
+            synchronized(writeLock) { setCache(ctx, result.doc) }
         }
         return result
     }

@@ -96,6 +96,7 @@ sealed class FavoritesResult {
     data class VersionConflict(val serverVersion: Int) : FavoritesResult()
     object AuthError : FavoritesResult()
     object RateLimit : FavoritesResult()
+    object DocumentTooLarge : FavoritesResult()
     data class NetworkError(val message: String) : FavoritesResult()
     object NoSync : FavoritesResult()
 }

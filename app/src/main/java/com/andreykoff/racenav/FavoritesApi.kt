@@ -41,7 +41,7 @@ object FavoritesApi {
                 val body = resp.body?.string().orEmpty()
                 when (resp.code) {
                     200 -> parseSuccess(body)
-                    401 -> FavoritesResult.AuthError
+                    401, 403 -> FavoritesResult.AuthError
                     429 -> FavoritesResult.RateLimit
                     else -> FavoritesResult.NetworkError("HTTP ${resp.code}")
                 }
@@ -67,8 +67,9 @@ object FavoritesApi {
                 val respBody = resp.body?.string().orEmpty()
                 when (resp.code) {
                     200 -> parsePutSuccess(respBody, doc)
-                    401 -> FavoritesResult.AuthError
+                    401, 403 -> FavoritesResult.AuthError
                     409 -> parseConflict(respBody)
+                    413 -> FavoritesResult.DocumentTooLarge
                     429 -> FavoritesResult.RateLimit
                     else -> FavoritesResult.NetworkError("HTTP ${resp.code}")
                 }
