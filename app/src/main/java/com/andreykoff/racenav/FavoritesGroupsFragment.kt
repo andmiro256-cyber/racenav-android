@@ -146,11 +146,12 @@ class FavoritesGroupsFragment : Fragment() {
                 val fallbackActive = if (newGroups.isEmpty()) {
                     FavoritesGroupsRepository.ACTIVE_ALL
                 } else newGroups.first().id
-                val wasActive = effectiveActiveId == g.id
-                val newActive = if (wasActive) fallbackActive else doc.activeGroupId
-                // active-group flip ONLY after successful save
-                persistAndRender(doc.copy(groups = newGroups, activeGroupId = newActive), onSuccess = {
-                    if (wasActive) FavoritesGroupsRepository.setActiveGroupId(ctx, fallbackActive)
+                // Doc: if server-side activeGroupId pointed at deleted group, reset it
+                val newDocActive = if (doc.activeGroupId == g.id) fallbackActive else doc.activeGroupId
+                // Pref: if user's local active was the deleted group, flip after save
+                val wasPrefActive = effectiveActiveId == g.id
+                persistAndRender(doc.copy(groups = newGroups, activeGroupId = newDocActive), onSuccess = {
+                    if (wasPrefActive) FavoritesGroupsRepository.setActiveGroupId(ctx, fallbackActive)
                 })
             }
             .setNegativeButton("Отмена", null)
