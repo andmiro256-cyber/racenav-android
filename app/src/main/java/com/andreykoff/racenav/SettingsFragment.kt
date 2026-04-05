@@ -1760,7 +1760,7 @@ class SettingsFragment : Fragment() {
                 val labels = options.map { it.second }.toTypedArray()
                 val currentId = FavoritesGroupsRepository.getActiveGroupId(ctx)
                 val checkedIdx = options.indexOfFirst { it.first == currentId }.coerceAtLeast(0)
-                android.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
                     .setTitle("Видимые на карте")
                     .setSingleChoiceItems(labels, checkedIdx) { dlg, which ->
                         val (id, _) = options[which]

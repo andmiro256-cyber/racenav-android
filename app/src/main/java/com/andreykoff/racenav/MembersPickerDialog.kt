@@ -83,7 +83,7 @@ class MembersPickerDialog : DialogFragment() {
         loadDevices()
         renderList()
 
-        return AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+        return AlertDialog.Builder(ctx)
             .setView(root)
             .setPositiveButton("Добавить") { _, _ -> sendResult() }
             .setNegativeButton("Отмена", null)

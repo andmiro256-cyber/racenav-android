@@ -136,7 +136,7 @@ class FavoritesGroupsFragment : Fragment() {
 
     private fun confirmDelete(g: FavoritesGroup) {
         val ctx = requireContext()
-        android.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Удалить группу")
             .setMessage("Удалить группу «${g.name}»?")
             .setPositiveButton("Удалить") { _, _ ->

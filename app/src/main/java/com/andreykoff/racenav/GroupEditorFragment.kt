@@ -210,7 +210,7 @@ class GroupEditorFragment : Fragment() {
 
     private fun confirmDelete() {
         val ctx = requireContext()
-        android.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Удалить группу")
             .setMessage("Удалить группу «${currentGroup.name}»?")
             .setPositiveButton("Удалить") { _, _ ->
