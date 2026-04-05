@@ -80,18 +80,23 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     private fun detectRMapsInverted(entry: DbEntry): Boolean {
         entry.rmapsInverted?.let { return it }
         val result = try {
-            val stats = mutableListOf<Pair<Int, Int>>()  // (z, max_x)
-            entry.db.rawQuery("SELECT z, MAX(x) FROM tiles GROUP BY z ORDER BY z", null).use { c ->
-                while (c.moveToNext()) stats.add(Pair(c.getInt(0), c.getInt(1)))
+            // (stored_z, max(max_x, max_y)) per zoom level
+            val stats = mutableListOf<Pair<Int, Int>>()
+            entry.db.rawQuery("SELECT z, MAX(x), MAX(y) FROM tiles GROUP BY z ORDER BY z", null).use { c ->
+                while (c.moveToNext()) {
+                    val z = c.getInt(0)
+                    val maxCoord = maxOf(c.getInt(1), c.getInt(2))
+                    stats.add(Pair(z, maxCoord))
+                }
             }
             when {
                 stats.isEmpty() -> true  // no data, assume RMaps default (inverted)
                 stats.size == 1 -> {
-                    // single zoom level — ambiguous cases default to inverted (RMaps convention)
-                    val (z, maxX) = stats[0]
-                    val fitsNormal = maxX < (1 shl z)
+                    // single zoom level — check both schemes, max(x,y) must fit
+                    val (z, maxCoord) = stats[0]
+                    val fitsNormal = maxCoord < (1 shl z)
                     val invertedZ = (17 - z).coerceAtLeast(0)
-                    val fitsInverted = maxX < (1 shl invertedZ)
+                    val fitsInverted = maxCoord < (1 shl invertedZ)
                     when {
                         fitsNormal && !fitsInverted -> false  // unambiguously normal
                         !fitsNormal && fitsInverted -> true   // unambiguously inverted
@@ -100,11 +105,11 @@ class TileServer(port: Int) : NanoHTTPD(port) {
                     }
                 }
                 else -> {
-                    // Trend: does max(x) grow or shrink with stored_z?
+                    // Trend: does max(x,y) grow or shrink with stored_z?
                     stats.last().second < stats.first().second
                 }
             }
-        } catch (_: Exception) { true }  // default to inverted (RMaps classical convention)
+        } catch (_: Exception) { true }
         entry.rmapsInverted = result
         return result
     }
