@@ -686,7 +686,6 @@
                     android:id="@+id/seekLockButtonAlpha"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:min="10"
                     android:max="100"
                     android:progress="100" />
             </LinearLayout>

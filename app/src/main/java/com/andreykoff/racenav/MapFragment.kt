@@ -444,8 +444,10 @@ class MapFragment : Fragment() {
         const val PREF_BTN_LOCK = "btn_lock"
         const val PREF_LOCK_BUTTON_SIZE = "lock_button_size"
         const val PREF_LOCK_BUTTON_ALPHA = "lock_button_alpha"
+        const val PREF_LOCK_BUTTON_POSITION = "lock_button_position"
         const val DEFAULT_LOCK_BUTTON_SIZE = 3
         const val DEFAULT_LOCK_BUTTON_ALPHA = 100
+        const val DEFAULT_LOCK_BUTTON_POSITION = "top-right"
 
         fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
