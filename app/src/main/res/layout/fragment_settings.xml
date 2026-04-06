@@ -684,15 +684,15 @@
                 android:id="@+id/btnDataManager"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="▸  УПРАВЛЕНИЕ ДАННЫМИ"
+                android:text="УПРАВЛЕНИЕ ДАННЫМИ"
+                android:tag="tab:files"
                 android:textColor="#888888"
                 android:textSize="11sp"
                 android:letterSpacing="0.1"
-                android:tag="tab:files"
-                android:clickable="true"
-                android:focusable="true"
+                android:layout_marginBottom="8dp"
                 android:layout_marginTop="24dp"
-                android:layout_marginBottom="8dp" />
+                android:clickable="true"
+                android:focusable="true" />
 
             <!-- Section: Files -->
             <TextView
