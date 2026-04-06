@@ -244,7 +244,7 @@ object GpxParser {
                 if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
                 if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
                 if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
-                if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                if (wp.color.isNotBlank()) append("<extensions><tn:color>${esc(wp.color)}</tn:color></extensions>")
                 appendLine("</wpt>")
             }
             append("</gpx>")
@@ -265,7 +265,7 @@ object GpxParser {
         fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-            appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:tn=\"http://trophynav.ru/gpx/1\">")
             appendLine("  <metadata><name>${esc(name)}</name><time>${java.time.Instant.now()}</time></metadata>")
 
             // User waypoints as <wpt>
@@ -274,7 +274,7 @@ object GpxParser {
                 if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
                 if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
                 if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
-                if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                if (wp.color.isNotBlank()) append("<extensions><tn:color>${esc(wp.color)}</tn:color></extensions>")
                 appendLine("</wpt>")
             }
 
@@ -287,7 +287,7 @@ object GpxParser {
                     if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
                     if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
                     if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
-                    if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                    if (wp.color.isNotBlank()) append("<extensions><tn:color>${esc(wp.color)}</tn:color></extensions>")
                     appendLine("</rtept>")
                 }
                 appendLine("  </rte>")

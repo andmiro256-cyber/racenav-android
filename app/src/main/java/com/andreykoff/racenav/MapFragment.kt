@@ -4614,7 +4614,7 @@ class MapFragment : Fragment() {
         val routeWps = waypoints.toList()
         val loadedTrk = loadedTrackPoints.map { Pair(it.latitude, it.longitude) }
         val userPts = userMarkers.map { Waypoint(it.name, it.position.latitude, it.position.longitude, 0, color = it.color, symbol = it.symbol, proximity = it.proximity) }
-        val recordedPts = TrackingService.trackPoints.toList()
+        val recordedPts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
 
         val cbRoute = android.widget.CheckBox(ctx).apply {
             text = "Маршрутные точки (${routeWps.size} WP)"
@@ -4729,22 +4729,13 @@ class MapFragment : Fragment() {
 
         // Share to favorites group (in-app)
         val doc = FavoritesGroupsRepository.getCached(ctx)
-        if (doc.groups.isNotEmpty()) {
-            root.addView(android.widget.Button(ctx).apply {
-                text = "👥 В группу..."
-                textSize = 14f; isAllCaps = false
-                isEnabled = hasAnything
-                setOnClickListener {
-                    val file = lastExportedGpxFile
-                    val content = lastExportedGpxContent
-                    if (file == null || content == null) {
-                        android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    showGroupSharePicker(ctx, file.nameWithoutExtension, content)
-                }
-            })
-        }
+        // Group share — disabled until server API is ready
+        root.addView(android.widget.Button(ctx).apply {
+            text = "👥 В группу (скоро)"
+            textSize = 14f; isAllCaps = false
+            isEnabled = false
+            alpha = 0.5f
+        })
     }
 
     // Temp storage for last exported GPX (used by share buttons)

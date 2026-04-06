@@ -837,7 +837,7 @@ class SettingsFragment : Fragment() {
             setPadding((16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt(),
                 (16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt())
             setOnClickListener {
-                parentFragmentManager.popBackStack()
+                parentFragmentManager.popBackStackImmediate()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                     ?.showQuickActionMenu()
             }
