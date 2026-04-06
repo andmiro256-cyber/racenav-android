@@ -3929,7 +3929,7 @@ class MapFragment : Fragment() {
         }
     }
 
-    private fun showQuickActionMenu() {
+    fun showQuickActionMenu() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dialog = BottomSheetDialog(ctx)
@@ -4584,15 +4584,190 @@ class MapFragment : Fragment() {
     }
 
     private fun buildGpxContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        // ── LOAD ──
         root.addView(android.widget.Button(ctx).apply {
             text = "📂 Загрузить файл"
             textSize = 14f; isAllCaps = false
-            setPadding(0, 12, 0, 0)
+            setPadding(0, (12 * dp).toInt(), 0, 0)
             setOnClickListener {
                 dialog.dismiss()
                 filePickerLauncher.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
             }
         })
+
+        // ── SAVE / EXPORT ──
+        val divider = View(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+            ).also { it.topMargin = (16 * dp).toInt(); it.bottomMargin = (12 * dp).toInt() }
+            setBackgroundColor(0xFF333333.toInt())
+        }
+        root.addView(divider)
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "СОХРАНИТЬ В GPX"
+            setTextColor(0xFF888888.toInt()); textSize = 11f
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        })
+
+        // Count available data
+        val routeWps = waypoints.toList()
+        val loadedTrk = loadedTrackPoints.map { Pair(it.latitude, it.longitude) }
+        val userPts = userMarkers.map { Waypoint(it.name, it.position.latitude, it.position.longitude, 0, color = it.color, symbol = it.symbol, proximity = it.proximity) }
+        val recordedPts = TrackingService.trackPoints.toList()
+
+        val cbRoute = android.widget.CheckBox(ctx).apply {
+            text = "Маршрутные точки (${routeWps.size} WP)"
+            isChecked = routeWps.isNotEmpty(); isEnabled = routeWps.isNotEmpty()
+            setTextColor(if (routeWps.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbTrack = android.widget.CheckBox(ctx).apply {
+            text = "Загруженный трек (${loadedTrk.size} точек)"
+            isChecked = loadedTrk.isNotEmpty(); isEnabled = loadedTrk.isNotEmpty()
+            setTextColor(if (loadedTrk.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbRecorded = android.widget.CheckBox(ctx).apply {
+            text = "Записанный трек (${recordedPts.size} точек)"
+            isChecked = false; isEnabled = recordedPts.isNotEmpty()
+            setTextColor(if (recordedPts.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbUserPts = android.widget.CheckBox(ctx).apply {
+            text = "Пользовательские точки (${userPts.size})"
+            isChecked = userPts.isNotEmpty(); isEnabled = userPts.isNotEmpty()
+            setTextColor(if (userPts.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        root.addView(cbRoute)
+        root.addView(cbTrack)
+        root.addView(cbRecorded)
+        root.addView(cbUserPts)
+
+        val hasAnything = routeWps.isNotEmpty() || loadedTrk.isNotEmpty() || recordedPts.isNotEmpty() || userPts.isNotEmpty()
+
+        // Name input
+        val nameInput = android.widget.EditText(ctx).apply {
+            val ts = java.text.SimpleDateFormat("yyyy-MM-dd_HHmm", java.util.Locale.US).format(java.util.Date())
+            setText("trophynav_$ts")
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+            setBackgroundColor(0xFF2A2A2A.toInt())
+            setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
+            setHintTextColor(0xFF666666.toInt()); hint = "Имя файла"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = (8 * dp).toInt()
+            layoutParams = lp
+        }
+        root.addView(nameInput)
+
+        // Save button
+        root.addView(android.widget.Button(ctx).apply {
+            text = "💾 Сохранить GPX"
+            textSize = 14f; isAllCaps = false
+            isEnabled = hasAnything
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = (12 * dp).toInt()
+            layoutParams = lp
+            setOnClickListener {
+                val fileName = nameInput.text.toString().trim().ifBlank { "trophynav_export" }
+                val gpx = GpxParser.writeFullGpx(
+                    routeWaypoints = if (cbRoute.isChecked) routeWps else null,
+                    trackPoints = if (cbTrack.isChecked) loadedTrk else null,
+                    userPoints = if (cbUserPts.isChecked) userPts else null,
+                    recordedTrack = if (cbRecorded.isChecked) recordedPts else null,
+                    name = fileName
+                )
+                val dir = getRaceNavDir(ctx, "export")
+                val file = java.io.File(dir, "$fileName.gpx")
+                file.writeText(gpx)
+                android.widget.Toast.makeText(ctx, "Сохранено: ${file.name}", android.widget.Toast.LENGTH_SHORT).show()
+                lastExportedGpxFile = file
+                lastExportedGpxContent = gpx
+            }
+        })
+
+        // ── SHARE ──
+        root.addView(View(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+            ).also { it.topMargin = (16 * dp).toInt(); it.bottomMargin = (12 * dp).toInt() }
+            setBackgroundColor(0xFF333333.toInt())
+        })
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "ПОДЕЛИТЬСЯ"
+            setTextColor(0xFF888888.toInt()); textSize = 11f
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        })
+
+        // Android share (Telegram, email, etc.)
+        root.addView(android.widget.Button(ctx).apply {
+            text = "📤 Telegram, почта..."
+            textSize = 14f; isAllCaps = false
+            isEnabled = hasAnything
+            setOnClickListener {
+                val file = lastExportedGpxFile
+                if (file == null || !file.exists()) {
+                    android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "application/gpx+xml"
+                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                ctx.startActivity(android.content.Intent.createChooser(intent, "Отправить GPX"))
+            }
+        })
+
+        // Share to favorites group (in-app)
+        val doc = FavoritesGroupsRepository.getCached(ctx)
+        if (doc.groups.isNotEmpty()) {
+            root.addView(android.widget.Button(ctx).apply {
+                text = "👥 В группу..."
+                textSize = 14f; isAllCaps = false
+                isEnabled = hasAnything
+                setOnClickListener {
+                    val file = lastExportedGpxFile
+                    val content = lastExportedGpxContent
+                    if (file == null || content == null) {
+                        android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    showGroupSharePicker(ctx, file.nameWithoutExtension, content)
+                }
+            })
+        }
+    }
+
+    // Temp storage for last exported GPX (used by share buttons)
+    private var lastExportedGpxFile: java.io.File? = null
+    private var lastExportedGpxContent: String? = null
+
+    /** Show picker to select a favorites group for sharing GPX */
+    private fun showGroupSharePicker(ctx: android.content.Context, name: String, gpxContent: String) {
+        val doc = FavoritesGroupsRepository.getCached(ctx)
+        if (doc.groups.isEmpty()) {
+            android.widget.Toast.makeText(ctx, "Нет групп. Создайте в Настройки → Мониторинг → Управление группами", android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        val labels = doc.groups.map { "${it.name} (${it.members.size})" }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Отправить в группу")
+            .setItems(labels) { _, which ->
+                val group = doc.groups[which]
+                // TODO: POST to /api/live2/group-share (server not implemented yet)
+                android.widget.Toast.makeText(ctx, "Будет отправлено в «${group.name}» — серверная часть в разработке", android.widget.Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     /** Full list of waypoints with statuses — tap on nav bar to open */

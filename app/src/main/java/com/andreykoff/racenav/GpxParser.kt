@@ -251,6 +251,71 @@ object GpxParser {
         }
     }
 
+    /**
+     * Write combined GPX with optional sections: route waypoints, track, user points, recorded track.
+     * Each section is included only if list is non-empty.
+     */
+    fun writeFullGpx(
+        routeWaypoints: List<Waypoint>? = null,
+        trackPoints: List<Pair<Double, Double>>? = null,
+        userPoints: List<Waypoint>? = null,
+        recordedTrack: List<Pair<Double, Double>>? = null,
+        name: String = "Trophy Navigator Export"
+    ): String {
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return buildString {
+            appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+            appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("  <metadata><name>${esc(name)}</name><time>${java.time.Instant.now()}</time></metadata>")
+
+            // User waypoints as <wpt>
+            userPoints?.forEach { wp ->
+                append("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name>")
+                if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
+                if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
+                if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
+                if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                appendLine("</wpt>")
+            }
+
+            // Route waypoints as <rte>
+            if (!routeWaypoints.isNullOrEmpty()) {
+                val routeName = name
+                appendLine("  <rte><name>${esc(routeName)}</name>")
+                routeWaypoints.forEach { wp ->
+                    append("    <rtept lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name>")
+                    if (wp.description.isNotBlank()) append("<desc>${esc(wp.description)}</desc>")
+                    if (wp.symbol.isNotBlank()) append("<sym>${esc(wp.symbol)}</sym>")
+                    if (wp.proximity > 0) append("<proximity>${wp.proximity}</proximity>")
+                    if (wp.color.isNotBlank()) append("<extensions><color>${esc(wp.color)}</color></extensions>")
+                    appendLine("</rtept>")
+                }
+                appendLine("  </rte>")
+            }
+
+            // Loaded track as <trk>
+            fun writeTrack(pts: List<Pair<Double, Double>>, trkName: String) {
+                appendLine("  <trk><name>${esc(trkName)}</name>")
+                var inSeg = false
+                for ((lat, lon) in pts) {
+                    if (lat.isNaN() || lon.isNaN()) {
+                        if (inSeg) { appendLine("  </trkseg>"); inSeg = false }
+                        continue
+                    }
+                    if (!inSeg) { appendLine("  <trkseg>"); inSeg = true }
+                    appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+                }
+                if (inSeg) appendLine("  </trkseg>")
+                appendLine("  </trk>")
+            }
+
+            if (!trackPoints.isNullOrEmpty()) writeTrack(trackPoints, "Загруженный трек")
+            if (!recordedTrack.isNullOrEmpty()) writeTrack(recordedTrack, "Записанный трек")
+
+            append("</gpx>")
+        }
+    }
+
     /** Parse OziExplorer PLT track file (legacy — returns as waypoints) */
     fun parsePlt(inputStream: InputStream): List<Waypoint> {
         val points = mutableListOf<Waypoint>()
