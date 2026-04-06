@@ -2205,6 +2205,14 @@ class SettingsFragment : Fragment() {
 
         // Make sections collapsible
         setupCollapsibleSections(view)
+        // Style Data Manager header to match collapsible section headers
+        view.findViewById<android.widget.TextView>(R.id.btnDataManager)?.apply {
+            text = "▶  УПРАВЛЕНИЕ ДАННЫМИ"
+            setPadding(0, 16, 0, 8)
+            textSize = 12f
+            setTextColor(0xFF888888.toInt())
+            letterSpacing = 0.1f
+        }
     }
 
     private fun showUpdateDialog(latest: String, current: String, apkUrl: String, changelog: String?) {
