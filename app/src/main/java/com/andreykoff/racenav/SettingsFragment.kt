@@ -837,14 +837,15 @@ class SettingsFragment : Fragment() {
             setPadding((16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt(),
                 (16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt())
             setOnClickListener {
-                // Open Quick Action Menu as BottomSheet directly from Settings
-                // (no need to pop back stack — MapFragment is alive underneath)
-                val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-                if (mapFrag != null) {
-                    mapFrag.showQuickActionMenu()
-                } else {
-                    android.widget.Toast.makeText(context, "Карта не загружена", android.widget.Toast.LENGTH_SHORT).show()
-                }
+                // Close Settings first, then open Quick Action Menu on MapFragment
+                // BottomSheet must be shown from MapFragment's context to appear on top
+                val act = activity ?: return@setOnClickListener
+                parentFragmentManager.popBackStack()
+                act.window.decorView.postDelayed({
+                    val mapFrag = (act as? MainActivity)?.supportFragmentManager
+                        ?.fragments?.filterIsInstance<MapFragment>()?.firstOrNull()
+                    mapFrag?.showQuickActionMenu()
+                }, 200)
             }
         }
         val btnLoadFileView = view.findViewById<View>(R.id.btnLoadFile)
