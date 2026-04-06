@@ -2977,17 +2977,12 @@ class MapFragment : Fragment() {
         btnLock.alpha = alpha
         btnLock.visibility = if (visible) View.VISIBLE else View.GONE
 
-        // Restore saved position (stored as fraction 0..1 of available space)
-        val fracX = prefs.getFloat(PREF_LOCK_BUTTON_X, -1f)
-        val fracY = prefs.getFloat(PREF_LOCK_BUTTON_Y, -1f)
-        if (fracX >= 0 && fracY >= 0) {
-            btnLock.post {
-                val parent = btnLock.parent as? View ?: return@post
-                val maxX = (parent.width - btnLock.width).coerceAtLeast(0).toFloat()
-                val maxY = (parent.height - btnLock.height).coerceAtLeast(0).toFloat()
-                btnLock.x = (fracX * maxX).coerceIn(0f, maxX)
-                btnLock.y = (fracY * maxY).coerceIn(0f, maxY)
-            }
+        // Restore saved position
+        val savedX = prefs.getFloat(PREF_LOCK_BUTTON_X, -1f)
+        val savedY = prefs.getFloat(PREF_LOCK_BUTTON_Y, -1f)
+        if (savedX >= 0 && savedY >= 0) {
+            btnLock.x = savedX
+            btnLock.y = savedY
         }
 
         ImageViewCompat.setImageTintList(
@@ -2998,24 +2993,16 @@ class MapFragment : Fragment() {
         )
     }
 
-    /** Drag to move lock button anywhere on screen. Short tap = lock/unlock (unchanged). */
+    /** Long-press on lock button initiates drag. Short tap = lock/unlock (unchanged). */
     private fun setupLockButtonDrag(btnLock: View) {
         var isDragging = false
         var startX = 0f
         var startY = 0f
         var origX = 0f
         var origY = 0f
-        val dragThreshold = dpToPx(10).toFloat()
-
-        // Remove longClick to avoid conflict with drag
-        btnLock.setOnLongClickListener(null)
-        btnLock.isLongClickable = false
+        val dragThreshold = dpToPx(8).toFloat()
 
         btnLock.setOnTouchListener { v, event ->
-            val parent = v.parent as? View ?: return@setOnTouchListener false
-            val maxX = (parent.width - v.width).coerceAtLeast(0).toFloat()
-            val maxY = (parent.height - v.height).coerceAtLeast(0).toFloat()
-
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     isDragging = false
@@ -3023,43 +3010,36 @@ class MapFragment : Fragment() {
                     startY = event.rawY
                     origX = v.x
                     origY = v.y
-                    v.parent?.requestDisallowInterceptTouchEvent(true)
-                    false // let click process
+                    false // let click/longclick process
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - startX
                     val dy = event.rawY - startY
                     if (!isDragging && (Math.abs(dx) > dragThreshold || Math.abs(dy) > dragThreshold)) {
                         isDragging = true
+                        v.parent?.requestDisallowInterceptTouchEvent(true)
                     }
                     if (isDragging) {
-                        v.x = (origX + dx).coerceIn(0f, maxX)
-                        v.y = (origY + dy).coerceIn(0f, maxY)
+                        val parent = v.parent as? View
+                        val maxX = (parent?.width ?: 1000) - v.width
+                        val maxY = (parent?.height ?: 2000) - v.height
+                        v.x = (origX + dx).coerceIn(0f, maxX.toFloat())
+                        v.y = (origY + dy).coerceIn(0f, maxY.toFloat())
                         true
                     } else false
                 }
-                android.view.MotionEvent.ACTION_UP -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     if (isDragging) {
-                        // Save as fraction of parent size (survives rotation)
-                        val fracX = if (maxX > 0) v.x / maxX else 0f
-                        val fracY = if (maxY > 0) v.y / maxY else 0f
+                        // Save position
                         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-                            ?.putFloat(PREF_LOCK_BUTTON_X, fracX)
-                            ?.putFloat(PREF_LOCK_BUTTON_Y, fracY)
+                            ?.putFloat(PREF_LOCK_BUTTON_X, v.x)
+                            ?.putFloat(PREF_LOCK_BUTTON_Y, v.y)
                             ?.apply()
                         isDragging = false
-                        true
-                    } else false
-                }
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                    if (isDragging) {
-                        // Revert to original position on cancel
-                        v.x = origX; v.y = origY
-                        isDragging = false
-                        true
-                    } else false
+                        true // consume — don't trigger click
+                    } else {
+                        false // let click handler fire
+                    }
                 }
                 else -> false
             }
