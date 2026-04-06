@@ -828,30 +828,16 @@ class SettingsFragment : Fragment() {
             showDatasetLibrary()
         }
 
-        // Quick Action Menu button — opens the 4-tab widget (WP/RTE/TRK/GPX)
-        val btnQuickAction = android.widget.Button(requireContext()).apply {
-            text = "📋 Управление данными"
-            textSize = 14f; isAllCaps = false
-            setTextColor(0xFFFF6F00.toInt())
-            setBackgroundColor(0xFF1E3A1E.toInt())
-            setPadding((16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt(),
-                (16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt())
-            setOnClickListener {
-                // Close Settings first, then open Quick Action Menu on MapFragment
-                // BottomSheet must be shown from MapFragment's context to appear on top
-                val act = activity ?: return@setOnClickListener
-                parentFragmentManager.popBackStack()
-                act.window.decorView.postDelayed({
-                    val mapFrag = (act as? MainActivity)?.supportFragmentManager
-                        ?.fragments?.filterIsInstance<MapFragment>()?.firstOrNull()
-                    mapFrag?.showQuickActionMenu()
-                }, 200)
-            }
+        // Data Manager button (defined in XML, top level of Files tab)
+        view.findViewById<View>(R.id.btnDataManager)?.setOnClickListener {
+            val act = activity ?: return@setOnClickListener
+            parentFragmentManager.popBackStack()
+            act.window.decorView.postDelayed({
+                val mapFrag = (act as? MainActivity)?.supportFragmentManager
+                    ?.fragments?.filterIsInstance<MapFragment>()?.firstOrNull()
+                mapFrag?.showQuickActionMenu()
+            }, 200)
         }
-        val btnLoadFileView = view.findViewById<View>(R.id.btnLoadFile)
-        val filesParent = btnLoadFileView.parent as? android.view.ViewGroup
-        val btnIdx = filesParent?.indexOfChild(btnLoadFileView)?.plus(1) ?: 0
-        filesParent?.addView(btnQuickAction, btnIdx)
 
         // Eye toggles for loaded track/waypoints
         val rowTrack = view.findViewById<View>(R.id.rowLoadedTrack)

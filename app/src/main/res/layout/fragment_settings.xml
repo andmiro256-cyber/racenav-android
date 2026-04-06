@@ -679,6 +679,21 @@
                     android:tint="#FFFFFF" />
             </LinearLayout>
 
+            <!-- Data Manager shortcut — opens Quick Action Menu (WP/RTE/TRK/GPX widget) -->
+            <Button
+                android:id="@+id/btnDataManager"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="52dp"
+                android:text="📋 Управление данными"
+                android:textColor="#FF6F00"
+                android:textSize="15sp"
+                android:textAllCaps="false"
+                android:background="#1E3A1E"
+                android:tag="tab:files"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="16dp" />
+
             <!-- Section: Files -->
             <TextView
                 android:layout_width="wrap_content"
