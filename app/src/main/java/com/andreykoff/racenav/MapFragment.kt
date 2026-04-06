@@ -4729,18 +4729,113 @@ class MapFragment : Fragment() {
 
         // Share to favorites group (in-app)
         val doc = FavoritesGroupsRepository.getCached(ctx)
-        // Group share — disabled until server API is ready
-        root.addView(android.widget.Button(ctx).apply {
-            text = "👥 В группу (скоро)"
-            textSize = 14f; isAllCaps = false
-            isEnabled = false
-            alpha = 0.5f
-        })
+        // Group share — send to favorites group via server API
+        val favDoc = FavoritesGroupsRepository.getCached(ctx)
+        if (favDoc.groups.isNotEmpty()) {
+            root.addView(android.widget.Button(ctx).apply {
+                text = "👥 В группу..."
+                textSize = 14f; isAllCaps = false
+                isEnabled = hasAnything
+                setOnClickListener {
+                    val file = lastExportedGpxFile
+                    val content = lastExportedGpxContent
+                    if (file == null || content == null) {
+                        android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    showGroupSharePicker(ctx, file.nameWithoutExtension, content)
+                }
+            })
+        }
     }
 
     // Temp storage for last exported GPX (used by share buttons)
     private var lastExportedGpxFile: java.io.File? = null
     private var lastExportedGpxContent: String? = null
+    private var lastInboxCheck: Long = 0
+
+    /** Check group-share inbox for pending files (at most once per 60s). */
+    private fun checkGroupShareInbox() {
+        val ctx = context ?: return
+        if (System.currentTimeMillis() - lastInboxCheck < 60_000) return
+        lastInboxCheck = System.currentTimeMillis()
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null) ?: return
+        val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: return
+        if (email.isBlank() || syncKey.isBlank()) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val entries = GroupShareApi.getInbox(email, syncKey)
+            if (entries.isEmpty()) return@launch
+            withContext(Dispatchers.Main) {
+                if (!isAdded) return@withContext
+                entries.forEach { entry ->
+                    showShareNotification(entry, email, syncKey)
+                }
+            }
+        }
+    }
+
+    /** Show in-app dialog for received share */
+    private fun showShareNotification(entry: GroupShareApi.InboxEntry, email: String, syncKey: String) {
+        val ctx = context ?: return
+        val sizeKb = entry.size / 1024
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("📥 ${entry.senderName}")
+            .setMessage("Поделился: «${entry.name}»\nТип: ${entry.type} · ${sizeKb} КБ")
+            .setPositiveButton("Принять") { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val gpx = GroupShareApi.downloadData(email, syncKey, entry.shareId)
+                    GroupShareApi.ack(email, syncKey, entry.shareId)
+                    withContext(Dispatchers.Main) {
+                        if (!isAdded) return@withContext
+                        if (gpx != null) {
+                            // Parse and load GPX
+                            val result = GpxParser.parseGpxFull(gpx.byteInputStream())
+                            if (result.waypoints.isNotEmpty()) {
+                                loadWaypointsToMap(result.waypoints, entry.name)
+                            }
+                            if (result.trackPoints.isNotEmpty()) {
+                                loadTrackToMap(result.trackPoints, entry.name)
+                            }
+                            android.widget.Toast.makeText(ctx, "✅ Загружено: ${entry.name}", android.widget.Toast.LENGTH_SHORT).show()
+                        } else {
+                            android.widget.Toast.makeText(ctx, "Ошибка загрузки", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Отклонить") { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    GroupShareApi.ack(email, syncKey, entry.shareId)
+                }
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** Load waypoints from shared GPX onto map */
+    private fun loadWaypointsToMap(wps: List<Waypoint>, name: String) {
+        waypoints.clear()
+        waypoints.addAll(wps)
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_LOADED_WP_NAME, name)?.apply()
+        saveWaypointsToPrefs()
+        updateWaypointsOnMap()
+    }
+
+    /** Load track from shared GPX onto map */
+    private fun loadTrackToMap(pts: List<Pair<Double, Double>>, name: String) {
+        loadedTrackPoints.clear()
+        pts.forEach { (lat, lon) ->
+            if (lat.isNaN() || lon.isNaN()) loadedTrackPoints.add(SEGMENT_BREAK)
+            else loadedTrackPoints.add(com.mapbox.mapboxsdk.geometry.LatLng(lat, lon))
+        }
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
+        saveTrackToPrefs()
+        try { updateLoadedTrackOnMap() } catch (_: Exception) {}
+    }
 
     /** Show picker to select a favorites group for sharing GPX */
     private fun showGroupSharePicker(ctx: android.content.Context, name: String, gpxContent: String) {
@@ -4754,8 +4849,32 @@ class MapFragment : Fragment() {
             .setTitle("Отправить в группу")
             .setItems(labels) { _, which ->
                 val group = doc.groups[which]
-                // TODO: POST to /api/live2/group-share (server not implemented yet)
-                android.widget.Toast.makeText(ctx, "Будет отправлено в «${group.name}» — серверная часть в разработке", android.widget.Toast.LENGTH_LONG).show()
+                val prefs = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                val email = prefs.getString("sync_email", null) ?: ""
+                val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: ""
+                if (email.isBlank() || syncKey.isBlank()) {
+                    android.widget.Toast.makeText(ctx, "Привяжите email в Настройки → Синхронизация", android.widget.Toast.LENGTH_LONG).show()
+                    return@setItems
+                }
+                android.widget.Toast.makeText(ctx, "Отправляю в «${group.name}»...", android.widget.Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val result = GroupShareApi.sendToGroup(email, syncKey, group.id, name, gpxContent)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        if (!isAdded) return@withContext
+                        if (result.ok) {
+                            android.widget.Toast.makeText(ctx, "✅ Отправлено в «${group.name}» (${result.deliveredCount} участников)", android.widget.Toast.LENGTH_LONG).show()
+                        } else {
+                            val msg = when (result.error) {
+                                "group_not_found" -> "Группа не найдена на сервере"
+                                "too_large" -> "Файл слишком большой (макс. 5 МБ)"
+                                "auth_error" -> "Ошибка авторизации — проверьте email/ключ"
+                                "no_sync" -> "Привяжите email в Настройки → Синхронизация"
+                                else -> "Ошибка: ${result.error}"
+                            }
+                            android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
             }
             .setNegativeButton("Отмена", null)
             .show()
@@ -7617,6 +7736,8 @@ class MapFragment : Fragment() {
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .registerOnSharedPreferenceChangeListener(listener)
         }
+        // Check group-share inbox for new shared files
+        checkGroupShareInbox()
         // Retry email registration if saved locally but not yet synced to server
         retryEmailRegistration()
         applyWidgetPrefs()
