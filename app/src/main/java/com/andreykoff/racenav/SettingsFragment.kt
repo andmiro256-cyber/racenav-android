@@ -209,15 +209,11 @@ class SettingsFragment : Fragment() {
             override fun onProgressChanged(sb: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
                 lockAlpha = progress.coerceIn(10, 100)
                 txtLockButtonAlpha.text = "$lockAlpha%"
-                // Live preview
-                txtLockButtonAlpha.text = "$lockAlpha%"
-            }
-            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
-                // Write prefs only on release
                 prefs.edit().putInt(MapFragment.PREF_LOCK_BUTTON_ALPHA, lockAlpha).apply()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyLockButtonPrefs()
             }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
         })
 
         // Auto-recenter
