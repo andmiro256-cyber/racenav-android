@@ -442,14 +442,6 @@ class MapFragment : Fragment() {
         const val PREF_BTN_LAYERS = "btn_layers"
         const val PREF_BTN_REC = "btn_rec"
         const val PREF_BTN_LOCK = "btn_lock"
-        const val PREF_LOCK_BUTTON_SIZE = "lock_button_size"
-        const val PREF_LOCK_BUTTON_ALPHA = "lock_button_alpha"
-        const val PREF_LOCK_BUTTON_POSITION = "lock_button_position"
-        const val DEFAULT_LOCK_BUTTON_SIZE = 3
-        const val DEFAULT_LOCK_BUTTON_ALPHA = 100
-        const val DEFAULT_LOCK_BUTTON_POSITION = "top-right"
-
-        fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
 
@@ -1135,7 +1127,6 @@ class MapFragment : Fragment() {
 
         // Reorder top bar buttons according to saved order
         applyTopBarOrder()
-        applyLockButtonPrefs()
     }
 
     /** Update GPS quality indicator based on GNSS satellite data */
@@ -2954,35 +2945,6 @@ class MapFragment : Fragment() {
             return
         }
         // Distance will be updated on next GPS fix
-    }
-
-    fun applyLockButtonPrefs() {
-        val b = _binding ?: return
-        val ctx = context ?: return
-        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val btnLock = b.btnLock
-
-        val visible = prefs.getBoolean(PREF_BTN_LOCK, true)
-        val sizeScale = prefs.getInt(PREF_LOCK_BUTTON_SIZE, DEFAULT_LOCK_BUTTON_SIZE).coerceIn(1, 10)
-        val sizePx = dpToPx(lockButtonScaleToDp(sizeScale))
-        val alpha = prefs.getInt(PREF_LOCK_BUTTON_ALPHA, DEFAULT_LOCK_BUTTON_ALPHA).coerceIn(10, 100) / 100f
-
-        btnLock.layoutParams?.let { lp ->
-            lp.width = sizePx
-            lp.height = sizePx
-            btnLock.layoutParams = lp
-        }
-        val paddingPx = dpToPx((sizeScale * 0.5f + 3.5f).toInt())
-        btnLock.setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
-        btnLock.alpha = alpha
-        btnLock.visibility = if (visible) View.VISIBLE else View.GONE
-
-        ImageViewCompat.setImageTintList(
-            btnLock,
-            android.content.res.ColorStateList.valueOf(
-                if (isScreenLocked) Color.parseColor("#FFD600") else Color.WHITE
-            )
-        )
     }
 
     private fun dpToPx(dp: Int): Int {
