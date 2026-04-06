@@ -4754,62 +4754,87 @@ class MapFragment : Fragment() {
     private var lastExportedGpxContent: String? = null
     private var lastInboxCheck: Long = 0
 
-    /** Check group-share inbox for pending files (at most once per 60s). */
+    private var inboxCheckJob: kotlinx.coroutines.Job? = null
+    private val pendingShareQueue = ArrayDeque<GroupShareApi.InboxEntry>()
+
+    /** Check group-share inbox for pending files (at most once per 60s, serial dialog queue). */
     private fun checkGroupShareInbox() {
         val ctx = context ?: return
         if (System.currentTimeMillis() - lastInboxCheck < 60_000) return
+        if (inboxCheckJob?.isActive == true) return
         lastInboxCheck = System.currentTimeMillis()
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val email = prefs.getString("sync_email", null) ?: return
         val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: return
         if (email.isBlank() || syncKey.isBlank()) return
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        inboxCheckJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             val entries = GroupShareApi.getInbox(email, syncKey)
             if (entries.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
-                if (!isAdded) return@withContext
-                entries.forEach { entry ->
-                    showShareNotification(entry, email, syncKey)
-                }
+                if (!isAdded || view == null) return@withContext
+                // Queue entries, show one at a time
+                pendingShareQueue.clear()
+                pendingShareQueue.addAll(entries)
+                showNextShareNotification(email, syncKey)
             }
         }
     }
 
-    /** Show in-app dialog for received share */
-    private fun showShareNotification(entry: GroupShareApi.InboxEntry, email: String, syncKey: String) {
+    /** Show next pending share dialog (serial, not cascade). */
+    private fun showNextShareNotification(email: String, syncKey: String) {
+        if (pendingShareQueue.isEmpty()) return
+        if (!isAdded || view == null) return
+        val entry = pendingShareQueue.removeFirst()
+        showShareNotification(entry, email, syncKey) {
+            // On dismiss — show next in queue
+            showNextShareNotification(email, syncKey)
+        }
+    }
+
+    /** Show in-app dialog for received share. Calls onDismiss when dialog closes. */
+    private fun showShareNotification(entry: GroupShareApi.InboxEntry, email: String, syncKey: String, onDismiss: (() -> Unit)? = null) {
         val ctx = context ?: return
         val sizeKb = entry.size / 1024
         androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("📥 ${entry.senderName}")
             .setMessage("Поделился: «${entry.name}»\nТип: ${entry.type} · ${sizeKb} КБ")
             .setPositiveButton("Принять") { _, _ ->
-                lifecycleScope.launch(Dispatchers.IO) {
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     val gpx = GroupShareApi.downloadData(email, syncKey, entry.shareId)
-                    GroupShareApi.ack(email, syncKey, entry.shareId)
                     withContext(Dispatchers.Main) {
-                        if (!isAdded) return@withContext
+                        if (!isAdded || view == null) { onDismiss?.invoke(); return@withContext }
                         if (gpx != null) {
-                            // Parse and load GPX
-                            val result = GpxParser.parseGpxFull(gpx.byteInputStream())
-                            if (result.waypoints.isNotEmpty()) {
-                                loadWaypointsToMap(result.waypoints, entry.name)
+                            try {
+                                val result = GpxParser.parseGpxFull(gpx.byteInputStream())
+                                if (result.waypoints.isNotEmpty()) {
+                                    loadWaypointsToMap(result.waypoints, entry.name)
+                                }
+                                if (result.trackPoints.isNotEmpty()) {
+                                    loadTrackToMap(result.trackPoints, entry.name)
+                                }
+                                // Ack ONLY after successful parse+load
+                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                                    GroupShareApi.ack(email, syncKey, entry.shareId)
+                                }
+                                android.widget.Toast.makeText(context, "✅ Загружено: ${entry.name}", android.widget.Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(context, "Ошибка парсинга: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
                             }
-                            if (result.trackPoints.isNotEmpty()) {
-                                loadTrackToMap(result.trackPoints, entry.name)
-                            }
-                            android.widget.Toast.makeText(ctx, "✅ Загружено: ${entry.name}", android.widget.Toast.LENGTH_SHORT).show()
                         } else {
-                            android.widget.Toast.makeText(ctx, "Ошибка загрузки", android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast.makeText(context, "Ошибка загрузки", android.widget.Toast.LENGTH_SHORT).show()
                         }
+                        onDismiss?.invoke()
                     }
                 }
             }
             .setNegativeButton("Отклонить") { _, _ ->
-                lifecycleScope.launch(Dispatchers.IO) {
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     GroupShareApi.ack(email, syncKey, entry.shareId)
                 }
+                onDismiss?.invoke()
             }
+            .setOnCancelListener { onDismiss?.invoke() }
             .setCancelable(false)
             .show()
     }
