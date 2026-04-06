@@ -167,6 +167,55 @@ class SettingsFragment : Fragment() {
             prefs.edit().putBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, checked).apply()
         }
 
+        // Lock button settings
+        val switchLockButton = view.findViewById<SwitchCompat>(R.id.switchLockButton)
+        val rowLockButtonSize = view.findViewById<View>(R.id.rowLockButtonSize)
+        val rowLockButtonAlpha = view.findViewById<View>(R.id.rowLockButtonAlpha)
+        val txtLockButtonSize = view.findViewById<android.widget.TextView>(R.id.txtLockButtonSize)
+        val txtLockButtonAlpha = view.findViewById<android.widget.TextView>(R.id.txtLockButtonAlpha)
+        val seekLockButtonAlpha = view.findViewById<android.widget.SeekBar>(R.id.seekLockButtonAlpha)
+
+        fun refreshLockRows(vis: Boolean) {
+            val s = if (vis) View.VISIBLE else View.GONE
+            rowLockButtonSize.visibility = s; rowLockButtonAlpha.visibility = s
+        }
+        switchLockButton.isChecked = prefs.getBoolean(MapFragment.PREF_BTN_LOCK, true)
+        refreshLockRows(switchLockButton.isChecked)
+        switchLockButton.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(MapFragment.PREF_BTN_LOCK, checked).apply()
+            refreshLockRows(checked)
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyLockButtonPrefs()
+        }
+
+        var lockSize = prefs.getInt(MapFragment.PREF_LOCK_BUTTON_SIZE, MapFragment.DEFAULT_LOCK_BUTTON_SIZE).coerceIn(1, 10)
+        txtLockButtonSize.text = lockSize.toString()
+        view.findViewById<android.widget.ImageButton>(R.id.btnLockButtonSizeMinus).setOnClickListener {
+            if (lockSize > 1) { lockSize--; txtLockButtonSize.text = lockSize.toString()
+                prefs.edit().putInt(MapFragment.PREF_LOCK_BUTTON_SIZE, lockSize).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyLockButtonPrefs()
+            }
+        }
+        view.findViewById<android.widget.ImageButton>(R.id.btnLockButtonSizePlus).setOnClickListener {
+            if (lockSize < 10) { lockSize++; txtLockButtonSize.text = lockSize.toString()
+                prefs.edit().putInt(MapFragment.PREF_LOCK_BUTTON_SIZE, lockSize).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyLockButtonPrefs()
+            }
+        }
+
+        var lockAlpha = prefs.getInt(MapFragment.PREF_LOCK_BUTTON_ALPHA, MapFragment.DEFAULT_LOCK_BUTTON_ALPHA).coerceIn(10, 100)
+        txtLockButtonAlpha.text = "$lockAlpha%"
+        seekLockButtonAlpha.progress = lockAlpha
+        seekLockButtonAlpha.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                lockAlpha = progress.coerceIn(10, 100)
+                txtLockButtonAlpha.text = "$lockAlpha%"
+                prefs.edit().putInt(MapFragment.PREF_LOCK_BUTTON_ALPHA, lockAlpha).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyLockButtonPrefs()
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+        })
+
         // Auto-recenter
         val switchRecenter = view.findViewById<SwitchCompat>(R.id.switchAutoRecenter)
         val rowDelay = view.findViewById<View>(R.id.rowRecenterDelay)
