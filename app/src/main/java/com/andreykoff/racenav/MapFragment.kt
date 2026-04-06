@@ -446,8 +446,6 @@ class MapFragment : Fragment() {
         const val PREF_LOCK_BUTTON_ALPHA = "lock_button_alpha"
         const val DEFAULT_LOCK_BUTTON_SIZE = 3
         const val DEFAULT_LOCK_BUTTON_ALPHA = 100
-        const val PREF_LOCK_BUTTON_X = "lock_button_x"
-        const val PREF_LOCK_BUTTON_Y = "lock_button_y"
 
         fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
@@ -2977,73 +2975,12 @@ class MapFragment : Fragment() {
         btnLock.alpha = alpha
         btnLock.visibility = if (visible) View.VISIBLE else View.GONE
 
-        // Restore saved position
-        val savedX = prefs.getFloat(PREF_LOCK_BUTTON_X, -1f)
-        val savedY = prefs.getFloat(PREF_LOCK_BUTTON_Y, -1f)
-        if (savedX >= 0 && savedY >= 0) {
-            btnLock.x = savedX
-            btnLock.y = savedY
-        }
-
         ImageViewCompat.setImageTintList(
             btnLock,
             android.content.res.ColorStateList.valueOf(
                 if (isScreenLocked) Color.parseColor("#FFD600") else Color.WHITE
             )
         )
-    }
-
-    /** Long-press on lock button initiates drag. Short tap = lock/unlock (unchanged). */
-    private fun setupLockButtonDrag(btnLock: View) {
-        var isDragging = false
-        var startX = 0f
-        var startY = 0f
-        var origX = 0f
-        var origY = 0f
-        val dragThreshold = dpToPx(8).toFloat()
-
-        btnLock.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    isDragging = false
-                    startX = event.rawX
-                    startY = event.rawY
-                    origX = v.x
-                    origY = v.y
-                    false // let click/longclick process
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - startX
-                    val dy = event.rawY - startY
-                    if (!isDragging && (Math.abs(dx) > dragThreshold || Math.abs(dy) > dragThreshold)) {
-                        isDragging = true
-                        v.parent?.requestDisallowInterceptTouchEvent(true)
-                    }
-                    if (isDragging) {
-                        val parent = v.parent as? View
-                        val maxX = (parent?.width ?: 1000) - v.width
-                        val maxY = (parent?.height ?: 2000) - v.height
-                        v.x = (origX + dx).coerceIn(0f, maxX.toFloat())
-                        v.y = (origY + dy).coerceIn(0f, maxY.toFloat())
-                        true
-                    } else false
-                }
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    if (isDragging) {
-                        // Save position
-                        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-                            ?.putFloat(PREF_LOCK_BUTTON_X, v.x)
-                            ?.putFloat(PREF_LOCK_BUTTON_Y, v.y)
-                            ?.apply()
-                        isDragging = false
-                        true // consume — don't trigger click
-                    } else {
-                        false // let click handler fire
-                    }
-                }
-                else -> false
-            }
-        }
     }
 
     private fun dpToPx(dp: Int): Int {
@@ -3238,7 +3175,6 @@ class MapFragment : Fragment() {
         binding.btnRec.setOnClickListener { toggleRecording() }
 
         binding.btnLock.setOnClickListener { lockScreen() }
-        setupLockButtonDrag(binding.btnLock)
 
 // Download indicator tap — show details dialog
         binding.downloadIndicator.setOnClickListener {
