@@ -689,9 +689,9 @@
                 android:textColor="#FF6F00"
                 android:textSize="15sp"
                 android:textAllCaps="false"
-                android:background="#1E3A1E"
+                android:backgroundTint="#2A2A2A"
                 android:tag="tab:files"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="12dp"
                 android:layout_marginBottom="16dp" />
 
             <!-- Section: Files -->

@@ -828,12 +828,26 @@ class SettingsFragment : Fragment() {
             showDatasetLibrary()
         }
 
-        // Data Manager button (defined in XML, top level of Files tab)
+        // Data Manager button — opens Quick Action Menu after closing Settings
         view.findViewById<View>(R.id.btnDataManager)?.setOnClickListener {
-            // Set flag on MapFragment, then pop Settings. MapFragment.onResume picks up the flag.
-            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-                ?.pendingQuickAction = true
-            parentFragmentManager.popBackStack()
+            val fm = parentFragmentManager
+            if (fm.backStackEntryCount == 0) return@setOnClickListener
+            val listener = object : androidx.fragment.app.FragmentManager.OnBackStackChangedListener {
+                override fun onBackStackChanged() {
+                    val current = fm.findFragmentById(R.id.container)
+                    if (current is SettingsFragment) return
+                    fm.removeOnBackStackChangedListener(this)
+                    val mapFrag = current as? MapFragment ?: return
+                    val mapView = mapFrag.view ?: return
+                    mapView.post {
+                        if (!mapFrag.isAdded || !mapFrag.isVisible) return@post
+                        if (mapFrag.parentFragmentManager.isStateSaved) return@post
+                        mapFrag.showQuickActionMenu()
+                    }
+                }
+            }
+            fm.addOnBackStackChangedListener(listener)
+            fm.popBackStack()
         }
 
         // Eye toggles for loaded track/waypoints

@@ -70,8 +70,6 @@ class MapFragment : Fragment() {
     var lastLiveDevices: List<LiveUsersPoller.LiveDevice> = emptyList()
         private set
     private var favoritesPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
-    /** Flag set by SettingsFragment to open Quick Action Menu after pop. */
-    @Volatile var pendingQuickAction = false
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -7762,11 +7760,6 @@ class MapFragment : Fragment() {
             favoritesPrefListener = listener
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .registerOnSharedPreferenceChangeListener(listener)
-        }
-        // Open Quick Action Menu if requested from Settings
-        if (pendingQuickAction) {
-            pendingQuickAction = false
-            _binding?.root?.post { showQuickActionMenu() }
         }
         // Check group-share inbox for new shared files
         checkGroupShareInbox()
