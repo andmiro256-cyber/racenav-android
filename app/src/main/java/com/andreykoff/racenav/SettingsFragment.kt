@@ -830,13 +830,10 @@ class SettingsFragment : Fragment() {
 
         // Data Manager button (defined in XML, top level of Files tab)
         view.findViewById<View>(R.id.btnDataManager)?.setOnClickListener {
-            val act = activity ?: return@setOnClickListener
+            // Set flag on MapFragment, then pop Settings. MapFragment.onResume picks up the flag.
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                ?.pendingQuickAction = true
             parentFragmentManager.popBackStack()
-            act.window.decorView.postDelayed({
-                val mapFrag = (act as? MainActivity)?.supportFragmentManager
-                    ?.fragments?.filterIsInstance<MapFragment>()?.firstOrNull()
-                mapFrag?.showQuickActionMenu()
-            }, 200)
         }
 
         // Eye toggles for loaded track/waypoints
