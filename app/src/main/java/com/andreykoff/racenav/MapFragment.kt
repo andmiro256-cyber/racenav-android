@@ -69,6 +69,7 @@ class MapFragment : Fragment() {
     private var liveUsersPoller: LiveUsersPoller? = null
     var lastLiveDevices: List<LiveUsersPoller.LiveDevice> = emptyList()
         private set
+    private var favoritesPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -391,6 +392,7 @@ class MapFragment : Fragment() {
 
         const val PREF_TILE_KEY = "tile_key"
         const val PREF_OVERLAY_KEY = "overlay_key"
+        const val PREF_HIDE_ONLINE_BASE = "hide_online_base"  // bool, default false
         const val PREF_WIDGET_FONT_SCALE = "widget_font_scale"  // 1-10, default 5
         const val PREF_WIDGET_SPEED = "widget_speed"
         const val PREF_WIDGET_BEARING = "widget_bearing"
@@ -450,6 +452,11 @@ class MapFragment : Fragment() {
         const val PREF_LIVE_USER_LABEL_SIZE = "live_user_label_size"  // Int 1-10, default 3
         const val DEFAULT_LIVE_USER_SIZE = 3
         const val DEFAULT_LIVE_USER_LABEL_SIZE = 3
+
+        // Favorites groups
+        const val PREF_LIVE_USERS_ACTIVE_GROUP_ID  = "live_users_active_group_id"   // String, default "all"
+        const val PREF_LIVE_USERS_FAVORITES_CACHE  = "live_users_favorites_cache"   // JSON string
+        const val PREF_LIVE_USERS_FAVORITES_VERSION = "live_users_favorites_version" // Int
 
         /** Convert 1-10 scale to dp for marker sizes: 1=24dp, 3=40dp, 5=56dp, 10=96dp */
         fun markerScaleToDp(scale: Int): Int = scale * 8 + 16
@@ -1247,23 +1254,34 @@ class MapFragment : Fragment() {
         val baseTiles = base.urls.joinToString(",") { "\"$it\"" }
         val baseScheme = if (base.tms) ",\"scheme\":\"tms\"" else ""
 
-        val sources = StringBuilder()
-        val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
-        sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
+        val hideOnlineBase = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getBoolean(PREF_HIDE_ONLINE_BASE, false) ?: false
+        // Only hide online base if user asked AND at least one offline key has renderable urls
+        val hasRenderableOffline = overlayKeys.any { key ->
+            tileSources[key]?.urls?.isNotEmpty() == true
+        }
+        val skipBase = hideOnlineBase && hasRenderableOffline
 
+        val sources = StringBuilder()
         val layers = StringBuilder()
-        layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
+        if (!skipBase) {
+            val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
+            sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
+            layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
+        }
 
         overlayKeys.filter { it != "none" }.forEachIndexed { idx, key ->
             // Try online overlay first, then offline tile source
             val ov = overlaySources[key]
             val offlineSrc = if (ov == null) tileSources[key] else null
+            val sep = if (sources.isEmpty()) "" else ","
+            val layerSep = if (layers.isEmpty()) "" else ","
             if (ov != null) {
                 if (ov.urls.isEmpty()) return@forEachIndexed
                 val ovTiles = ov.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (ov.tms) ",\"scheme\":\"tms\"" else ""
-                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
-                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
+                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${ov.maxZoom}$ovScheme}")
+                layers.append("$layerSep{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":${ov.opacity}}}")
             } else if (offlineSrc != null) {
                 // Offline source — base maps at full opacity, sub-overlays at 0.7
                 val isSubOverlay = offlineMaps.find { it.key == key }?.name?.contains("_слой_") == true
@@ -1271,8 +1289,8 @@ class MapFragment : Fragment() {
                 val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
                 val offMinZoom = if (offlineSrc.minZoom > 0) ",\"minzoom\":${offlineSrc.minZoom}" else ""
-                sources.append(",\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
-                layers.append(",{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
+                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
+                layers.append("$layerSep{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
             }
         }
 
@@ -1625,46 +1643,64 @@ class MapFragment : Fragment() {
         Log.d("LiveUsers", "startLiveUsersPoller baseUrl=$liveBaseUrl myDeviceId=$myDeviceId")
         liveUsersPoller = LiveUsersPoller(liveBaseUrl, myDeviceId, onError = { err ->
             Log.w("LiveUsers", "poller error: $err")
-        }) { geoJson, devices ->
-            try {
-                lastLiveDevices = devices
-                val style = mapboxMap?.style ?: return@LiveUsersPoller
-                val onlineOnly = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    ?.getBoolean(PREF_LIVE_USERS_ONLINE_ONLY, false) ?: false
-                val filtered = if (onlineOnly) devices.filter { it.status == "online" } else devices
-                // Remove old layers/source
-                try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
-                try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
-                // Build GeoJSON with per-device bitmap icons
-                val features = JSONArray()
-                filtered.forEach { d ->
-                    val iconId = "live-user-${d.deviceId}"
-                    style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan))
-                    features.put(JSONObject()
-                        .put("type", "Feature")
-                        .put("geometry", JSONObject().put("type", "Point")
-                            .put("coordinates", JSONArray().put(d.lon).put(d.lat)))
-                        .put("properties", JSONObject()
-                            .put("icon", iconId)
-                            .put("name", d.name)
-                            .put("speed", d.speed)
-                            .put("status", d.status)
-                            .put("deviceId", d.deviceId)))
-                }
-                val fc = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
-                style.addSource(GeoJsonSource(LIVE_USERS_SOURCE_ID, fc))
-                style.addLayer(SymbolLayer(LIVE_USERS_LAYER_ID, LIVE_USERS_SOURCE_ID).withProperties(
-                    PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
-                    PropertyFactory.iconAllowOverlap(true),
-                    PropertyFactory.iconIgnorePlacement(true),
-                    PropertyFactory.iconAnchor("center"),
-                    *wpIconSizeProps()
-                ))
-            } catch (e: Exception) {
-                Log.w("LiveUsers", "update failed: ${e.message}")
-            }
+        }) { _, devices ->
+            lastLiveDevices = devices
+            refreshLiveUsersMarkers()
         }
         liveUsersPoller?.start()
+    }
+
+    /**
+     * Re-render live users layer from [lastLiveDevices], applying active group filter and onlineOnly.
+     * Can be called on every poll tick OR when active group changes via SharedPref.
+     */
+    fun refreshLiveUsersMarkers() {
+        try {
+            val style = mapboxMap?.style ?: return
+            val ctx = context ?: return
+            val p = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            // Don't resurrect markers if live users are disabled (e.g. user toggled off but changed favorites)
+            if (!p.getBoolean(PREF_LIVE_USERS_ENABLED, false)) {
+                try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
+                try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
+                return
+            }
+            val onlineOnly = p.getBoolean(PREF_LIVE_USERS_ONLINE_ONLY, false)
+            val groupMembers = FavoritesGroupsRepository.getActiveGroupMembers(ctx)
+            val devices = lastLiveDevices
+            val groupFiltered = if (groupMembers != null) {
+                devices.filter { it.uniqueId.uppercase() in groupMembers }
+            } else devices
+            val filtered = if (onlineOnly) groupFiltered.filter { it.status == "online" } else groupFiltered
+            try { style.removeLayer(LIVE_USERS_LAYER_ID) } catch (_: Exception) {}
+            try { style.removeSource(LIVE_USERS_SOURCE_ID) } catch (_: Exception) {}
+            val features = JSONArray()
+            filtered.forEach { d ->
+                val iconId = "live-user-${d.deviceId}"
+                style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan))
+                features.put(JSONObject()
+                    .put("type", "Feature")
+                    .put("geometry", JSONObject().put("type", "Point")
+                        .put("coordinates", JSONArray().put(d.lon).put(d.lat)))
+                    .put("properties", JSONObject()
+                        .put("icon", iconId)
+                        .put("name", d.name)
+                        .put("speed", d.speed)
+                        .put("status", d.status)
+                        .put("deviceId", d.deviceId)))
+            }
+            val fc = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
+            style.addSource(GeoJsonSource(LIVE_USERS_SOURCE_ID, fc))
+            style.addLayer(SymbolLayer(LIVE_USERS_LAYER_ID, LIVE_USERS_SOURCE_ID).withProperties(
+                PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconAnchor("center"),
+                *wpIconSizeProps()
+            ))
+        } catch (e: Exception) {
+            Log.w("LiveUsers", "update failed: ${e.message}")
+        }
     }
 
     fun stopLiveUsersPoller() {
@@ -3256,6 +3292,25 @@ class MapFragment : Fragment() {
         flashScreenBorder(Color.parseColor("#FFD600"))
     }
 
+    /** Animate camera to geographic bounds of the given offline map. */
+    private fun flyToOfflineMapBounds(index: Int) {
+        val bounds = tileServer?.getBounds(index) ?: return  // [north, south, east, west]
+        val north = bounds[0]; val south = bounds[1]; val east = bounds[2]; val west = bounds[3]
+        if (north.isNaN() || south.isNaN() || east.isNaN() || west.isNaN()) return
+        try {
+            val sw = com.mapbox.mapboxsdk.geometry.LatLng(south, west)
+            val ne = com.mapbox.mapboxsdk.geometry.LatLng(north, east)
+            val latLngBounds = com.mapbox.mapboxsdk.geometry.LatLngBounds.Builder().include(sw).include(ne).build()
+            val padding = (40 * resources.displayMetrics.density).toInt()
+            mapboxMap?.animateCamera(
+                com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngBounds(latLngBounds, padding),
+                600
+            )
+        } catch (e: Exception) {
+            Log.w("OfflineMap", "flyToBounds failed: ${e.message}")
+        }
+    }
+
     /** Add an offline map and return its key. Returns null on failure. */
     fun addOfflineMap(path: String, displayName: String): String? {
         val index = if (offlineMaps.isEmpty()) 0 else offlineMaps.maxOf { it.index } + 1
@@ -3874,7 +3929,7 @@ class MapFragment : Fragment() {
         }
     }
 
-    private fun showQuickActionMenu() {
+    fun showQuickActionMenu() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val dialog = BottomSheetDialog(ctx)
@@ -4529,15 +4584,325 @@ class MapFragment : Fragment() {
     }
 
     private fun buildGpxContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        // ── LOAD ──
         root.addView(android.widget.Button(ctx).apply {
             text = "📂 Загрузить файл"
             textSize = 14f; isAllCaps = false
-            setPadding(0, 12, 0, 0)
+            setPadding(0, (12 * dp).toInt(), 0, 0)
             setOnClickListener {
                 dialog.dismiss()
                 filePickerLauncher.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
             }
         })
+
+        // ── SAVE / EXPORT ──
+        val divider = View(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+            ).also { it.topMargin = (16 * dp).toInt(); it.bottomMargin = (12 * dp).toInt() }
+            setBackgroundColor(0xFF333333.toInt())
+        }
+        root.addView(divider)
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "СОХРАНИТЬ В GPX"
+            setTextColor(0xFF888888.toInt()); textSize = 11f
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        })
+
+        // Count available data
+        val routeWps = waypoints.toList()
+        val loadedTrk = loadedTrackPoints.map { Pair(it.latitude, it.longitude) }
+        val userPts = userMarkers.map { Waypoint(it.name, it.position.latitude, it.position.longitude, 0, color = it.color, symbol = it.symbol, proximity = it.proximity) }
+        val recordedPts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+
+        val cbRoute = android.widget.CheckBox(ctx).apply {
+            text = "Маршрутные точки (${routeWps.size} WP)"
+            isChecked = routeWps.isNotEmpty(); isEnabled = routeWps.isNotEmpty()
+            setTextColor(if (routeWps.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbTrack = android.widget.CheckBox(ctx).apply {
+            text = "Загруженный трек (${loadedTrk.size} точек)"
+            isChecked = loadedTrk.isNotEmpty(); isEnabled = loadedTrk.isNotEmpty()
+            setTextColor(if (loadedTrk.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbRecorded = android.widget.CheckBox(ctx).apply {
+            text = "Записанный трек (${recordedPts.size} точек)"
+            isChecked = false; isEnabled = recordedPts.isNotEmpty()
+            setTextColor(if (recordedPts.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        val cbUserPts = android.widget.CheckBox(ctx).apply {
+            text = "Пользовательские точки (${userPts.size})"
+            isChecked = userPts.isNotEmpty(); isEnabled = userPts.isNotEmpty()
+            setTextColor(if (userPts.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+        }
+        root.addView(cbRoute)
+        root.addView(cbTrack)
+        root.addView(cbRecorded)
+        root.addView(cbUserPts)
+
+        val hasAnything = routeWps.isNotEmpty() || loadedTrk.isNotEmpty() || recordedPts.isNotEmpty() || userPts.isNotEmpty()
+
+        // Name input
+        val nameInput = android.widget.EditText(ctx).apply {
+            val ts = java.text.SimpleDateFormat("yyyy-MM-dd_HHmm", java.util.Locale.US).format(java.util.Date())
+            setText("trophynav_$ts")
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+            setBackgroundColor(0xFF2A2A2A.toInt())
+            setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
+            setHintTextColor(0xFF666666.toInt()); hint = "Имя файла"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = (8 * dp).toInt()
+            layoutParams = lp
+        }
+        root.addView(nameInput)
+
+        // Save button
+        root.addView(android.widget.Button(ctx).apply {
+            text = "💾 Сохранить GPX"
+            textSize = 14f; isAllCaps = false
+            isEnabled = hasAnything
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = (12 * dp).toInt()
+            layoutParams = lp
+            setOnClickListener {
+                val fileName = nameInput.text.toString().trim().ifBlank { "trophynav_export" }
+                val gpx = GpxParser.writeFullGpx(
+                    routeWaypoints = if (cbRoute.isChecked) routeWps else null,
+                    trackPoints = if (cbTrack.isChecked) loadedTrk else null,
+                    userPoints = if (cbUserPts.isChecked) userPts else null,
+                    recordedTrack = if (cbRecorded.isChecked) recordedPts else null,
+                    name = fileName
+                )
+                val dir = getRaceNavDir(ctx, "export")
+                val file = java.io.File(dir, "$fileName.gpx")
+                file.writeText(gpx)
+                android.widget.Toast.makeText(ctx, "Сохранено: ${file.name}", android.widget.Toast.LENGTH_SHORT).show()
+                lastExportedGpxFile = file
+                lastExportedGpxContent = gpx
+            }
+        })
+
+        // ── SHARE ──
+        root.addView(View(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+            ).also { it.topMargin = (16 * dp).toInt(); it.bottomMargin = (12 * dp).toInt() }
+            setBackgroundColor(0xFF333333.toInt())
+        })
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "ПОДЕЛИТЬСЯ"
+            setTextColor(0xFF888888.toInt()); textSize = 11f
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        })
+
+        // Android share (Telegram, email, etc.)
+        root.addView(android.widget.Button(ctx).apply {
+            text = "📤 Telegram, почта..."
+            textSize = 14f; isAllCaps = false
+            isEnabled = hasAnything
+            setOnClickListener {
+                val file = lastExportedGpxFile
+                if (file == null || !file.exists()) {
+                    android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "application/gpx+xml"
+                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                ctx.startActivity(android.content.Intent.createChooser(intent, "Отправить GPX"))
+            }
+        })
+
+        // Share to favorites group (in-app)
+        val doc = FavoritesGroupsRepository.getCached(ctx)
+        // Group share — send to favorites group via server API
+        val favDoc = FavoritesGroupsRepository.getCached(ctx)
+        if (favDoc.groups.isNotEmpty()) {
+            root.addView(android.widget.Button(ctx).apply {
+                text = "👥 В группу..."
+                textSize = 14f; isAllCaps = false
+                isEnabled = hasAnything
+                setOnClickListener {
+                    val file = lastExportedGpxFile
+                    val content = lastExportedGpxContent
+                    if (file == null || content == null) {
+                        android.widget.Toast.makeText(ctx, "Сначала сохраните GPX", android.widget.Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    showGroupSharePicker(ctx, file.nameWithoutExtension, content)
+                }
+            })
+        }
+    }
+
+    // Temp storage for last exported GPX (used by share buttons)
+    private var lastExportedGpxFile: java.io.File? = null
+    private var lastExportedGpxContent: String? = null
+    private var lastInboxCheck: Long = 0
+
+    private var inboxCheckJob: kotlinx.coroutines.Job? = null
+    private val pendingShareQueue = ArrayDeque<GroupShareApi.InboxEntry>()
+
+    /** Check group-share inbox for pending files (at most once per 60s, serial dialog queue). */
+    private fun checkGroupShareInbox() {
+        val ctx = context ?: return
+        if (System.currentTimeMillis() - lastInboxCheck < 60_000) return
+        if (inboxCheckJob?.isActive == true) return
+        lastInboxCheck = System.currentTimeMillis()
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null) ?: return
+        val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: return
+        if (email.isBlank() || syncKey.isBlank()) return
+
+        inboxCheckJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            val entries = GroupShareApi.getInbox(email, syncKey)
+            if (entries.isEmpty()) return@launch
+            withContext(Dispatchers.Main) {
+                if (!isAdded || view == null) return@withContext
+                // Queue entries, show one at a time
+                pendingShareQueue.clear()
+                pendingShareQueue.addAll(entries)
+                showNextShareNotification(email, syncKey)
+            }
+        }
+    }
+
+    /** Show next pending share dialog (serial, not cascade). */
+    private fun showNextShareNotification(email: String, syncKey: String) {
+        if (pendingShareQueue.isEmpty()) return
+        if (!isAdded || view == null) return
+        val entry = pendingShareQueue.removeFirst()
+        showShareNotification(entry, email, syncKey) {
+            // On dismiss — show next in queue
+            showNextShareNotification(email, syncKey)
+        }
+    }
+
+    /** Show in-app dialog for received share. Calls onDismiss when dialog closes. */
+    private fun showShareNotification(entry: GroupShareApi.InboxEntry, email: String, syncKey: String, onDismiss: (() -> Unit)? = null) {
+        val ctx = context ?: return
+        val sizeKb = entry.size / 1024
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("📥 ${entry.senderName}")
+            .setMessage("Поделился: «${entry.name}»\nТип: ${entry.type} · ${sizeKb} КБ")
+            .setPositiveButton("Принять") { _, _ ->
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                    val gpx = GroupShareApi.downloadData(email, syncKey, entry.shareId)
+                    withContext(Dispatchers.Main) {
+                        if (!isAdded || view == null) { onDismiss?.invoke(); return@withContext }
+                        if (gpx != null) {
+                            try {
+                                val result = GpxParser.parseGpxFull(gpx.byteInputStream())
+                                if (result.waypoints.isNotEmpty()) {
+                                    loadWaypointsToMap(result.waypoints, entry.name)
+                                }
+                                if (result.trackPoints.isNotEmpty()) {
+                                    loadTrackToMap(result.trackPoints, entry.name)
+                                }
+                                // Ack ONLY after successful parse+load
+                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                                    GroupShareApi.ack(email, syncKey, entry.shareId)
+                                }
+                                android.widget.Toast.makeText(context, "✅ Загружено: ${entry.name}", android.widget.Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(context, "Ошибка парсинга: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        } else {
+                            android.widget.Toast.makeText(context, "Ошибка загрузки", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        onDismiss?.invoke()
+                    }
+                }
+            }
+            .setNegativeButton("Отклонить") { _, _ ->
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                    GroupShareApi.ack(email, syncKey, entry.shareId)
+                }
+                onDismiss?.invoke()
+            }
+            .setOnCancelListener { onDismiss?.invoke() }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** Load waypoints from shared GPX onto map */
+    private fun loadWaypointsToMap(wps: List<Waypoint>, name: String) {
+        waypoints.clear()
+        waypoints.addAll(wps)
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_LOADED_WP_NAME, name)?.apply()
+        saveWaypointsToPrefs()
+        updateWaypointsOnMap()
+    }
+
+    /** Load track from shared GPX onto map */
+    private fun loadTrackToMap(pts: List<Pair<Double, Double>>, name: String) {
+        loadedTrackPoints.clear()
+        pts.forEach { (lat, lon) ->
+            if (lat.isNaN() || lon.isNaN()) loadedTrackPoints.add(SEGMENT_BREAK)
+            else loadedTrackPoints.add(com.mapbox.mapboxsdk.geometry.LatLng(lat, lon))
+        }
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
+        saveTrackToPrefs()
+        try { updateLoadedTrackOnMap() } catch (_: Exception) {}
+    }
+
+    /** Show picker to select a favorites group for sharing GPX */
+    private fun showGroupSharePicker(ctx: android.content.Context, name: String, gpxContent: String) {
+        val doc = FavoritesGroupsRepository.getCached(ctx)
+        if (doc.groups.isEmpty()) {
+            android.widget.Toast.makeText(ctx, "Нет групп. Создайте в Настройки → Мониторинг → Управление группами", android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        val labels = doc.groups.map { "${it.name} (${it.members.size})" }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Отправить в группу")
+            .setItems(labels) { _, which ->
+                val group = doc.groups[which]
+                val prefs = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                val email = prefs.getString("sync_email", null) ?: ""
+                val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: ""
+                if (email.isBlank() || syncKey.isBlank()) {
+                    android.widget.Toast.makeText(ctx, "Привяжите email в Настройки → Синхронизация", android.widget.Toast.LENGTH_LONG).show()
+                    return@setItems
+                }
+                android.widget.Toast.makeText(ctx, "Отправляю в «${group.name}»...", android.widget.Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val result = GroupShareApi.sendToGroup(email, syncKey, group.id, name, gpxContent)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        if (!isAdded) return@withContext
+                        if (result.ok) {
+                            android.widget.Toast.makeText(ctx, "✅ Отправлено в «${group.name}» (${result.deliveredCount} участников)", android.widget.Toast.LENGTH_LONG).show()
+                        } else {
+                            val msg = when (result.error) {
+                                "group_not_found" -> "Группа не найдена на сервере"
+                                "too_large" -> "Файл слишком большой (макс. 5 МБ)"
+                                "auth_error" -> "Ошибка авторизации — проверьте email/ключ"
+                                "no_sync" -> "Привяжите email в Настройки → Синхронизация"
+                                else -> "Ошибка: ${result.error}"
+                            }
+                            android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     /** Full list of waypoints with statuses — tap on nav bar to open */
@@ -6978,6 +7343,20 @@ class MapFragment : Fragment() {
 
         // Offline layers (right column)
         val offlineGroup = view.findViewById<android.widget.LinearLayout>(R.id.offlineRadioGroup)
+        // Toggle: hide online base when offline is active
+        val ctxHide = requireContext()
+        val hidePrefs = ctxHide.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        offlineGroup.addView(android.widget.CheckBox(ctxHide).apply {
+            text = "Скрыть онлайн-базу"
+            setTextColor(0xFFFFEB3B.toInt()); textSize = 12f
+            setPadding(16, 8, 16, 8)
+            isChecked = hidePrefs.getBoolean(PREF_HIDE_ONLINE_BASE, false)
+            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFFEB3B.toInt())
+            setOnCheckedChangeListener { _, checked ->
+                hidePrefs.edit().putBoolean(PREF_HIDE_ONLINE_BASE, checked).apply()
+                loadTileStyle(currentTileKey, currentOverlayKeys)
+            }
+        })
         if (offlineMaps.isEmpty()) {
             offlineGroup.addView(android.widget.TextView(requireContext()).apply {
                 text = "Не загружено"; setTextColor(0xFF888888.toInt()); textSize = 12f
@@ -7004,6 +7383,8 @@ class MapFragment : Fragment() {
                                 val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
                                 if (ovInfo != null) currentOverlayKeys.add(ovInfo.key)
                             }
+                            // Jump camera to map bounds
+                            flyToOfflineMapBounds(info.index)
                         } else {
                             currentOverlayKeys.remove(info.key)
                             // Remove area overlays too
@@ -7367,6 +7748,21 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onResume()
         startMagnetometer()
         applyFullscreenPref()
+        // Register favorites-groups pref listener — re-render markers when active group changes
+        val ctx = context
+        if (ctx != null && favoritesPrefListener == null) {
+            val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key == PREF_LIVE_USERS_ACTIVE_GROUP_ID || key == PREF_LIVE_USERS_FAVORITES_CACHE) {
+                    FavoritesGroupsRepository.invalidateCache()
+                    refreshLiveUsersMarkers()
+                }
+            }
+            favoritesPrefListener = listener
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .registerOnSharedPreferenceChangeListener(listener)
+        }
+        // Check group-share inbox for new shared files
+        checkGroupShareInbox()
         // Retry email registration if saved locally but not yet synced to server
         retryEmailRegistration()
         applyWidgetPrefs()
@@ -7481,6 +7877,12 @@ class MapFragment : Fragment() {
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(traccarStatusReceiver) } catch (_: Exception) {}
         try { context?.unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+        // Unregister favorites pref listener
+        favoritesPrefListener?.let {
+            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.unregisterOnSharedPreferenceChangeListener(it)
+        }
+        favoritesPrefListener = null
     }
     override fun onStop() {
         super.onStop()
