@@ -581,6 +581,32 @@
                     android:checked="true" />
             </LinearLayout>
 
+            <!-- Lock button: visibility -->
+            <LinearLayout android:layout_width="match_parent" android:layout_height="56dp" android:orientation="horizontal" android:gravity="center_vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:layout_marginTop="2dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Показывать замок на экране" android:textColor="#FFFFFF" android:textSize="15sp" />
+                <androidx.appcompat.widget.SwitchCompat android:id="@+id/switchLockButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:checked="true" />
+            </LinearLayout>
+            <!-- Lock button: size -->
+            <LinearLayout android:id="@+id/rowLockButtonSize" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:orientation="horizontal" android:gravity="center_vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp" android:layout_marginTop="2dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Размер кнопки замка" android:textColor="#FFFFFF" android:textSize="15sp" />
+                <ImageButton android:id="@+id/btnLockButtonSizeMinus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_remove" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+                <TextView android:id="@+id/txtLockButtonSize" android:layout_width="44dp" android:layout_height="wrap_content" android:text="3" android:textColor="#FFFFFF" android:textSize="15sp" android:gravity="center" />
+                <ImageButton android:id="@+id/btnLockButtonSizePlus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+            </LinearLayout>
+            <!-- Lock button: alpha -->
+            <LinearLayout android:id="@+id/rowLockButtonAlpha" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="10dp" android:paddingBottom="12dp" android:layout_marginTop="2dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Прозрачность кнопки" android:textColor="#FFFFFF" android:textSize="15sp" />
+                    <TextView android:id="@+id/txtLockButtonAlpha" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="100%" android:textColor="#888888" android:textSize="13sp" />
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekLockButtonAlpha" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="10" android:max="100" android:progress="100" />
+            </LinearLayout>
+            <!-- Lock button: fix position -->
+            <LinearLayout android:id="@+id/rowLockButtonFixed" android:layout_width="match_parent" android:layout_height="56dp" android:orientation="horizontal" android:gravity="center_vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:layout_marginTop="2dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Зафиксировать положение" android:textColor="#FFFFFF" android:textSize="15sp" />
+                <androidx.appcompat.widget.SwitchCompat android:id="@+id/switchLockButtonFixed" android:layout_width="wrap_content" android:layout_height="wrap_content" android:checked="false" />
+            </LinearLayout>
+
             <!-- Hints toggle -->
             <LinearLayout
                 android:layout_width="match_parent"

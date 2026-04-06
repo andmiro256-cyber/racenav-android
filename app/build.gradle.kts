@@ -15,6 +15,8 @@ android {
         targetSdk = 35
         versionCode = 342
         versionName = "2.9.42"
+        versionCode = 351
+        versionName = "2.9.51"
     }
 
     signingConfigs {

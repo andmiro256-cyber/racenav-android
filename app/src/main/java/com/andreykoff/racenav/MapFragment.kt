@@ -442,6 +442,14 @@ class MapFragment : Fragment() {
         const val PREF_BTN_LAYERS = "btn_layers"
         const val PREF_BTN_REC = "btn_rec"
         const val PREF_BTN_LOCK = "btn_lock"
+        const val PREF_LOCK_BUTTON_SIZE = "lock_button_size"
+        const val PREF_LOCK_BUTTON_ALPHA = "lock_button_alpha"
+        const val PREF_LOCK_BUTTON_X = "lock_button_x"
+        const val PREF_LOCK_BUTTON_Y = "lock_button_y"
+        const val PREF_LOCK_BUTTON_FIXED = "lock_button_fixed"
+        const val DEFAULT_LOCK_BUTTON_SIZE = 3
+        const val DEFAULT_LOCK_BUTTON_ALPHA = 100
+        fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
 
@@ -1107,7 +1115,7 @@ class MapFragment : Fragment() {
         b.btnQuickAction.visibility = if (prefs.getBoolean(PREF_BTN_QUICK, true)) View.VISIBLE else View.GONE
         b.btnLayers.visibility = if (prefs.getBoolean(PREF_BTN_LAYERS, true)) View.VISIBLE else View.GONE
         b.btnRec.visibility = if (prefs.getBoolean(PREF_BTN_REC, true)) View.VISIBLE else View.GONE
-        b.btnLock.visibility = if (prefs.getBoolean(PREF_BTN_LOCK, true)) View.VISIBLE else View.GONE
+        // btnLock is now floating — handled by applyLockButtonPrefs()
         b.btnWidgetStop.visibility = if (prefs.getBoolean(PREF_BTN_STOP, true)) View.VISIBLE else View.GONE
         b.btnWidgetGo.visibility = if (prefs.getBoolean(PREF_BTN_GO, true)) View.VISIBLE else View.GONE
         b.btnMapSwitch.visibility = if (prefs.getBoolean(PREF_BTN_MAP_SWITCH, false)) View.VISIBLE else View.GONE
@@ -1127,6 +1135,7 @@ class MapFragment : Fragment() {
 
         // Reorder top bar buttons according to saved order
         applyTopBarOrder()
+        applyLockButtonPrefs()
     }
 
     /** Update GPS quality indicator based on GNSS satellite data */
@@ -2947,6 +2956,125 @@ class MapFragment : Fragment() {
         // Distance will be updated on next GPS fix
     }
 
+    fun applyLockButtonPrefs() {
+        val b = _binding ?: return
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val btnLock = b.btnLock
+
+        val sizeScale = prefs.getInt(PREF_LOCK_BUTTON_SIZE, DEFAULT_LOCK_BUTTON_SIZE).coerceIn(1, 10)
+        val alpha = prefs.getInt(PREF_LOCK_BUTTON_ALPHA, DEFAULT_LOCK_BUTTON_ALPHA).coerceIn(10, 100) / 100f
+        val visible = prefs.getBoolean(PREF_BTN_LOCK, true)
+        val sizePx = dpToPx(lockButtonScaleToDp(sizeScale))
+        val paddingPx = dpToPx((sizeScale * 0.5f + 3.5f).toInt())
+
+        btnLock.layoutParams?.let { lp ->
+            lp.width = sizePx; lp.height = sizePx; btnLock.layoutParams = lp
+        }
+        btnLock.setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
+        btnLock.alpha = alpha
+        btnLock.visibility = if (visible) View.VISIBLE else View.GONE
+        btnLock.elevation = dpToPx(8).toFloat()
+
+        ImageViewCompat.setImageTintList(btnLock,
+            android.content.res.ColorStateList.valueOf(
+                if (isScreenLocked) Color.parseColor("#FFD600") else Color.WHITE
+            ))
+
+        btnLock.post {
+            if (!isAdded || _binding == null || btnLock.visibility != View.VISIBLE) return@post
+            val parent = btnLock.parent as? View ?: return@post
+            if (!prefs.contains(PREF_LOCK_BUTTON_X)) return@post
+            val maxX = (parent.width - btnLock.width).coerceAtLeast(0).toFloat()
+            val maxY = (parent.height - btnLock.height).coerceAtLeast(0).toFloat()
+            btnLock.x = (prefs.getFloat(PREF_LOCK_BUTTON_X, 1f).coerceIn(0f, 1f) * maxX)
+            btnLock.y = (prefs.getFloat(PREF_LOCK_BUTTON_Y, 0f).coerceIn(0f, 1f) * maxY)
+            btnLock.bringToFront()
+        }
+    }
+
+    /** Drag to move, tap to lock, long-press to unlock (when fixed).
+     *  Gesture rules:
+     *  NOT fixed + NOT locked: tap=lock, drag=move
+     *  NOT fixed + locked: nothing (use Volume+ to unlock)
+     *  Fixed + NOT locked: tap=lock
+     *  Fixed + locked: long-press=unlock */
+    private fun setupLockButtonDrag(btnLock: View) {
+        val longPressTimeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+        val dragThresholdPx = dpToPx(10).toFloat()
+
+        var downRawX = 0f; var downRawY = 0f
+        var startX = 0f; var startY = 0f
+        var isDragging = false; var longPressTriggered = false
+
+        val longPressRunnable = Runnable {
+            val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val isFixed = prefs?.getBoolean(PREF_LOCK_BUTTON_FIXED, false) ?: false
+            if (isScreenLocked && isFixed && !isDragging) {
+                longPressTriggered = true
+                unlockScreen()
+            }
+        }
+
+        btnLock.setOnTouchListener { v, event ->
+            val parent = v.parent as? View ?: return@setOnTouchListener false
+            val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val isFixed = prefs?.getBoolean(PREF_LOCK_BUTTON_FIXED, false) ?: false
+
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX; downRawY = event.rawY
+                    startX = v.x; startY = v.y
+                    isDragging = false; longPressTriggered = false
+                    v.removeCallbacks(longPressRunnable)
+                    if (isScreenLocked && isFixed) v.postDelayed(longPressRunnable, longPressTimeout)
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downRawX; val dy = event.rawY - downRawY
+                    val movedEnough = kotlin.math.abs(dx) >= dragThresholdPx || kotlin.math.abs(dy) >= dragThresholdPx
+                    if (movedEnough) v.removeCallbacks(longPressRunnable)
+                    if (!isScreenLocked && !isFixed && movedEnough) isDragging = true
+                    if (isDragging) {
+                        val maxX = (parent.width - v.width).coerceAtLeast(0).toFloat()
+                        val maxY = (parent.height - v.height).coerceAtLeast(0).toFloat()
+                        v.x = (startX + dx).coerceIn(0f, maxX)
+                        v.y = (startY + dy).coerceIn(0f, maxY)
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    v.removeCallbacks(longPressRunnable)
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    when {
+                        isDragging -> {
+                            val maxX = (parent.width - v.width).coerceAtLeast(0).toFloat()
+                            val maxY = (parent.height - v.height).coerceAtLeast(0).toFloat()
+                            val fracX = if (maxX > 0) v.x / maxX else 0f
+                            val fracY = if (maxY > 0) v.y / maxY else 0f
+                            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+                                ?.putFloat(PREF_LOCK_BUTTON_X, fracX)
+                                ?.putFloat(PREF_LOCK_BUTTON_Y, fracY)?.apply()
+                        }
+                        longPressTriggered -> { /* unlock already fired */ }
+                        !isScreenLocked -> { v.performClick(); lockScreen() }
+                    }
+                    isDragging = false; longPressTriggered = false
+                    true
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    v.removeCallbacks(longPressRunnable)
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    if (isDragging) { v.x = startX; v.y = startY }
+                    isDragging = false; longPressTriggered = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
     private fun dpToPx(dp: Int): Int {
         val density = context?.resources?.displayMetrics?.density ?: 3f
         return (dp * density).toInt()
@@ -3138,7 +3266,7 @@ class MapFragment : Fragment() {
 
         binding.btnRec.setOnClickListener { toggleRecording() }
 
-        binding.btnLock.setOnClickListener { lockScreen() }
+        setupLockButtonDrag(binding.btnLock)
 
 // Download indicator tap — show details dialog
         binding.downloadIndicator.setOnClickListener {
@@ -3172,7 +3300,7 @@ class MapFragment : Fragment() {
         binding.btnQuickAction.setOnLongClickListener { showHint("Управление данными: маршрут, трек, точки"); true }
         binding.btnLayers.setOnLongClickListener { showHint("Выбор слоёв карты"); true }
         binding.btnRec.setOnLongClickListener { showHint("Запись / остановка трека"); true }
-        binding.btnLock.setOnLongClickListener { showHint("Блокировка экрана от случайных нажатий"); true }
+        // btnLock gestures handled by setupLockButtonDrag
         binding.btnSettings.setOnLongClickListener { showHint("Настройки приложения"); true }
         binding.btnPrevWp.setOnLongClickListener { showHint("Предыдущая точка маршрута"); true }
         binding.btnNextWp.setOnLongClickListener { showHint("Следующая точка маршрута"); true }
