@@ -680,19 +680,19 @@
             </LinearLayout>
 
             <!-- Data Manager shortcut — opens Quick Action Menu (WP/RTE/TRK/GPX widget) -->
-            <Button
+            <TextView
                 android:id="@+id/btnDataManager"
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:minHeight="52dp"
-                android:text="📋 Управление данными"
-                android:textColor="#FF6F00"
-                android:textSize="15sp"
-                android:textAllCaps="false"
-                android:backgroundTint="#2A2A2A"
+                android:text="▸  УПРАВЛЕНИЕ ДАННЫМИ"
+                android:textColor="#888888"
+                android:textSize="11sp"
+                android:letterSpacing="0.1"
                 android:tag="tab:files"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="16dp" />
+                android:clickable="true"
+                android:focusable="true"
+                android:layout_marginTop="24dp"
+                android:layout_marginBottom="8dp" />
 
             <!-- Section: Files -->
             <TextView
