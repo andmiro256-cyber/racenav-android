@@ -216,7 +216,7 @@ object GpxParser {
         val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-            appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:tn=\"http://trophynav.ru/gpx/1\">")
             appendLine("  <trk><name>$safeName</name>")
             var inSeg = false
             for ((lat, lon) in points) {
@@ -237,7 +237,7 @@ object GpxParser {
         fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-            appendLine("<gpx version=\"1.1\" creator=\"RaceNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:tn=\"http://trophynav.ru/gpx/1\">")
             appendLine("  <metadata><name>${esc(name)}</name></metadata>")
             for (wp in waypoints) {
                 append("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${esc(wp.name)}</name>")
