@@ -8980,9 +8980,10 @@ class MapFragment : Fragment() {
         }
 
         map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
-        updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
+        // Arrow and track tip use interpolated position (not EMA-smoothed) to avoid lag
+        updateGpsArrow(interpLat, interpLon, lastGpsBearing, persist = false)
         if (TrackingService.trackPoints.size >= 2) {
-            updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
+            updateTrackOnMap(extrapolateLat = interpLat, extrapolateLon = interpLon)
         }
     }
 
