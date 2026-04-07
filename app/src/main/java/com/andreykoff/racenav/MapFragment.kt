@@ -8919,16 +8919,9 @@ class MapFragment : Fragment() {
         val interpLat = lastGpsLat + dLat * t
         val interpLon = lastGpsLon + dLon * t
 
-        // Low-speed EMA smoothing against GPS jitter
-        if (!renderCamLat.isFinite() || !renderCamLon.isFinite()) {
-            renderCamLat = interpLat; renderCamLon = interpLon
-        }
-        if (lastGpsSpeedKmh <= lowSpeedSmoothThresholdKmh) {
-            renderCamLat = lerp(renderCamLat, interpLat, lowSpeedPositionAlpha)
-            renderCamLon = lerp(renderCamLon, interpLon, lowSpeedPositionAlpha)
-        } else {
-            renderCamLat = interpLat; renderCamLon = interpLon
-        }
+        // Single display position for camera, arrow, and track — no EMA split
+        renderCamLat = interpLat
+        renderCamLon = interpLon
 
         val speedKmh = lastGpsSpeedKmh
 
@@ -8980,10 +8973,10 @@ class MapFragment : Fragment() {
         }
 
         map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
-        // Arrow and track tip use interpolated position (not EMA-smoothed) to avoid lag
-        updateGpsArrow(interpLat, interpLon, lastGpsBearing, persist = false)
+        // Arrow, track tip, and camera all use same renderCam position
+        updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
         if (TrackingService.trackPoints.size >= 2) {
-            updateTrackOnMap(extrapolateLat = interpLat, extrapolateLon = interpLon)
+            updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
         }
     }
 
