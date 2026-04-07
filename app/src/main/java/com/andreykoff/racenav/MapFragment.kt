@@ -8854,7 +8854,10 @@ class MapFragment : Fragment() {
     fun applyWidgetFontScale() {
         val b = _binding ?: return
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
-        val scale = prefs.getInt(PREF_WIDGET_FONT_SCALE, 5).coerceIn(1, 10)
+        val scale = try { prefs.getInt(PREF_WIDGET_FONT_SCALE, 5) } catch (_: ClassCastException) {
+            // Legacy: pref was stored as String in older version
+            prefs.getString(PREF_WIDGET_FONT_SCALE, "5")?.toIntOrNull() ?: 5
+        }.coerceIn(1, 10)
         val dm = resources.displayMetrics
         // Scale 1=12dp values/6dp labels, 5=20dp/10dp, 10=28dp/14dp
         val valueSizePx = (scale * 2f + 10f) * dm.density
