@@ -178,7 +178,8 @@ class SettingsFragment : Fragment() {
             val seekAlpha = view.findViewById<android.widget.SeekBar>(R.id.seekLockButtonAlpha)
             val switchFixed = view.findViewById<SwitchCompat>(R.id.switchLockButtonFixed)
             fun mf() = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-            fun showRows(vis: Boolean) { val s = if (vis) View.VISIBLE else View.GONE; rowSize.visibility = s; rowAlpha.visibility = s; rowFixed.visibility = s }
+            val rowUnlockDelay = view.findViewById<View>(R.id.rowLockUnlockDelay)
+            fun showRows(vis: Boolean) { val s = if (vis) View.VISIBLE else View.GONE; rowSize.visibility = s; rowAlpha.visibility = s; rowFixed.visibility = s; rowUnlockDelay.visibility = s }
             switchLockBtn.isChecked = prefs.getBoolean(MapFragment.PREF_BTN_LOCK, true)
             showRows(switchLockBtn.isChecked)
             switchLockBtn.setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean(MapFragment.PREF_BTN_LOCK, c).apply(); showRows(c); mf()?.applyLockButtonPrefs() }
@@ -195,6 +196,18 @@ class SettingsFragment : Fragment() {
             })
             switchFixed.isChecked = prefs.getBoolean(MapFragment.PREF_LOCK_BUTTON_FIXED, false)
             switchFixed.setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean(MapFragment.PREF_LOCK_BUTTON_FIXED, c).apply() }
+
+            // Unlock delay
+            val rowDelay = view.findViewById<View>(R.id.rowLockUnlockDelay)
+            val txtDelay = view.findViewById<android.widget.TextView>(R.id.txtUnlockDelay)
+            var delay = prefs.getInt(MapFragment.PREF_LOCK_UNLOCK_DELAY, MapFragment.DEFAULT_LOCK_UNLOCK_DELAY).coerceIn(1, 5)
+            txtDelay.text = delay.toString()
+            view.findViewById<android.widget.ImageButton>(R.id.btnUnlockDelayMinus).setOnClickListener {
+                if (delay > 1) { delay--; txtDelay.text = delay.toString(); prefs.edit().putInt(MapFragment.PREF_LOCK_UNLOCK_DELAY, delay).apply() }
+            }
+            view.findViewById<android.widget.ImageButton>(R.id.btnUnlockDelayPlus).setOnClickListener {
+                if (delay < 5) { delay++; txtDelay.text = delay.toString(); prefs.edit().putInt(MapFragment.PREF_LOCK_UNLOCK_DELAY, delay).apply() }
+            }
         }
 
         // Auto-recenter

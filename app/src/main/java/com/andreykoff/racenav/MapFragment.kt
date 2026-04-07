@@ -449,6 +449,8 @@ class MapFragment : Fragment() {
         const val PREF_LOCK_BUTTON_FIXED = "lock_button_fixed"
         const val DEFAULT_LOCK_BUTTON_SIZE = 3
         const val DEFAULT_LOCK_BUTTON_ALPHA = 100
+        const val PREF_LOCK_UNLOCK_DELAY = "lock_unlock_delay"
+        const val DEFAULT_LOCK_UNLOCK_DELAY = 3  // seconds
         fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
@@ -3008,7 +3010,9 @@ class MapFragment : Fragment() {
      *  Fixed + NOT locked: tap=lock
      *  Fixed + locked: long-press=unlock */
     private fun setupLockButtonDrag(btnLock: View) {
-        val longPressTimeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+        val unlockDelaySec = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getInt(PREF_LOCK_UNLOCK_DELAY, DEFAULT_LOCK_UNLOCK_DELAY) ?: DEFAULT_LOCK_UNLOCK_DELAY
+        val longPressTimeout = (unlockDelaySec * 1000).toLong()
         val dragThresholdPx = dpToPx(10).toFloat()
 
         var downRawX = 0f; var downRawY = 0f

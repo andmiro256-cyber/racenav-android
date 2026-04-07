@@ -607,6 +607,14 @@
                 <androidx.appcompat.widget.SwitchCompat android:id="@+id/switchLockButtonFixed" android:layout_width="wrap_content" android:layout_height="wrap_content" android:checked="false" />
             </LinearLayout>
 
+            <!-- Lock button: unlock delay -->
+            <LinearLayout android:id="@+id/rowLockUnlockDelay" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:orientation="horizontal" android:gravity="center_vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp" android:layout_marginTop="2dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Удержание для разблокировки (сек)" android:textColor="#FFFFFF" android:textSize="15sp" />
+                <ImageButton android:id="@+id/btnUnlockDelayMinus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_remove" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+                <TextView android:id="@+id/txtUnlockDelay" android:layout_width="44dp" android:layout_height="wrap_content" android:text="3" android:textColor="#FFFFFF" android:textSize="15sp" android:gravity="center" />
+                <ImageButton android:id="@+id/btnUnlockDelayPlus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+            </LinearLayout>
+
             <!-- Hints toggle -->
             <LinearLayout
                 android:layout_width="match_parent"
