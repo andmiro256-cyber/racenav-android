@@ -432,7 +432,7 @@ class MapFragment : Fragment() {
         val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status","battery")
 
         const val PREF_TOP_BAR_ORDER = "top_bar_order"
-        val ALL_TOP_BAR_KEYS = listOf("compass","zoom","waypoint","quick","stop","spacer","go","zoom_level","battery","layers","rec","lock","map_switch","gps_dot","server_dot","settings")
+        val ALL_TOP_BAR_KEYS = listOf("compass","zoom","waypoint","quick","stop","spacer","go","zoom_level","battery","layers","rec","map_switch","gps_dot","server_dot","settings")
 
         // Top bar button visibility prefs
         const val PREF_BTN_COMPASS = "btn_compass"
@@ -1186,7 +1186,7 @@ class MapFragment : Fragment() {
             "battery"    -> listOf(b.btnBatteryIndicator)
             "layers"     -> listOf(b.btnLayers)
             "rec"        -> listOf(b.btnRec)
-            "lock"       -> listOf(b.btnLock)
+            // "lock" removed — btnLock is now floating, not in topBar
             "map_switch" -> listOf(b.btnMapSwitch)
             "gps_dot"    -> listOf(b.topBarGpsDot)
             "server_dot" -> listOf(b.topBarServerDot)
