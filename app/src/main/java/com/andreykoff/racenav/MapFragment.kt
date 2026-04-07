@@ -3010,9 +3010,11 @@ class MapFragment : Fragment() {
      *  Fixed + NOT locked: tap=lock
      *  Fixed + locked: long-press=unlock */
     private fun setupLockButtonDrag(btnLock: View) {
-        val unlockDelaySec = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.getInt(PREF_LOCK_UNLOCK_DELAY, DEFAULT_LOCK_UNLOCK_DELAY) ?: DEFAULT_LOCK_UNLOCK_DELAY
-        val longPressTimeout = (unlockDelaySec * 1000).toLong()
+        fun getLongPressMs(): Long {
+            val sec = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.getInt(PREF_LOCK_UNLOCK_DELAY, DEFAULT_LOCK_UNLOCK_DELAY) ?: DEFAULT_LOCK_UNLOCK_DELAY
+            return (sec * 1000).toLong()
+        }
         val dragThresholdPx = dpToPx(10).toFloat()
 
         var downRawX = 0f; var downRawY = 0f
@@ -3039,7 +3041,7 @@ class MapFragment : Fragment() {
                     startX = v.translationX; startY = v.translationY
                     isDragging = false; longPressTriggered = false
                     v.removeCallbacks(longPressRunnable)
-                    if (isScreenLocked && isFixed) v.postDelayed(longPressRunnable, longPressTimeout)
+                    if (isScreenLocked && isFixed) v.postDelayed(longPressRunnable, getLongPressMs())
                     v.parent?.requestDisallowInterceptTouchEvent(true)
                     true
                 }
