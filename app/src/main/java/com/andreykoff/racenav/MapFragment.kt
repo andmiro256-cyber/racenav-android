@@ -267,16 +267,22 @@ class MapFragment : Fragment() {
     }
 
     // Smooth camera loop state (Choreographer-driven, 60 FPS)
-    private var lastGpsLat = 0.0       // raw GPS for nav/waypoints/telemetry
+    private var prevGpsLat = 0.0
+    private var prevGpsLon = 0.0
+    private var prevGpsTimeNanos = 0L
+    private var lastGpsLat = 0.0
     private var lastGpsLon = 0.0
-    private var smoothCamLat = 0.0    // EMA-filtered for camera only
-    private var smoothCamLon = 0.0
     private var lastGpsSpeedMs = 0f
     private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
     private var cameraLoopRunning = false
     private var displayBearing = -1.0     // interpolated bearing for smooth camera rotation
+    private var renderCamLat = Double.NaN
+    private var renderCamLon = Double.NaN
+    private val cameraInterpolationNanos = 1_000_000_000L
+    private val lowSpeedSmoothThresholdKmh = 3.0
+    private val lowSpeedPositionAlpha = 0.18
     private var lastTelemetrySentMs = 0L   // throttle telemetry to every 5s
     private var locationTrackingStarted = false  // prevent duplicate GPS listeners on style reload
     private var activeLocationCallback: com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult>? = null
@@ -1815,15 +1821,19 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** EMA-сглаживание курса с корректной обработкой перехода 0°/360° */
-    private fun smoothBearing(raw: Float, alpha: Float = 0.35f): Double {
-        val effectiveAlpha = alpha
+    /** EMA-сглаживание курса, adaptive alpha по скорости */
+    private fun smoothBearing(raw: Float, speedKmh: Double = 30.0): Double {
+        val effectiveAlpha = if (speedKmh < 30.0) 0.15 else 0.25
         if (smoothedBearing < 0) { smoothedBearing = raw.toDouble(); return smoothedBearing }
         var delta = raw - smoothedBearing
         while (delta > 180) delta -= 360
         while (delta < -180) delta += 360
         smoothedBearing = (smoothedBearing + effectiveAlpha * delta + 360) % 360
         return smoothedBearing
+    }
+
+    private fun lerp(start: Double, end: Double, t: Double): Double {
+        return start + (end - start) * t.coerceIn(0.0, 1.0)
     }
 
     private fun startMagnetometer() {
@@ -6312,7 +6322,7 @@ class MapFragment : Fragment() {
                     } else {
                         // On unfreeze: sync EMA to lastValidBearing to avoid jump from stale smoothedBearing
                         if (wasFrozen) smoothedBearing = lastValidBearing.toDouble()
-                        val bearing = if (rawBearing >= 0) smoothBearing(rawBearing).toFloat() else lastValidBearing
+                        val bearing = if (rawBearing >= 0) smoothBearing(rawBearing, speedKmh).toFloat() else lastValidBearing
                         lastValidBearing = bearing
                         effectiveBearing = bearing
                     }
@@ -6358,25 +6368,21 @@ class MapFragment : Fragment() {
                     // Keep GL renderer awake — prevents first-touch lag after GPU power saving
                     mapboxMap?.triggerRepaint()
 
-                    // Save raw GPS for nav/waypoints/telemetry
+                    // Save GPS state for interpolation camera loop
+                    val gpsFixTimeNanos = System.nanoTime()
+                    if (lastGpsTimeNanos == 0L) {
+                        prevGpsLat = loc.latitude; prevGpsLon = loc.longitude
+                        prevGpsTimeNanos = gpsFixTimeNanos - cameraInterpolationNanos
+                        renderCamLat = loc.latitude; renderCamLon = loc.longitude
+                    } else {
+                        prevGpsLat = lastGpsLat; prevGpsLon = lastGpsLon
+                        prevGpsTimeNanos = lastGpsTimeNanos
+                    }
                     lastGpsLat = loc.latitude
                     lastGpsLon = loc.longitude
-
-                    // EMA-filtered position for camera only (reduces jitter on weak GPS)
-                    // Disabled when moving — GPS is accurate at speed, filter causes lag
-                    val smoothLevel = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING) ?: DEFAULT_GPS_SMOOTHING
-                    if (smoothLevel <= 1 || smoothCamLat == 0.0 || speedKmh > 5.0) {
-                        smoothCamLat = loc.latitude
-                        smoothCamLon = loc.longitude
-                    } else {
-                        val alpha = 1.0 / smoothLevel
-                        smoothCamLat += alpha * (loc.latitude - smoothCamLat)
-                        smoothCamLon += alpha * (loc.longitude - smoothCamLon)
-                    }
                     lastGpsSpeedMs = loc.speed
                     lastGpsBearing = effectiveBearing
-                    lastGpsTimeNanos = System.nanoTime()
+                    lastGpsTimeNanos = gpsFixTimeNanos
                     lastGpsSpeedKmh = if (speedKmh > 1.0) speedKmh else loc.speed * 3.6
 
                     // Start camera loop if not running
@@ -8899,57 +8905,52 @@ class MapFragment : Fragment() {
         if (flyAnimationActive || userDragged || followMode == FollowMode.FREE) return
         val map = mapboxMap ?: return
         if (lastGpsTimeNanos == 0L) return
-        // Don't move camera to (0,0) — GPS not yet received
-        if (smoothCamLat == 0.0 && smoothCamLon == 0.0) return
+        if (lastGpsLat == 0.0 && lastGpsLon == 0.0) return
 
-        // dt since last GPS fix, clamped to 2s to avoid runaway extrapolation
-        val dtSec = if (bearingFrozen) 0.0
-                    else ((frameTimeNanos - lastGpsTimeNanos) / 1_000_000_000.0).coerceIn(0.0, 2.0)
+        // Interpolation between prev and current GPS fix (instead of extrapolation)
+        val interpDuration = if (prevGpsTimeNanos > 0 && lastGpsTimeNanos > prevGpsTimeNanos) {
+            (lastGpsTimeNanos - prevGpsTimeNanos).coerceIn(300_000_000L, cameraInterpolationNanos)
+        } else cameraInterpolationNanos
 
-        // Use smoothed position for camera (reduces jitter on weak GPS)
-        val speedMs = if (dtSec >= 2.0) 0.0 else (lastGpsSpeedKmh / 3.6).coerceAtMost(50.0)
-        val bearingRad = Math.toRadians(lastGpsBearing.toDouble())
-        val metersPerDegLat = 111_320.0
-        val metersPerDegLon = 111_320.0 * Math.cos(Math.toRadians(smoothCamLat))
-        val dLat = (speedMs * dtSec * Math.cos(bearingRad)) / metersPerDegLat
-        val dLon = (speedMs * dtSec * Math.sin(bearingRad)) / metersPerDegLon.coerceAtLeast(1.0)
-        val extLat = smoothCamLat + dLat
-        val extLon = smoothCamLon + dLon
+        val t = ((frameTimeNanos - lastGpsTimeNanos).toDouble() / interpDuration.toDouble()).coerceIn(0.0, 1.0)
+        val interpLat = lerp(prevGpsLat, lastGpsLat, t)
+        val interpLon = lerp(prevGpsLon, lastGpsLon, t)
+
+        // Low-speed EMA smoothing against GPS jitter
+        if (!renderCamLat.isFinite() || !renderCamLon.isFinite()) {
+            renderCamLat = interpLat; renderCamLon = interpLon
+        }
+        if (lastGpsSpeedKmh <= lowSpeedSmoothThresholdKmh) {
+            renderCamLat = lerp(renderCamLat, interpLat, lowSpeedPositionAlpha)
+            renderCamLon = lerp(renderCamLon, interpLon, lowSpeedPositionAlpha)
+        } else {
+            renderCamLat = interpLat; renderCamLon = interpLon
+        }
 
         val speedKmh = lastGpsSpeedKmh
 
-        // 3D tilt: 0° stopped → 45° at 60+ km/h (only in FOLLOW_COURSE if enabled)
-        // EMA smoothing prevents jerky tilt changes from GPS speed noise
+        // 3D tilt
         val mapTiltAllowed = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_MAP_TILT_ENABLED, false) ?: false
         val targetTilt = if (mapTiltAllowed && tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
-            (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0)
-        else 0.0
+            (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0) else 0.0
         smoothedTilt += (targetTilt - smoothedTilt) * 0.05
-        val tilt = smoothedTilt
 
         // Auto-zoom
         val targetZoom = if (autoZoomLevel > 0) {
-            val base = if (userBaseZoom > 0) userBaseZoom
-                       else map.cameraPosition?.zoom ?: 14.0
+            val base = if (userBaseZoom > 0) userBaseZoom else map.cameraPosition?.zoom ?: 14.0
             val maxDelta = autoZoomLevel * 0.4
             val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
             (base - delta).coerceIn(base - maxDelta, base)
-        } else if (userBaseZoom > 0) {
-            // Apply volume-key zoom in follow modes — Choreographer overwrites animateCamera every 16ms
-            userBaseZoom
-        } else null
+        } else if (userBaseZoom > 0) userBaseZoom else null
 
-        val target = LatLng(extLat, extLon)
+        val target = LatLng(renderCamLat, renderCamLon)
         val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-            .target(target)
-            .tilt(tilt)
+            .target(target).tilt(smoothedTilt)
             .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
 
         when (followMode) {
             FollowMode.FOLLOW_NORTH -> builder.bearing(0.0)
             FollowMode.FOLLOW_COURSE -> {
-                // Blend magnetometer (50Hz) with GPS bearing by speed to eliminate 1-sec GPS ratchet
-                // At low speed (<2 m/s): use magnetometer; at speed (>2 m/s): use GPS bearing
                 val targetBearing: Double = if (magneticHeading >= 0f) {
                     val blend = (lastGpsSpeedKmh / 7.2).coerceIn(0.0, 1.0)
                     var d = lastGpsBearing.toDouble() - magneticHeading.toDouble()
@@ -8958,33 +8959,26 @@ class MapFragment : Fragment() {
                 } else lastGpsBearing.toDouble()
                 if (displayBearing < 0) displayBearing = targetBearing
                 var delta = targetBearing - displayBearing
-                while (delta > 180) delta -= 360
-                while (delta < -180) delta += 360
-                // Adaptive lerp: angle based — increased factors for snappier response
-                val absDelta = Math.abs(delta.toDouble())
-                val lerpFactor = if (absDelta > 60) 0.7 else if (absDelta > 30) 0.5 else 0.35
+                while (delta > 180) delta -= 360; while (delta < -180) delta += 360
+                // Smoother bearing lerp — less aggressive than before
+                val absDelta = kotlin.math.abs(delta)
+                val lerpFactor = when { absDelta > 60 -> 0.45; absDelta > 30 -> 0.30; else -> 0.18 }
                 displayBearing = (displayBearing + delta * lerpFactor + 360) % 360
                 builder.bearing(displayBearing)
             }
             FollowMode.FREE -> return
         }
+
         if (targetZoom != null) {
-            // EMA smoothing prevents jerky zoom from GPS speed noise
-            // Re-init if unset or if user changed zoom manually (large jump)
-            if (smoothedZoom < 0 || Math.abs(targetZoom - smoothedZoom) > 2.0) smoothedZoom = targetZoom
+            if (smoothedZoom < 0 || kotlin.math.abs(targetZoom - smoothedZoom) > 2.0) smoothedZoom = targetZoom
             smoothedZoom += (targetZoom - smoothedZoom) * 0.05
             builder.zoom(smoothedZoom)
         }
 
-        // moveCamera (instant) — Choreographer already provides smooth 60 FPS cadence
         map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
-
-        // Move GPS arrow to extrapolated position (no persist — 60 FPS would thrash disk)
-        updateGpsArrow(extLat, extLon, lastGpsBearing, persist = false)
-
-        // Extrapolate track tip so polyline follows camera smoothly between GPS fixes
-        if (TrackingService.trackPoints.size >= 2 && speedMs > 0.5) {
-            updateTrackOnMap(extrapolateLat = extLat, extrapolateLon = extLon)
+        updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
+        if (TrackingService.trackPoints.size >= 2) {
+            updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
         }
     }
 
