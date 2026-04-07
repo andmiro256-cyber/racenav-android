@@ -2968,6 +2968,8 @@ class MapFragment : Fragment() {
         val sizePx = dpToPx(lockButtonScaleToDp(sizeScale))
         val paddingPx = dpToPx((sizeScale * 0.5f + 3.5f).toInt())
 
+        Log.d("LockButton", "apply: visible=$visible size=$sizeScale alpha=$alpha sizePx=$sizePx")
+
         btnLock.layoutParams?.let { lp ->
             lp.width = sizePx; lp.height = sizePx; btnLock.layoutParams = lp
         }
