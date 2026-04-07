@@ -6352,7 +6352,8 @@ class MapFragment : Fragment() {
                         }
                     }
 
-                    // GPS arrow updated by Choreographer loop only (avoids jump between raw fix and interpolated pos)
+                    // Update GPS arrow from raw fix (ensures arrow moves even when camera not following)
+                    updateGpsArrow(loc.latitude, loc.longitude, effectiveBearing)
                     // Update heading line from GPS — use same filtered bearing as cursor
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
