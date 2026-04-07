@@ -6363,9 +6363,10 @@ class MapFragment : Fragment() {
                     lastGpsLon = loc.longitude
 
                     // EMA-filtered position for camera only (reduces jitter on weak GPS)
+                    // Disabled when moving — GPS is accurate at speed, filter causes lag
                     val smoothLevel = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING) ?: DEFAULT_GPS_SMOOTHING
-                    if (smoothLevel <= 1 || smoothCamLat == 0.0) {
+                    if (smoothLevel <= 1 || smoothCamLat == 0.0 || speedKmh > 5.0) {
                         smoothCamLat = loc.latitude
                         smoothCamLon = loc.longitude
                     } else {
