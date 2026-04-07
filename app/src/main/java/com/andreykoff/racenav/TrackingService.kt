@@ -191,6 +191,8 @@ class TrackingService : Service() {
         if (clearPoints) {
             trackPoints.clear()
             trackLengthM = 0.0
+        } else if (trackPoints.isEmpty()) {
+            restoreTrackFromTempIfNeeded()
         }
         if (clearPoints || startTimeMs == 0L) startTimeMs = System.currentTimeMillis()
         isRunning   = true
@@ -242,6 +244,21 @@ class TrackingService : Service() {
         stopSelf()
     }
 
+    private fun restoreTrackFromTempIfNeeded() {
+        val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
+        if (!file.exists() || file.length() == 0L) return
+        try {
+            val savedPoints = GpxParser.parseGpxFull(file.inputStream()).trackPoints
+            if (savedPoints.size < 2) return
+            trackPoints.clear()
+            trackPoints.addAll(savedPoints)
+            trackLengthM = calcTrackLength(savedPoints)
+            Log.d("TrackingService", "Restored ${savedPoints.size} track points from tmp GPX")
+        } catch (e: Exception) {
+            Log.w("TrackingService", "Failed to restore tmp GPX: ${e.message}")
+        }
+    }
+
     /** Save current track to temp file (survives app restart). Synchronous — must complete before stopSelf. */
     private fun autoSaveTrack() {
         if (trackPoints.isEmpty()) return
@@ -264,6 +281,14 @@ class TrackingService : Service() {
         val dLat = lat2 - lat1;              val dLon = Math.toRadians(b.second - a.second)
         val x    = sin(dLat / 2).pow(2) + cos(lat1) * cos(lat2) * sin(dLon / 2).pow(2)
         return 2 * R * asin(sqrt(x))
+    }
+
+    private fun calcTrackLength(points: List<Pair<Double, Double>>): Double {
+        var total = 0.0
+        for (i in 1 until points.size) {
+            total += distanceM(points[i - 1], points[i]).takeIf { it.isFinite() && it < Double.MAX_VALUE } ?: 0.0
+        }
+        return total
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {

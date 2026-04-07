@@ -215,6 +215,7 @@ class MapFragment : Fragment() {
     // Pending unlock runnable — stored so unlockScreen() can cancel it regardless of how unlock happens
     private var pendingUnlockAction: Runnable? = null
     private var flyAnimationActive = false
+    private var flyAnimationToken = 0
     private var pendingNavResumeCheck = false
     var autoRecenterEnabled = false
     var tilt3dEnabled = false       // 3D tilt when driving in FOLLOW_COURSE
@@ -276,19 +277,33 @@ class MapFragment : Fragment() {
     private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
+    private var startupFollowPending = false
+    private var startupFollowTransitionPending = false
+    private var startupFixConsistencyCount = 0
+    private var startupLastFixLat = Double.NaN
+    private var startupLastFixLon = Double.NaN
+    private var startupWarmupUntilMs = 0L
+    private var startupLockedZoom = -1.0
+    private var startupZoomLockUntilMs = 0L
+    private var cameraRecoveryInProgress = false
     private var cameraLoopRunning = false
     private var displayBearing = -1.0     // interpolated bearing for smooth camera rotation
     private var renderCamLat = Double.NaN
     private var renderCamLon = Double.NaN
+    private var lastRenderFrameNanos = 0L
+    private val minStableFollowZoom = 8.0
     private val cameraInterpolationNanos = 1_000_000_000L
-    private val lowSpeedSmoothThresholdKmh = 3.0
-    private val lowSpeedPositionAlpha = 0.18
+    private val courseFreezeSpeedKmh = 1.2
+    private val courseUnfreezeSpeedKmh = 2.5
+    private val minCursorMoveThresholdM = 1.0
+    private val maxCursorHoldThresholdM = 4.0
     private var lastTelemetrySentMs = 0L   // throttle telemetry to every 5s
     private var locationTrackingStarted = false  // prevent duplicate GPS listeners on style reload
     private var activeLocationCallback: com.mapbox.mapboxsdk.location.engine.LocationEngineCallback<com.mapbox.mapboxsdk.location.engine.LocationEngineResult>? = null
     private var locationEngine: com.mapbox.mapboxsdk.location.engine.LocationEngine? = null
     private val emergencyHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var emergencyRunnable: Runnable? = null
+    private var pendingResumeTrackRestore: Runnable? = null
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
@@ -354,6 +369,7 @@ class MapFragment : Fragment() {
         const val PREF_CAMERA_LAT = "camera_lat"
         const val PREF_CAMERA_LON = "camera_lon"
         const val PREF_CAMERA_ZOOM = "camera_zoom"
+        const val PREF_CAMERA_BEARING = "camera_bearing"
         const val PREF_AUTO_RECENTER = "auto_recenter"
         const val PREF_FOLLOW_MODE = "follow_mode"
         const val PREF_LAST_LAT = "last_lat"
@@ -748,17 +764,31 @@ class MapFragment : Fragment() {
             val savedLat = tilePrefs?.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedLon = tilePrefs?.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE) ?: Float.MIN_VALUE
             val savedZoom = tilePrefs?.getFloat(PREF_CAMERA_ZOOM, -1f) ?: -1f
+            val savedBearing = tilePrefs?.getFloat(PREF_CAMERA_BEARING, Float.NaN) ?: Float.NaN
             Log.d("CamDebug", "STARTUP: lat=$savedLat lon=$savedLon zoom=$savedZoom")
             if (savedLat != Float.MIN_VALUE) {
                 // Have saved coordinates — use them. Clamp bad zoom (world-view artifact) to 10.
                 val useZoom = if (savedZoom >= 10f) savedZoom.toDouble() else 10.0
-                val camPos = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+                val camBuilder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
                     .target(LatLng(savedLat.toDouble(), savedLon.toDouble()))
-                    .zoom(useZoom).build()
+                    .zoom(useZoom)
+                if (!savedBearing.isNaN()) {
+                    camBuilder.bearing(((savedBearing.toDouble() % 360.0) + 360.0) % 360.0)
+                }
+                val camPos = camBuilder.build()
                 map.moveCamera(CameraUpdateFactory.newCameraPosition(camPos))
-                lastSavedCamera = camPos
-                lastGoodCamera = camPos
+                lastSavedCamera = sanitizeCameraPosition(camPos)
+                lastGoodCamera = sanitizeCameraPosition(camPos)
                 initialZoomDone = true
+                startupFollowPending = true
+                startupFollowTransitionPending = true
+                startupFixConsistencyCount = 0
+                startupLastFixLat = Double.NaN
+                startupLastFixLon = Double.NaN
+                resetStartupMotionState()
+                seedStartupBearingFromPrefs(tilePrefs)
+                startupLockedZoom = useZoom
+                startupZoomLockUntilMs = System.currentTimeMillis() + 12_000L
                 Log.d("CamDebug", "RESTORED: zoom=$useZoom lastSavedCamera SET")
             } else {
                 // No saved coordinates at all — try system last known location
@@ -774,9 +804,17 @@ class MapFragment : Fragment() {
                         .target(LatLng(lastLoc.latitude, lastLoc.longitude))
                         .zoom(13.0).build()
                     map.moveCamera(CameraUpdateFactory.newCameraPosition(gpsCam))
-                    lastGoodCamera = gpsCam
+                    lastGoodCamera = sanitizeCameraPosition(gpsCam)
                 }
                 waitingForFirstGps = true
+                startupFollowPending = false
+                startupFollowTransitionPending = false
+                resetStartupMotionState()
+                seedStartupBearingFromPrefs(tilePrefs)
+                if (lastLoc != null) {
+                    startupLockedZoom = 13.0
+                    startupZoomLockUntilMs = System.currentTimeMillis() + 12_000L
+                }
                 Log.d("CamDebug", "NO SAVED COORDS — waitingForFirstGps=true systemLoc=${lastLoc != null}")
             }
 
@@ -833,6 +871,9 @@ class MapFragment : Fragment() {
             binding.mapView.setOnTouchListener { _, event ->
                 when (event.actionMasked) {
                     android.view.MotionEvent.ACTION_DOWN -> {
+                        if (hasActiveStartupCameraAutomation()) {
+                            interruptCameraAutomationForGesture("action_down")
+                        }
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
@@ -889,6 +930,9 @@ class MapFragment : Fragment() {
                         }
                         val dx = event.x - touchDownX; val dy = event.y - touchDownY
                         if (dx * dx + dy * dy > moveThr) {
+                            if (followMode != FollowMode.FREE && !userDragged) {
+                                interruptCameraAutomationForGesture("move_threshold")
+                            }
                             panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
                             emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
                             dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
@@ -1101,9 +1145,12 @@ class MapFragment : Fragment() {
         if (lat == Float.MIN_VALUE) return null
         val lon = prefs.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE)
         val zoom = prefs.getFloat(PREF_CAMERA_ZOOM, 10f).toDouble().coerceIn(10.0, 20.0)
-        return com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+        val bearing = prefs.getFloat(PREF_CAMERA_BEARING, Float.NaN)
+        val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
             .target(LatLng(lat.toDouble(), lon.toDouble()))
-            .zoom(zoom).build()
+            .zoom(zoom)
+        if (!bearing.isNaN()) builder.bearing(((bearing.toDouble() % 360.0) + 360.0) % 360.0)
+        return builder.build()
     }
 
     private fun updateZoomLevel() {
@@ -1344,10 +1391,10 @@ class MapFragment : Fragment() {
         // lastSavedCamera survives multiple loadTileStyle calls (e.g. async catalog reload)
         // and is cleared once the user moves the map themselves.
         // Save current good camera position before setStyle resets it
-        val currentCam = mapboxMap?.cameraPosition?.takeIf { it.zoom > 2.0 }
+        val currentCam = mapboxMap?.cameraPosition?.takeIf { it.zoom > 2.0 }?.let { sanitizeCameraPosition(it) }
         if (currentCam != null) lastGoodCamera = currentCam
-        val camToRestore = lastSavedCamera
-            ?: lastGoodCamera
+        val camToRestore = lastSavedCamera?.let { sanitizeCameraPosition(it) }
+            ?: lastGoodCamera?.let { sanitizeCameraPosition(it) }
             ?: loadCameraFromPrefs()  // last resort: re-read from prefs
         Log.d("CamDebug", "loadTileStyle[$baseKey]: lastSavedCamera=${lastSavedCamera?.zoom} lastGoodCamera=${lastGoodCamera?.zoom} camToRestore=${camToRestore?.zoom}")
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
@@ -1836,6 +1883,186 @@ class MapFragment : Fragment() {
         return start + (end - start) * t.coerceIn(0.0, 1.0)
     }
 
+    private fun sanitizeCameraPosition(cam: com.mapbox.mapboxsdk.camera.CameraPosition): com.mapbox.mapboxsdk.camera.CameraPosition {
+        val target = cam.target ?: LatLng(0.0, 0.0)
+        return com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+            .target(target)
+            .zoom(cam.zoom)
+            .bearing(cam.bearing)
+            .tilt(cam.tilt)
+            .build()
+    }
+
+    private fun seedStartupBearingFromPrefs(prefs: android.content.SharedPreferences?) {
+        if (prefs == null) return
+        val savedFollowMode = prefs.getString(PREF_FOLLOW_MODE, "free") ?: "free"
+        val savedCameraBearing = prefs.getFloat(PREF_CAMERA_BEARING, Float.NaN)
+        val savedGpsBearing = prefs.getFloat(PREF_LAST_BEARING, Float.NaN)
+        val seed: Double = when {
+            savedFollowMode == "course" && !savedCameraBearing.isNaN() -> savedCameraBearing.toDouble()
+            !savedGpsBearing.isNaN() -> savedGpsBearing.toDouble()
+            !savedCameraBearing.isNaN() -> savedCameraBearing.toDouble()
+            else -> return
+        }
+        val normalized = ((seed % 360.0) + 360.0) % 360.0
+        lastValidBearing = normalized.toFloat()
+        lastGpsBearing = normalized.toFloat()
+        smoothedBearing = normalized
+        if (savedFollowMode == "course") displayBearing = normalized
+    }
+
+    private fun recoverWorldViewIfNeeded() {
+        if (cameraRecoveryInProgress) return
+        val map = mapboxMap ?: return
+        val cam = map.cameraPosition
+        if (cam.zoom >= 3.0) return
+        val fallbackCam = lastGoodCamera
+            ?.takeIf { it.zoom >= minStableFollowZoom }
+            ?: lastSavedCamera?.takeIf { it.zoom >= minStableFollowZoom }
+            ?: loadCameraFromPrefs()?.takeIf { it.zoom >= minStableFollowZoom }
+            ?: lastGoodCamera?.takeIf { it.zoom >= 3.0 }
+            ?: lastSavedCamera?.takeIf { it.zoom >= 3.0 }
+            ?: loadCameraFromPrefs()?.takeIf { it.zoom >= 3.0 }
+            ?: return
+        val cleanFallbackCam = sanitizeCameraPosition(fallbackCam)
+        val fallbackTarget = cleanFallbackCam.target ?: return
+        cameraRecoveryInProgress = true
+        smoothedZoom = cleanFallbackCam.zoom
+        if (userBaseZoom <= 0) userBaseZoom = cleanFallbackCam.zoom
+        renderCamLat = fallbackTarget.latitude
+        renderCamLon = fallbackTarget.longitude
+        lastGoodCamera = cleanFallbackCam
+        Log.w("CamDebug", "recoverWorldView: curZoom=${cam.zoom} -> ${cleanFallbackCam.zoom}")
+        map.moveCamera(CameraUpdateFactory.newCameraPosition(cleanFallbackCam))
+        emergencyHandler.postDelayed({ cameraRecoveryInProgress = false }, 250)
+    }
+
+    private fun resetStartupMotionState() {
+        stopCameraLoop()
+        lastKnownGpsPoint = null
+        startupWarmupUntilMs = 0L
+        startupLockedZoom = -1.0
+        startupZoomLockUntilMs = 0L
+        prevFreezeCheckLat = 0.0
+        prevFreezeCheckLon = 0.0
+        prevFreezeCheckTime = 0L
+        prevGpsLat = 0.0
+        prevGpsLon = 0.0
+        prevGpsTimeNanos = 0L
+        lastGpsLat = 0.0
+        lastGpsLon = 0.0
+        lastGpsSpeedMs = 0f
+        lastGpsBearing = lastValidBearing
+        lastGpsTimeNanos = 0L
+        lastGpsSpeedKmh = 0.0
+        lastRenderFrameNanos = 0L
+        displayBearing = -1.0
+        renderCamLat = Double.NaN
+        renderCamLon = Double.NaN
+        freezeConsecutiveCount = 0
+        unfreezeConsecutiveCount = 0
+    }
+
+    private fun hasActiveStartupCameraAutomation(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return flyAnimationActive ||
+            startupFollowPending ||
+            startupFollowTransitionPending ||
+            startupWarmupUntilMs > nowMs ||
+            (startupLockedZoom > 0 && startupZoomLockUntilMs > nowMs) ||
+            cameraRecoveryInProgress
+    }
+
+    private fun interruptCameraAutomationForGesture(reason: String) {
+        val currentCam = mapboxMap?.cameraPosition
+        flyAnimationToken++
+        flyAnimationActive = false
+        startupFollowPending = false
+        startupFollowTransitionPending = false
+        startupWarmupUntilMs = 0L
+        startupLockedZoom = -1.0
+        startupZoomLockUntilMs = 0L
+        lastSavedCamera = null
+        lastRenderFrameNanos = 0L
+        if (currentCam != null) {
+            if (currentCam.zoom > 0) userBaseZoom = currentCam.zoom
+            if (currentCam.zoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(currentCam)
+        }
+        if (followMode != FollowMode.FREE) {
+            userDragged = true
+            if (autoRecenterEnabled) scheduleAutoRecenter()
+        }
+        Log.d("CamDebug", "touch interrupt: $reason zoom=${currentCam?.zoom ?: -1.0}")
+    }
+
+    private fun performStartupFollowHandoff(target: LatLng, bearing: Float) {
+        val map = mapboxMap ?: run {
+            startupFollowTransitionPending = false
+            return
+        }
+        val currentCam = map.cameraPosition
+        val baseZoom = when {
+            startupLockedZoom > 0 -> startupLockedZoom
+            currentCam.zoom >= 8.0 -> currentCam.zoom
+            userBaseZoom > 0 -> userBaseZoom
+            lastSavedCamera?.zoom != null -> lastSavedCamera!!.zoom
+            lastGoodCamera?.zoom != null -> lastGoodCamera!!.zoom
+            else -> loadCameraFromPrefs()?.zoom ?: 14.0
+        }.coerceIn(10.0, 20.0)
+        val targetBearing = when (followMode) {
+            FollowMode.FOLLOW_COURSE -> bearing.toDouble()
+            FollowMode.FOLLOW_NORTH -> 0.0
+            FollowMode.FREE -> currentCam.bearing
+        }
+        val handoffCam = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+            .target(target)
+            .zoom(baseZoom)
+            .bearing(targetBearing)
+            .tilt(if (currentCam.zoom >= 3.0) currentCam.tilt else 0.0)
+            .build()
+        renderCamLat = target.latitude
+        renderCamLon = target.longitude
+        smoothedZoom = baseZoom
+        if (followMode == FollowMode.FOLLOW_COURSE) displayBearing = targetBearing else displayBearing = -1.0
+        lastGoodCamera = sanitizeCameraPosition(handoffCam)
+        lastSavedCamera = null
+        startupWarmupUntilMs = System.currentTimeMillis() + 6000L
+        startupZoomLockUntilMs = System.currentTimeMillis() + 12000L
+        startupFollowTransitionPending = false
+        Log.d("CamDebug", "startup handoff: zoom=$baseZoom bearing=$targetBearing")
+        map.moveCamera(CameraUpdateFactory.newCameraPosition(handoffCam))
+    }
+
+    /**
+     * Cursor filtering tuned for offroad riding:
+     * keep the marker steady on rough GPS while still reacting to slow technical movement.
+     */
+    private fun offroadCursorThresholdM(speedKmh: Double, accuracyM: Double, prefM: Double): Double {
+        val pref = prefM.coerceIn(2.0, maxCursorHoldThresholdM)
+        val acc = accuracyM.coerceIn(0.0, 8.0)
+        return when {
+            speedKmh >= 20.0 -> minCursorMoveThresholdM
+            speedKmh >= 10.0 -> 1.4
+            speedKmh >= courseUnfreezeSpeedKmh -> 1.8
+            speedKmh >= courseFreezeSpeedKmh -> maxOf(1.8, minOf(acc * 0.30, 2.6))
+            else -> maxOf(pref, minOf(acc * 0.50, maxCursorHoldThresholdM))
+        }
+    }
+
+    private fun renderPositionAlpha(speedKmh: Double): Double {
+        val smoothing = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING)
+            ?.coerceIn(1, 10) ?: DEFAULT_GPS_SMOOTHING
+        val base = 0.62 - (smoothing - 1) * 0.03
+        val speedBoost = when {
+            speedKmh >= 40.0 -> 0.24
+            speedKmh >= 20.0 -> 0.18
+            speedKmh >= 10.0 -> 0.12
+            speedKmh >= courseUnfreezeSpeedKmh -> 0.07
+            else -> 0.0
+        }
+        return (base + speedBoost).coerceIn(0.22, 0.82)
+    }
+
     private fun startMagnetometer() {
         val ctx = context ?: return
         val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager ?: return
@@ -1959,6 +2186,7 @@ class MapFragment : Fragment() {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
                 ?.remove(PREF_LOADED_TRACK_NAME)?.remove(PREF_LOADED_WP_NAME)?.apply()
         }
+        restoreLiveTrackFromTempIfNeeded()
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
         if (loadedTrackPoints.isNotEmpty()) updateLoadedTrackOnMap()
         // Restore track editor / draw mode overlay if active
@@ -3367,7 +3595,12 @@ class MapFragment : Fragment() {
         if (prevNavActive) pendingNavResumeCheck = true
         updateWaypointNavBar()
 
-        map.addOnCameraMoveListener { updateCompass(); updateCrosshairInfo(); updateZoomLevel() }
+        map.addOnCameraMoveListener {
+            recoverWorldViewIfNeeded()
+            updateCompass()
+            updateCrosshairInfo()
+            updateZoomLevel()
+        }
         map.addOnCameraIdleListener {
             updateCompass()
             // When user manually zooms (pinch/double-tap), record their preferred zoom
@@ -3384,7 +3617,7 @@ class MapFragment : Fragment() {
                 userBaseZoom = map.cameraPosition.zoom
                 if (lastSavedCamera != null) Log.d("CamDebug", "USER MOVED MAP — lastSavedCamera CLEARED zoom=${map.cameraPosition.zoom}")
                 lastSavedCamera = null  // User moved map — no longer need to restore startup position
-                if (map.cameraPosition.zoom >= 3.0) lastGoodCamera = map.cameraPosition
+                if (map.cameraPosition.zoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(map.cameraPosition)
                 if (followMode != FollowMode.FREE) {
                     userDragged = true
                     if (autoRecenterEnabled) scheduleAutoRecenter()
@@ -6224,6 +6457,9 @@ class MapFragment : Fragment() {
                     if (loc.hasAccuracy() && loc.accuracy > 30f) {
                         context?.let { DiagnosticsCollector.logEvent(it, "GPS weak: acc=${loc.accuracy}m") }
                     }
+                    val nowMs = System.currentTimeMillis()
+                    val startupWarmupActive = startupWarmupUntilMs > nowMs
+                    val startupZoomLockActive = startupLockedZoom > 0 && startupZoomLockUntilMs > nowMs
                     val rawPoint = LatLng(loc.latitude, loc.longitude)
                     val cursorStopFilter = (context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.getInt(PREF_TRACK_STOP_FILTER, DEFAULT_TRACK_STOP_FILTER) ?: DEFAULT_TRACK_STOP_FILTER).toDouble()
@@ -6231,13 +6467,22 @@ class MapFragment : Fragment() {
                     val newPoint = if (prevGps != null) {
                         val jumpM = distanceM(prevGps, rawPoint)
                         val gpsAcc = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 10.0
+                        if (startupWarmupActive) {
+                            val warmupJumpLimitM = maxOf(12.0, gpsAcc * 2.0)
+                            if (jumpM > warmupJumpLimitM) {
+                                Log.d("CamDebug", "startup warmup ignore jump=%.1f acc=%.1f".format(jumpM, gpsAcc))
+                                prevGps
+                            } else {
+                                rawPoint
+                            }
+                        } else {
                         // Quick computed speed from previous cursor point
                         val dtMs = System.currentTimeMillis() - prevFreezeCheckTime
                         val quickSpeedKmh = if (dtMs > 500) (jumpM / (dtMs / 1000.0)) * 3.6 else 0.0
-                        // При движении (> 2 км/ч) — мягкий фильтр (min 2м)
-                        // При стоянке — жёсткий фильтр (stopFilter или accuracy)
-                        val threshold = if (quickSpeedKmh > 2.0) 2.0 else maxOf(cursorStopFilter, gpsAcc)
+                        // Offroad: keep the cursor calm when stationary, but still allow slow movement.
+                        val threshold = offroadCursorThresholdM(quickSpeedKmh, gpsAcc, cursorStopFilter)
                         if (jumpM < threshold) prevGps else rawPoint
+                        }
                     } else rawPoint
                     lastKnownGpsPoint = newPoint
                     val b = _binding ?: return
@@ -6270,46 +6515,74 @@ class MapFragment : Fragment() {
                     }
 
                     // Compute speed & bearing from coordinate delta (reliable on ALL devices)
-                    val nowMs = System.currentTimeMillis()
                     val dtSec = if (prevFreezeCheckTime > 0) (nowMs - prevFreezeCheckTime) / 1000.0 else 0.0
                     val hasPrevPoint = prevFreezeCheckLat != 0.0 || prevFreezeCheckLon != 0.0
                     val movedM = if (hasPrevPoint) distanceM(LatLng(prevFreezeCheckLat, prevFreezeCheckLon), newPoint) else 0.0
                     val computedSpeedKmh = if (dtSec > 0.5 && hasPrevPoint) (movedM / dtSec) * 3.6 else 0.0
                     val computedBearing = if (hasPrevPoint && movedM > 1.0) bearingToPoint(
-                        prevFreezeCheckLat, prevFreezeCheckLon, loc.latitude, loc.longitude
+                        prevFreezeCheckLat, prevFreezeCheckLon, newPoint.latitude, newPoint.longitude
                     ) else -1f  // -1 = no reliable bearing from movement
 
                     // Use computed speed (works on Samsung where loc.speed=0 while moving)
                     // Fallback to loc.speed if computed is 0 but loc has speed (Xiaomi cache case handled by position check)
                     val speedKmh = if (computedSpeedKmh > 1.0) computedSpeedKmh
+                        else if (startupFollowPending || startupWarmupActive) 0.0
                         else if (loc.hasSpeed()) (loc.speed * 3.6).toDouble() else 0.0
 
-                    // Use computed bearing if available, else loc.bearing
+                    if (!startupWarmupActive && startupZoomLockActive) {
+                        val realMovement = movedM in 3.0..25.0 && computedSpeedKmh in 3.0..80.0
+                        if (realMovement) {
+                            startupZoomLockUntilMs = nowMs + 3000L
+                        }
+                    }
+
+                    var startupFollowJustArmed = false
+                    if (startupFollowPending) {
+                        val accM = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 15.0
+                        val startupJumpM = if (!startupLastFixLat.isNaN() && !startupLastFixLon.isNaN()) {
+                            distanceM(LatLng(startupLastFixLat, startupLastFixLon), newPoint)
+                        } else 0.0
+                        val stableThresholdM = maxOf(35.0, accM * 4.0)
+                        startupFixConsistencyCount = if (startupLastFixLat.isNaN() || startupJumpM <= stableThresholdM) {
+                            startupFixConsistencyCount + 1
+                        } else 1
+                        startupLastFixLat = newPoint.latitude
+                        startupLastFixLon = newPoint.longitude
+                        if (startupFixConsistencyCount >= 2) {
+                            startupFollowPending = false
+                            startupFollowJustArmed = true
+                            Log.d("CamDebug", "startup follow armed: fixes=$startupFixConsistencyCount speed=%.1f".format(speedKmh))
+                        } else {
+                            Log.d("CamDebug", "startup follow wait: fixes=$startupFixConsistencyCount jump=%.1f acc=%.1f".format(startupJumpM, accM))
+                        }
+                    }
+
+                    // Offroad: trust course from movement first; loc.bearing is too noisy at low speed.
                     val rawBearing = if (computedBearing >= 0) computedBearing
-                        else if (loc.hasBearing()) loc.bearing else -1f
+                        else if (loc.hasBearing() && speedKmh > 8.0) loc.bearing else -1f
 
                     // Update position checkpoint
-                    prevFreezeCheckLat = loc.latitude
-                    prevFreezeCheckLon = loc.longitude
+                    prevFreezeCheckLat = newPoint.latitude
+                    prevFreezeCheckLon = newPoint.longitude
                     prevFreezeCheckTime = nowMs
 
                     // Freeze logic: use COMPUTED speed (speedKmh) — reliable on all devices
                     // loc.speed is unreliable on Vivo (caches old speed)
                     val gpsAccuracy = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 10.0
-                    val stopThreshold = maxOf(cursorStopFilter, gpsAccuracy)
+                    val stopThreshold = offroadCursorThresholdM(computedSpeedKmh, gpsAccuracy, cursorStopFilter)
                     val wasFrozen = bearingFrozen
-                    if (movedM < stopThreshold && computedSpeedKmh < 2.0) {
+                    if (movedM < stopThreshold && computedSpeedKmh < courseFreezeSpeedKmh) {
                         // Freeze only if clearly stationary: no movement AND very low speed
                         freezeConsecutiveCount++
                         if (freezeConsecutiveCount >= 2) {
                             bearingFrozen = true
                             unfreezeConsecutiveCount = 0
                         }
-                    } else if (movedM >= stopThreshold || computedSpeedKmh > 1.5) {
-                        // Unfreeze on any sign of movement
+                    } else if (movedM >= maxOf(minCursorMoveThresholdM, stopThreshold * 0.55) || computedSpeedKmh > courseUnfreezeSpeedKmh) {
+                        // Offroad start-up must react quickly after a short stop.
                         freezeConsecutiveCount = 0
                         unfreezeConsecutiveCount++
-                        if (unfreezeConsecutiveCount >= 2) {
+                        if (unfreezeConsecutiveCount >= 1) {
                             bearingFrozen = false
                         }
                     }
@@ -6320,8 +6593,22 @@ class MapFragment : Fragment() {
                     if (bearingFrozen) {
                         effectiveBearing = lastValidBearing  // keep last known direction, don't jump to magnetometer
                     } else {
-                        // On unfreeze: sync EMA to lastValidBearing to avoid jump from stale smoothedBearing
-                        if (wasFrozen) smoothedBearing = lastValidBearing.toDouble()
+                        // After restart, the first reliable motion fix should re-align course-up quickly.
+                        val startupBearingSnap = startupWarmupActive &&
+                            wasFrozen &&
+                            rawBearing >= 0 &&
+                            computedSpeedKmh >= courseUnfreezeSpeedKmh &&
+                            movedM >= maxOf(2.0, stopThreshold)
+                        if (wasFrozen) {
+                            if (startupBearingSnap) {
+                                val snappedBearing = ((rawBearing.toDouble() % 360.0) + 360.0) % 360.0
+                                smoothedBearing = snappedBearing
+                                displayBearing = snappedBearing
+                            } else {
+                                // Outside startup handoff keep the old stabilizing behavior.
+                                smoothedBearing = lastValidBearing.toDouble()
+                            }
+                        }
                         val bearing = if (rawBearing >= 0) smoothBearing(rawBearing, speedKmh).toFloat() else lastValidBearing
                         lastValidBearing = bearing
                         effectiveBearing = bearing
@@ -6352,12 +6639,12 @@ class MapFragment : Fragment() {
                         }
                     }
 
-                    // Update GPS arrow from raw fix (ensures arrow moves even when camera not following)
-                    updateGpsArrow(loc.latitude, loc.longitude, effectiveBearing)
+                    // Cursor, camera and track-tip must use the same filtered position.
+                    updateGpsArrow(newPoint.latitude, newPoint.longitude, effectiveBearing)
                     // Update heading line from GPS — use same filtered bearing as cursor
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
-                        updateHeadingLine(LatLng(loc.latitude, loc.longitude), effectiveBearing)
+                        updateHeadingLine(newPoint, effectiveBearing)
                     }
 
                     // Update accuracy circle — shrinks as GPS locks on, hides when < 10m
@@ -6371,22 +6658,26 @@ class MapFragment : Fragment() {
                     // Save GPS state for interpolation camera loop
                     val gpsFixTimeNanos = System.nanoTime()
                     if (lastGpsTimeNanos == 0L) {
-                        prevGpsLat = loc.latitude; prevGpsLon = loc.longitude
+                        prevGpsLat = newPoint.latitude; prevGpsLon = newPoint.longitude
                         prevGpsTimeNanos = gpsFixTimeNanos - cameraInterpolationNanos
-                        renderCamLat = loc.latitude; renderCamLon = loc.longitude
+                        renderCamLat = newPoint.latitude; renderCamLon = newPoint.longitude
                     } else {
                         prevGpsLat = lastGpsLat; prevGpsLon = lastGpsLon
                         prevGpsTimeNanos = lastGpsTimeNanos
                     }
-                    lastGpsLat = loc.latitude
-                    lastGpsLon = loc.longitude
+                    lastGpsLat = newPoint.latitude
+                    lastGpsLon = newPoint.longitude
                     lastGpsSpeedMs = loc.speed
                     lastGpsBearing = effectiveBearing
                     lastGpsTimeNanos = gpsFixTimeNanos
                     lastGpsSpeedKmh = if (speedKmh > 1.0) speedKmh else loc.speed * 3.6
 
+                    if (startupFollowJustArmed && startupFollowTransitionPending && followMode != FollowMode.FREE) {
+                        performStartupFollowHandoff(newPoint, effectiveBearing)
+                    }
+
                     // Start camera loop if not running
-                    if (!cameraLoopRunning && initialZoomDone) startCameraLoop()
+                    if (!cameraLoopRunning && initialZoomDone && !startupFollowPending) startCameraLoop()
 
                     // Update widgets (use computed speed — works on Samsung where loc.speed=0)
                     val speedKmhInt = speedKmh.toInt()
@@ -7020,12 +7311,16 @@ class MapFragment : Fragment() {
 
     private fun updateTrackOnMap(extrapolateLat: Double = Double.NaN, extrapolateLon: Double = Double.NaN) {
         val style = mapboxMap?.style ?: return
-        // Snapshot to avoid ConcurrentModificationException (TrackingService writes from GPS thread)
-        val snapshot = synchronized(TrackingService.trackPoints) { ArrayList(TrackingService.trackPoints) }
-        if (snapshot.size < 2) return
+        val pointCount = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.size }
 
         // Rebuild segment cache only when new points arrive (not every frame)
-        if (cachedTrackSegments == null || snapshot.size != cachedTrackPointCount) {
+        if (cachedTrackSegments == null || pointCount != cachedTrackPointCount) {
+            val snapshot = synchronized(TrackingService.trackPoints) { ArrayList(TrackingService.trackPoints) }
+            if (snapshot.size < 2) {
+                cachedTrackSegments = emptyList()
+                cachedTrackPointCount = snapshot.size
+                return
+            }
             val segments = mutableListOf<JSONArray>()
             var current = JSONArray()
             for (pt in snapshot) {
@@ -7067,13 +7362,106 @@ class MapFragment : Fragment() {
         style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
     }
 
+    private fun cancelPendingResumeTrackRestore() {
+        pendingResumeTrackRestore?.let { emergencyHandler.removeCallbacks(it) }
+        pendingResumeTrackRestore = null
+    }
+
+    private fun restoreLiveTrackFromTempIfNeeded() {
+        val ctx = context ?: return
+        val liveCount = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.size }
+        if (liveCount >= 2) return
+        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
+        if (!tmpFile.exists() || tmpFile.length() == 0L) return
+        try {
+            val savedPoints = GpxParser.parseGpxFull(tmpFile.inputStream()).trackPoints
+            if (savedPoints.size < 2) return
+            synchronized(TrackingService.trackPoints) {
+                TrackingService.trackPoints.clear()
+                TrackingService.trackPoints.addAll(savedPoints)
+            }
+            TrackingService.trackLengthM = calcTrackKm(savedPoints) * 1000.0
+            cachedTrackSegments = null
+            cachedTrackPointCount = 0
+            Log.d("TrackDebug", "Restored live track from tmp GPX: ${savedPoints.size} points")
+        } catch (e: Exception) {
+            Log.w("TrackDebug", "Failed to restore live track from tmp GPX: ${e.message}")
+        }
+    }
+
+    private fun hasExpectedLiveTrackOnResume(): Boolean {
+        val ctx = context ?: return false
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(PREF_WAS_RECORDING, false)) return true
+        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
+        return tmpFile.exists() && tmpFile.length() > 0L
+    }
+
+    private fun restoreTrackSourcesAfterResume(attempt: Int = 0) {
+        restoreLiveTrackFromTempIfNeeded()
+        val style = mapboxMap?.style
+        val liveTrackCount = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.size }
+        val hasLiveTrack = liveTrackCount >= 2
+        val hasLoadedTrack = loadedTrackPoints.size >= 2
+        val liveSourceReady = style?.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID) != null
+        val loadedSourceReady = style?.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID) != null
+        val expectLiveTrack = hasExpectedLiveTrackOnResume()
+
+        if (hasLiveTrack && liveSourceReady) {
+            updateTrackOnMap()
+        }
+        if (hasLoadedTrack && loadedSourceReady) {
+            updateLoadedTrackOnMap()
+        }
+
+        val needsAnotherPass = attempt < 4 && (
+            (expectLiveTrack && !hasLiveTrack) ||
+            (hasLiveTrack && !liveSourceReady) ||
+            (hasLoadedTrack && !loadedSourceReady) ||
+            attempt < 2
+        )
+        if (!needsAnotherPass) {
+            pendingResumeTrackRestore = null
+            return
+        }
+
+        val delayMs = when (attempt) {
+            0 -> 180L
+            1 -> 450L
+            2 -> 900L
+            else -> 1500L
+        }
+        val nextAttempt = attempt + 1
+        val runnable = Runnable {
+            pendingResumeTrackRestore = null
+            restoreTrackSourcesAfterResume(nextAttempt)
+        }
+        pendingResumeTrackRestore = runnable
+        emergencyHandler.postDelayed(runnable, delayMs)
+    }
+
     /** Inertia snap to GPS: quick overshoot → bounce back. No zoom-out step. */
+    private fun getSafeFollowZoom(fallback: Double = 15.0): Double {
+        if (startupLockedZoom > 0 && startupZoomLockUntilMs > System.currentTimeMillis()) {
+            return startupLockedZoom.coerceIn(10.0, 20.0)
+        }
+        val currentZoom = mapboxMap?.cameraPosition?.zoom ?: -1.0
+        if (currentZoom >= 8.0) return currentZoom
+        val savedZoom = lastSavedCamera?.zoom
+            ?: lastGoodCamera?.zoom
+            ?: loadCameraFromPrefs()?.zoom
+            ?: fallback
+        return savedZoom.coerceIn(10.0, 20.0)
+    }
+
     private fun flyToGps(targetZoom: Double? = null) {
         val gps = lastKnownGpsPoint ?: return
         val center = mapboxMap?.cameraPosition?.target
         val curZoom = mapboxMap?.cameraPosition?.zoom ?: 15.0
-        // Only change zoom if coming from very far away (world view), otherwise keep current
-        val toZoom = if (targetZoom != null && curZoom < 8.0) targetZoom else curZoom
+        // If mapbox temporarily reports world-view zoom during startup/style churn, keep a sane follow zoom.
+        val toZoom = if (targetZoom != null && curZoom < 8.0) targetZoom else getSafeFollowZoom(targetZoom ?: 15.0)
+        Log.d("CamDebug", "flyToGps: curZoom=$curZoom toZoom=$toZoom targetZoom=${targetZoom ?: -1.0}")
+        val animationToken = ++flyAnimationToken
         flyAnimationActive = true
         if (center != null && distanceM(center, gps) > 5.0) {
             // Overshoot 20% past GPS for inertia "jolt" effect
@@ -7082,9 +7470,11 @@ class MapFragment : Fragment() {
             val overshoot = LatLng(lat.coerceIn(-85.0, 85.0), lon.coerceIn(-180.0, 180.0))
             mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(overshoot, toZoom), 300)
             val draggedAtStart = userDragged
-            emergencyHandler.postDelayed({
+            emergencyHandler.postDelayed(firstStage@{
+                if (animationToken != flyAnimationToken || userDragged) return@firstStage
                 mapboxMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(gps, toZoom), 180)
-                emergencyHandler.postDelayed({
+                emergencyHandler.postDelayed(secondStage@{
+                    if (animationToken != flyAnimationToken || userDragged) return@secondStage
                     flyAnimationActive = false
                     // Only resume tracking if user hasn't touched the map during animation
                     if (userDragged == draggedAtStart) userDragged = false
@@ -7107,9 +7497,15 @@ class MapFragment : Fragment() {
         } else {
             _binding?.crosshairView?.visibility = View.GONE
             // Fly to GPS when switching to follow mode
-            if (lastKnownGpsPoint != null) flyToGps()
+            if (!startupFollowPending && !startupFollowTransitionPending && lastKnownGpsPoint != null) flyToGps()
         }
         userDragged = false
+        displayBearing = -1.0
+        lastRenderFrameNanos = 0L
+        if (lastGpsLat != 0.0 || lastGpsLon != 0.0) {
+            renderCamLat = lastGpsLat
+            renderCamLon = lastGpsLon
+        }
         recenterRunnable?.let { recenterHandler.removeCallbacks(it) }
         updateCompassIndicator()
         val lc = mapboxMap?.locationComponent ?: return
@@ -7973,11 +8369,14 @@ class MapFragment : Fragment() {
         val showServerDot = TraccarService.isRunning &&
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_BTN_SERVER_DOT, false) == true
         _binding?.topBarServerDot?.visibility = if (showServerDot) View.VISIBLE else View.GONE
+        restoreLiveTrackFromTempIfNeeded()
+        // Restore track sources after resume; MapLibre can recreate style/source after onResume, so do a few passes.
+        cancelPendingResumeTrackRestore()
+        restoreTrackSourcesAfterResume()
         // Синхронизируем UI если сервис пишет трек в фоне
         if (isRecording) {
             binding.btnRec.setImageResource(R.drawable.ic_rec)
             startChronoTicker()
-            updateTrackOnMap()
             val lenKm = TrackingService.trackLengthM / 1000.0
             _binding?.widgetTrackLen?.text = if (lenKm < 10) String.format("%.1f", lenKm) else lenKm.toInt().toString()
         }
@@ -7990,7 +8389,7 @@ class MapFragment : Fragment() {
             }
         }
         // Resume smooth camera loop if GPS is active and has valid coordinates
-        if (lastGpsTimeNanos > 0 && initialZoomDone && (lastGpsLat != 0.0 || lastGpsLon != 0.0)) startCameraLoop()
+        if (lastGpsTimeNanos > 0 && initialZoomDone && !startupFollowPending && (lastGpsLat != 0.0 || lastGpsLon != 0.0)) startCameraLoop()
 
         // Auto-start TraccarService if it was enabled but not running (e.g. after app update/restart)
         val traccarCtx = context ?: return
@@ -8036,6 +8435,7 @@ class MapFragment : Fragment() {
             mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
             mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
         }
+        cancelPendingResumeTrackRestore()
         stopMagnetometer()
         stopCameraLoop()
         GnssStatusMonitor.stop()
@@ -8063,6 +8463,7 @@ class MapFragment : Fragment() {
                 ?.putFloat(PREF_CAMERA_LAT, target.latitude.toFloat())
                 ?.putFloat(PREF_CAMERA_LON, target.longitude.toFloat())
                 ?.putFloat(PREF_CAMERA_ZOOM, cam.zoom.toFloat())
+                ?.putFloat(PREF_CAMERA_BEARING, cam.bearing.toFloat())
                 ?.apply()
         } else {
             Log.w("CamDebug", "onStop SKIP SAVE: no good camera position available")
@@ -8905,29 +9306,60 @@ class MapFragment : Fragment() {
     }
 
     private fun moveCameraSmooth(frameTimeNanos: Long) {
-        if (flyAnimationActive || userDragged || followMode == FollowMode.FREE) return
+        if (flyAnimationActive || userDragged || followMode == FollowMode.FREE) {
+            lastRenderFrameNanos = 0L
+            return
+        }
         val map = mapboxMap ?: return
         if (lastGpsTimeNanos == 0L) return
         if (lastGpsLat == 0.0 && lastGpsLon == 0.0) return
 
-        // Interpolation: from last GPS fix FORWARD toward predicted next fix
-        // At t=0 (just got fix) camera is AT lastGps. At t=1 (1 sec later) camera is at predicted next.
+        // Move continuously between GPS fixes so follow-mode does not feel like 1 Hz stepping.
         val interpDuration = if (prevGpsTimeNanos > 0 && lastGpsTimeNanos > prevGpsTimeNanos) {
             (lastGpsTimeNanos - prevGpsTimeNanos).coerceIn(300_000_000L, cameraInterpolationNanos)
         } else cameraInterpolationNanos
 
-        val t = ((frameTimeNanos - lastGpsTimeNanos).toDouble() / interpDuration.toDouble()).coerceIn(0.0, 1.0)
-        // Predict next position based on movement from prev→last
+        val ageNanos = (frameTimeNanos - lastGpsTimeNanos).coerceAtLeast(0L)
         val dLat = lastGpsLat - prevGpsLat
         val dLon = lastGpsLon - prevGpsLon
-        val interpLat = lastGpsLat + dLat * t
-        val interpLon = lastGpsLon + dLon * t
-
-        // Single display position for camera, arrow, and track — no EMA split
-        renderCamLat = interpLat
-        renderCamLon = interpLon
 
         val speedKmh = lastGpsSpeedKmh
+        val startupWarmupActive = startupWarmupUntilMs > System.currentTimeMillis()
+        val startupZoomLockActive = startupLockedZoom > 0 && startupZoomLockUntilMs > System.currentTimeMillis()
+        var targetLat = lastGpsLat
+        var targetLon = lastGpsLon
+        if (!startupWarmupActive && !bearingFrozen && speedKmh >= courseUnfreezeSpeedKmh && interpDuration > 0L) {
+            val leadFraction = (ageNanos.toDouble() / interpDuration.toDouble()).coerceIn(0.0, 1.0)
+            targetLat += dLat * leadFraction
+            targetLon += dLon * leadFraction
+        }
+        if (renderCamLat.isNaN() || renderCamLon.isNaN()) {
+            renderCamLat = targetLat
+            renderCamLon = targetLon
+        } else {
+            val frameDeltaNanos = if (lastRenderFrameNanos > 0L && frameTimeNanos > lastRenderFrameNanos) {
+                frameTimeNanos - lastRenderFrameNanos
+            } else 16_666_667L
+            val frameScale = (frameDeltaNanos.toDouble() / 16_666_667.0).coerceIn(0.5, 2.0)
+            val baseAlpha = renderPositionAlpha(speedKmh)
+            val alpha = 1.0 - Math.pow(1.0 - baseAlpha, frameScale)
+            renderCamLat = lerp(renderCamLat, targetLat, alpha)
+            renderCamLon = lerp(renderCamLon, targetLon, alpha)
+        }
+        lastRenderFrameNanos = frameTimeNanos
+
+        val target = LatLng(renderCamLat, renderCamLon)
+        val currentCam = map.cameraPosition
+        val baseCam = when {
+            currentCam.zoom >= minStableFollowZoom -> currentCam
+            lastGoodCamera != null && lastGoodCamera!!.zoom >= minStableFollowZoom -> lastGoodCamera!!
+            lastSavedCamera != null && lastSavedCamera!!.zoom >= minStableFollowZoom -> lastSavedCamera!!
+            currentCam.zoom >= 3.0 -> currentCam
+            lastGoodCamera != null && lastGoodCamera!!.zoom >= 3.0 -> lastGoodCamera!!
+            lastSavedCamera != null && lastSavedCamera!!.zoom >= 3.0 -> lastSavedCamera!!
+            else -> currentCam
+        }
+        if (baseCam.zoom < 3.0) return
 
         // 3D tilt
         val mapTiltAllowed = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_MAP_TILT_ENABLED, false) ?: false
@@ -8935,29 +9367,29 @@ class MapFragment : Fragment() {
             (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0) else 0.0
         smoothedTilt += (targetTilt - smoothedTilt) * 0.05
 
-        // Auto-zoom
-        val targetZoom = if (autoZoomLevel > 0) {
-            val base = if (userBaseZoom > 0) userBaseZoom else map.cameraPosition?.zoom ?: 14.0
+        // Auto-zoom must never derive from a transient world-view zoom.
+        val targetZoom = if (startupZoomLockActive && startupLockedZoom > 0) {
+            startupLockedZoom
+        } else if (startupWarmupActive) {
+            if (userBaseZoom > 0) userBaseZoom else baseCam.zoom
+        } else if (autoZoomLevel > 0) {
+            val base = if (userBaseZoom > 0) userBaseZoom else baseCam.zoom
             val maxDelta = autoZoomLevel * 0.4
             val delta = speedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
             (base - delta).coerceIn(base - maxDelta, base)
         } else if (userBaseZoom > 0) userBaseZoom else null
 
-        val target = LatLng(renderCamLat, renderCamLon)
         val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
-            .target(target).tilt(smoothedTilt)
-            .padding(doubleArrayOf(0.0, cameraTopPadding.toDouble(), 0.0, 0.0))
+            .target(target)
+            .zoom(baseCam.zoom)
+            .bearing(baseCam.bearing)
+            .tilt(smoothedTilt)
 
         when (followMode) {
             FollowMode.FOLLOW_NORTH -> builder.bearing(0.0)
             FollowMode.FOLLOW_COURSE -> {
-                // Don't blend magnetometer when bearing is frozen (stationary) — prevents map jitter
-                val targetBearing: Double = if (magneticHeading >= 0f && !bearingFrozen) {
-                    val blend = (lastGpsSpeedKmh / 7.2).coerceIn(0.0, 1.0)
-                    var d = lastGpsBearing.toDouble() - magneticHeading.toDouble()
-                    while (d > 180) d -= 360.0; while (d < -180) d += 360.0
-                    ((magneticHeading.toDouble() + d * blend + 360.0) % 360.0)
-                } else lastGpsBearing.toDouble()
+                // In follow-by-course mode the map must align with confirmed GPS course, not magnetometer noise.
+                val targetBearing = lastGpsBearing.toDouble()
                 if (displayBearing < 0) displayBearing = targetBearing
                 var delta = targetBearing - displayBearing
                 while (delta > 180) delta -= 360; while (delta < -180) delta += 360
@@ -8974,9 +9406,13 @@ class MapFragment : Fragment() {
             if (smoothedZoom < 0 || kotlin.math.abs(targetZoom - smoothedZoom) > 2.0) smoothedZoom = targetZoom
             smoothedZoom += (targetZoom - smoothedZoom) * 0.05
             builder.zoom(smoothedZoom)
+        } else {
+            builder.zoom(baseCam.zoom)
         }
 
-        map.moveCamera(CameraUpdateFactory.newCameraPosition(builder.build()))
+        val nextCam = builder.build()
+        if (nextCam.zoom >= minStableFollowZoom) lastGoodCamera = sanitizeCameraPosition(nextCam)
+        map.moveCamera(CameraUpdateFactory.newCameraPosition(nextCam))
         // Arrow, track tip, and camera all use same renderCam position
         updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
         if (TrackingService.trackPoints.size >= 2) {
@@ -8987,6 +9423,7 @@ class MapFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         stopCameraLoop()
+        cancelPendingResumeTrackRestore()
         // Unsubscribe GPS callback to prevent leak and ghost updates after destroy
         activeLocationCallback?.let { cb ->
             locationEngine?.removeLocationUpdates(cb)
@@ -9003,5 +9440,3 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onDestroy(); _binding = null
     }
 }
-
-
