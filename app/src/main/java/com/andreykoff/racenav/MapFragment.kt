@@ -2983,14 +2983,29 @@ class MapFragment : Fragment() {
                 if (isScreenLocked) Color.parseColor("#FFD600") else Color.WHITE
             ))
 
+        // Clear constraints so x/y positioning works freely across entire screen
         btnLock.post {
             if (!isAdded || _binding == null || btnLock.visibility != View.VISIBLE) return@post
             val parent = btnLock.parent as? View ?: return@post
-            if (!prefs.contains(PREF_LOCK_BUTTON_X)) return@post
+            try {
+                val cs = androidx.constraintlayout.widget.ConstraintSet()
+                cs.clone(parent as androidx.constraintlayout.widget.ConstraintLayout)
+                cs.clear(R.id.btnLock)
+                cs.constrainWidth(R.id.btnLock, sizePx)
+                cs.constrainHeight(R.id.btnLock, sizePx)
+                cs.applyTo(parent)
+            } catch (_: Exception) {}
+
             val maxX = (parent.width - btnLock.width).coerceAtLeast(0).toFloat()
             val maxY = (parent.height - btnLock.height).coerceAtLeast(0).toFloat()
-            btnLock.x = (prefs.getFloat(PREF_LOCK_BUTTON_X, 1f).coerceIn(0f, 1f) * maxX)
-            btnLock.y = (prefs.getFloat(PREF_LOCK_BUTTON_Y, 0f).coerceIn(0f, 1f) * maxY)
+            if (prefs.contains(PREF_LOCK_BUTTON_X)) {
+                btnLock.x = (prefs.getFloat(PREF_LOCK_BUTTON_X, 1f).coerceIn(0f, 1f) * maxX)
+                btnLock.y = (prefs.getFloat(PREF_LOCK_BUTTON_Y, 0f).coerceIn(0f, 1f) * maxY)
+            } else {
+                // Default: top-right corner under topBar
+                btnLock.x = maxX - dpToPx(12).toFloat()
+                btnLock.y = (b.topBar.height + dpToPx(8)).toFloat()
+            }
             btnLock.bringToFront()
         }
     }
