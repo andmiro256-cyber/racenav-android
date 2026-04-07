@@ -210,6 +210,19 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // GPS smoothing
+        run {
+            val txtSmooth = view.findViewById<android.widget.TextView>(R.id.txtGpsSmoothing)
+            var smooth = prefs.getInt(MapFragment.PREF_GPS_SMOOTHING, MapFragment.DEFAULT_GPS_SMOOTHING).coerceIn(1, 10)
+            txtSmooth.text = smooth.toString()
+            view.findViewById<android.widget.ImageButton>(R.id.btnGpsSmoothMinus).setOnClickListener {
+                if (smooth > 1) { smooth--; txtSmooth.text = smooth.toString(); prefs.edit().putInt(MapFragment.PREF_GPS_SMOOTHING, smooth).apply() }
+            }
+            view.findViewById<android.widget.ImageButton>(R.id.btnGpsSmoothPlus).setOnClickListener {
+                if (smooth < 10) { smooth++; txtSmooth.text = smooth.toString(); prefs.edit().putInt(MapFragment.PREF_GPS_SMOOTHING, smooth).apply() }
+            }
+        }
+
         // Auto-recenter
         val switchRecenter = view.findViewById<SwitchCompat>(R.id.switchAutoRecenter)
         val rowDelay = view.findViewById<View>(R.id.rowRecenterDelay)

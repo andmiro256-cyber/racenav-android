@@ -453,6 +453,9 @@ class MapFragment : Fragment() {
         const val DEFAULT_LOCK_UNLOCK_DELAY = 3  // seconds
         fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
+        const val PREF_GPS_SMOOTHING = "gps_smoothing"
+        const val DEFAULT_GPS_SMOOTHING = 5  // 1=off, 10=heavy
+
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
 
         const val PREF_LIVE_USERS_ENABLED = "live_users_enabled"
@@ -6354,8 +6357,18 @@ class MapFragment : Fragment() {
                     mapboxMap?.triggerRepaint()
 
                     // Save GPS state for Choreographer camera loop (smooth 60 FPS interpolation)
-                    lastGpsLat = loc.latitude
-                    lastGpsLon = loc.longitude
+                    // Apply position EMA filter based on user smoothing setting
+                    val smoothLevel = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING) ?: DEFAULT_GPS_SMOOTHING
+                    if (smoothLevel <= 1 || lastGpsLat == 0.0) {
+                        lastGpsLat = loc.latitude
+                        lastGpsLon = loc.longitude
+                    } else {
+                        // alpha: 1=1.0 (no filter), 5=0.3, 10=0.08 (heavy)
+                        val alpha = 1.0 / smoothLevel
+                        lastGpsLat += alpha * (loc.latitude - lastGpsLat)
+                        lastGpsLon += alpha * (loc.longitude - lastGpsLon)
+                    }
                     lastGpsSpeedMs = loc.speed
                     lastGpsBearing = effectiveBearing
                     lastGpsTimeNanos = System.nanoTime()
