@@ -2983,28 +2983,19 @@ class MapFragment : Fragment() {
                 if (isScreenLocked) Color.parseColor("#FFD600") else Color.WHITE
             ))
 
-        // Clear constraints so x/y positioning works freely across entire screen
+        // Position: use translationX/Y which doesn't fight with constraints
         btnLock.post {
             if (!isAdded || _binding == null || btnLock.visibility != View.VISIBLE) return@post
             val parent = btnLock.parent as? View ?: return@post
-            try {
-                val cs = androidx.constraintlayout.widget.ConstraintSet()
-                cs.clone(parent as androidx.constraintlayout.widget.ConstraintLayout)
-                cs.clear(R.id.btnLock)
-                cs.constrainWidth(R.id.btnLock, sizePx)
-                cs.constrainHeight(R.id.btnLock, sizePx)
-                cs.applyTo(parent)
-            } catch (_: Exception) {}
-
-            val maxX = (parent.width - btnLock.width).coerceAtLeast(0).toFloat()
-            val maxY = (parent.height - btnLock.height).coerceAtLeast(0).toFloat()
+            val maxX = (parent.width - sizePx).coerceAtLeast(0).toFloat()
+            val maxY = (parent.height - sizePx).coerceAtLeast(0).toFloat()
             if (prefs.contains(PREF_LOCK_BUTTON_X)) {
-                btnLock.x = (prefs.getFloat(PREF_LOCK_BUTTON_X, 1f).coerceIn(0f, 1f) * maxX)
-                btnLock.y = (prefs.getFloat(PREF_LOCK_BUTTON_Y, 0f).coerceIn(0f, 1f) * maxY)
+                btnLock.translationX = prefs.getFloat(PREF_LOCK_BUTTON_X, 0.9f).coerceIn(0f, 1f) * maxX
+                btnLock.translationY = prefs.getFloat(PREF_LOCK_BUTTON_Y, 0.05f).coerceIn(0f, 1f) * maxY
             } else {
-                // Default: top-right corner under topBar
-                btnLock.x = maxX - dpToPx(12).toFloat()
-                btnLock.y = (b.topBar.height + dpToPx(8)).toFloat()
+                // Default: top-right under topBar
+                btnLock.translationX = maxX - dpToPx(12).toFloat()
+                btnLock.translationY = (b.topBar.height + dpToPx(8)).toFloat()
             }
             btnLock.bringToFront()
         }
@@ -3041,7 +3032,7 @@ class MapFragment : Fragment() {
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     downRawX = event.rawX; downRawY = event.rawY
-                    startX = v.x; startY = v.y
+                    startX = v.translationX; startY = v.translationY
                     isDragging = false; longPressTriggered = false
                     v.removeCallbacks(longPressRunnable)
                     if (isScreenLocked && isFixed) v.postDelayed(longPressRunnable, longPressTimeout)
@@ -3056,8 +3047,8 @@ class MapFragment : Fragment() {
                     if (isDragging) {
                         val maxX = (parent.width - v.width).coerceAtLeast(0).toFloat()
                         val maxY = (parent.height - v.height).coerceAtLeast(0).toFloat()
-                        v.x = (startX + dx).coerceIn(0f, maxX)
-                        v.y = (startY + dy).coerceIn(0f, maxY)
+                        v.translationX = (startX + dx).coerceIn(0f, maxX)
+                        v.translationY = (startY + dy).coerceIn(0f, maxY)
                     }
                     true
                 }
@@ -3068,8 +3059,8 @@ class MapFragment : Fragment() {
                         isDragging -> {
                             val maxX = (parent.width - v.width).coerceAtLeast(0).toFloat()
                             val maxY = (parent.height - v.height).coerceAtLeast(0).toFloat()
-                            val fracX = if (maxX > 0) v.x / maxX else 0f
-                            val fracY = if (maxY > 0) v.y / maxY else 0f
+                            val fracX = if (maxX > 0) v.translationX / maxX else 0f
+                            val fracY = if (maxY > 0) v.translationY / maxY else 0f
                             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
                                 ?.putFloat(PREF_LOCK_BUTTON_X, fracX)
                                 ?.putFloat(PREF_LOCK_BUTTON_Y, fracY)?.apply()
@@ -3083,7 +3074,7 @@ class MapFragment : Fragment() {
                 android.view.MotionEvent.ACTION_CANCEL -> {
                     v.removeCallbacks(longPressRunnable)
                     v.parent?.requestDisallowInterceptTouchEvent(false)
-                    if (isDragging) { v.x = startX; v.y = startY }
+                    if (isDragging) { v.translationX = startX; v.translationY = startY }
                     isDragging = false; longPressTriggered = false
                     true
                 }
