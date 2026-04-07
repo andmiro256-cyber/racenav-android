@@ -267,8 +267,10 @@ class MapFragment : Fragment() {
     }
 
     // Smooth camera loop state (Choreographer-driven, 60 FPS)
-    private var lastGpsLat = 0.0
+    private var lastGpsLat = 0.0       // raw GPS for nav/waypoints/telemetry
     private var lastGpsLon = 0.0
+    private var smoothCamLat = 0.0    // EMA-filtered for camera only
+    private var smoothCamLon = 0.0
     private var lastGpsSpeedMs = 0f
     private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
@@ -6356,18 +6358,20 @@ class MapFragment : Fragment() {
                     // Keep GL renderer awake — prevents first-touch lag after GPU power saving
                     mapboxMap?.triggerRepaint()
 
-                    // Save GPS state for Choreographer camera loop (smooth 60 FPS interpolation)
-                    // Apply position EMA filter based on user smoothing setting
+                    // Save raw GPS for nav/waypoints/telemetry
+                    lastGpsLat = loc.latitude
+                    lastGpsLon = loc.longitude
+
+                    // EMA-filtered position for camera only (reduces jitter on weak GPS)
                     val smoothLevel = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING) ?: DEFAULT_GPS_SMOOTHING
-                    if (smoothLevel <= 1 || lastGpsLat == 0.0) {
-                        lastGpsLat = loc.latitude
-                        lastGpsLon = loc.longitude
+                    if (smoothLevel <= 1 || smoothCamLat == 0.0) {
+                        smoothCamLat = loc.latitude
+                        smoothCamLon = loc.longitude
                     } else {
-                        // alpha: 1=1.0 (no filter), 5=0.3, 10=0.08 (heavy)
                         val alpha = 1.0 / smoothLevel
-                        lastGpsLat += alpha * (loc.latitude - lastGpsLat)
-                        lastGpsLon += alpha * (loc.longitude - lastGpsLon)
+                        smoothCamLat += alpha * (loc.latitude - smoothCamLat)
+                        smoothCamLon += alpha * (loc.longitude - smoothCamLon)
                     }
                     lastGpsSpeedMs = loc.speed
                     lastGpsBearing = effectiveBearing
@@ -8895,24 +8899,21 @@ class MapFragment : Fragment() {
         val map = mapboxMap ?: return
         if (lastGpsTimeNanos == 0L) return
         // Don't move camera to (0,0) — GPS not yet received
-        if (lastGpsLat == 0.0 && lastGpsLon == 0.0) return
+        if (smoothCamLat == 0.0 && smoothCamLon == 0.0) return
 
         // dt since last GPS fix, clamped to 2s to avoid runaway extrapolation
-        // When bearing frozen (standing still) — don't extrapolate, but still update camera position & bearing
         val dtSec = if (bearingFrozen) 0.0
                     else ((frameTimeNanos - lastGpsTimeNanos) / 1_000_000_000.0).coerceIn(0.0, 2.0)
 
-        // If GPS stale (>= 2s), don't extrapolate — use last known position
-        // Use computed speed (lastGpsSpeedKmh) — loc.speed is unreliable on Vivo
+        // Use smoothed position for camera (reduces jitter on weak GPS)
         val speedMs = if (dtSec >= 2.0) 0.0 else (lastGpsSpeedKmh / 3.6).coerceAtMost(50.0)
         val bearingRad = Math.toRadians(lastGpsBearing.toDouble())
-        // Approximate meters → degrees conversion
         val metersPerDegLat = 111_320.0
-        val metersPerDegLon = 111_320.0 * Math.cos(Math.toRadians(lastGpsLat))
+        val metersPerDegLon = 111_320.0 * Math.cos(Math.toRadians(smoothCamLat))
         val dLat = (speedMs * dtSec * Math.cos(bearingRad)) / metersPerDegLat
         val dLon = (speedMs * dtSec * Math.sin(bearingRad)) / metersPerDegLon.coerceAtLeast(1.0)
-        val extLat = lastGpsLat + dLat
-        val extLon = lastGpsLon + dLon
+        val extLat = smoothCamLat + dLat
+        val extLon = smoothCamLon + dLon
 
         val speedKmh = lastGpsSpeedKmh
 
