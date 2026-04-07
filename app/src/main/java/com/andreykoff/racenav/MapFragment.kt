@@ -6352,8 +6352,7 @@ class MapFragment : Fragment() {
                         }
                     }
 
-                    // Update custom GPS arrow with freeze-corrected bearing
-                    updateGpsArrow(loc.latitude, loc.longitude, effectiveBearing)
+                    // GPS arrow updated by Choreographer loop only (avoids jump between raw fix and interpolated pos)
                     // Update heading line from GPS — use same filtered bearing as cursor
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
@@ -8907,14 +8906,18 @@ class MapFragment : Fragment() {
         if (lastGpsTimeNanos == 0L) return
         if (lastGpsLat == 0.0 && lastGpsLon == 0.0) return
 
-        // Interpolation between prev and current GPS fix (instead of extrapolation)
+        // Interpolation: from last GPS fix FORWARD toward predicted next fix
+        // At t=0 (just got fix) camera is AT lastGps. At t=1 (1 sec later) camera is at predicted next.
         val interpDuration = if (prevGpsTimeNanos > 0 && lastGpsTimeNanos > prevGpsTimeNanos) {
             (lastGpsTimeNanos - prevGpsTimeNanos).coerceIn(300_000_000L, cameraInterpolationNanos)
         } else cameraInterpolationNanos
 
         val t = ((frameTimeNanos - lastGpsTimeNanos).toDouble() / interpDuration.toDouble()).coerceIn(0.0, 1.0)
-        val interpLat = lerp(prevGpsLat, lastGpsLat, t)
-        val interpLon = lerp(prevGpsLon, lastGpsLon, t)
+        // Predict next position based on movement from prev→last
+        val dLat = lastGpsLat - prevGpsLat
+        val dLon = lastGpsLon - prevGpsLon
+        val interpLat = lastGpsLat + dLat * t
+        val interpLon = lastGpsLon + dLon * t
 
         // Low-speed EMA smoothing against GPS jitter
         if (!renderCamLat.isFinite() || !renderCamLon.isFinite()) {
@@ -8951,7 +8954,8 @@ class MapFragment : Fragment() {
         when (followMode) {
             FollowMode.FOLLOW_NORTH -> builder.bearing(0.0)
             FollowMode.FOLLOW_COURSE -> {
-                val targetBearing: Double = if (magneticHeading >= 0f) {
+                // Don't blend magnetometer when bearing is frozen (stationary) — prevents map jitter
+                val targetBearing: Double = if (magneticHeading >= 0f && !bearingFrozen) {
                     val blend = (lastGpsSpeedKmh / 7.2).coerceIn(0.0, 1.0)
                     var d = lastGpsBearing.toDouble() - magneticHeading.toDouble()
                     while (d > 180) d -= 360.0; while (d < -180) d += 360.0
