@@ -28,7 +28,10 @@ class LiveUsersPoller(
         val battery: Int?,
         val status: String,
         val lastUpdate: String?,
-        val plan: String? = null
+        val plan: String? = null,
+        val monitorStatusCode: String? = null,
+        val monitorStatusEmoji: String? = null,
+        val monitorStatusUpdatedAt: String? = null
     )
 
     companion object {
@@ -108,8 +111,38 @@ class LiveUsersPoller(
                             val status = d.optString("status", "unknown")
                             val lastUpdate = if (d.isNull("lastUpdate")) null else d.optString("lastUpdate")
                             val plan = d.optString("plan", "").ifEmpty { null }
+                            val monitorStatusCode = d.optString("monitorStatusCode",
+                                d.optString("monitorStatus",
+                                    d.optString("presenceStatus",
+                                        d.optString("statusCode", "")
+                                    )
+                                )
+                            ).ifEmpty { null }
+                            val monitorStatusEmoji = d.optString("monitorStatusEmoji",
+                                d.optString("statusEmoji", "")
+                            ).ifEmpty { null }
+                            val monitorStatusUpdatedAt = d.optString("monitorStatusUpdatedAt",
+                                d.optString("statusUpdatedAt", "")
+                            ).ifEmpty { null }
 
-                            devices.add(LiveDevice(deviceId, uniqueId, name, lat, lon, speed, course, battery, status, lastUpdate, plan))
+                            devices.add(
+                                LiveDevice(
+                                    deviceId = deviceId,
+                                    uniqueId = uniqueId,
+                                    name = name,
+                                    lat = lat,
+                                    lon = lon,
+                                    speed = speed,
+                                    course = course,
+                                    battery = battery,
+                                    status = status,
+                                    lastUpdate = lastUpdate,
+                                    plan = plan,
+                                    monitorStatusCode = monitorStatusCode,
+                                    monitorStatusEmoji = monitorStatusEmoji,
+                                    monitorStatusUpdatedAt = monitorStatusUpdatedAt
+                                )
+                            )
 
                             val feature = JSONObject()
                                 .put("type", "Feature")
@@ -121,6 +154,7 @@ class LiveUsersPoller(
                                     .put("course", course)
                                     .put("speed", speed)
                                     .put("status", status)
+                                    .put("monitorStatusCode", monitorStatusCode)
                                     .put("deviceId", deviceId))
                             features.put(feature)
                         }

@@ -46,6 +46,8 @@ class TrackingService : Service() {
     private var fusedCallback: com.google.android.gms.location.LocationCallback? = null
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var lastLocationTimeMs = 0L
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pendingAutoSaveJob: Job? = null
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
@@ -95,7 +97,7 @@ class TrackingService : Service() {
             updateNotification()
 
             // Auto-save every 10 points to survive app restarts
-            if (trackPoints.size % 10 == 0) autoSaveTrack()
+            if (trackPoints.size % 10 == 0) scheduleAutoSaveTrack()
         }
         lastLocationTimeMs = now
 
@@ -183,6 +185,8 @@ class TrackingService : Service() {
 
     override fun onDestroy() {
         if (isRunning) stopTracking()
+        pendingAutoSaveJob?.cancel()
+        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -226,7 +230,7 @@ class TrackingService : Service() {
     private fun stopTracking() {
         isRunning = false
         NotificationHelper.trackingText = null
-        autoSaveTrack()  // Final save before stopping
+        autoSaveTrack(trackPoints.toList())  // Final save before stopping
         // Clear recording flag so START_STICKY doesn't auto-resume after explicit stop
         getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, false).apply()
@@ -259,12 +263,21 @@ class TrackingService : Service() {
         }
     }
 
+    private fun scheduleAutoSaveTrack() {
+        val snapshot = trackPoints.toList()
+        if (snapshot.isEmpty()) return
+        pendingAutoSaveJob?.cancel()
+        pendingAutoSaveJob = serviceScope.launch {
+            autoSaveTrack(snapshot)
+        }
+    }
+
     /** Save current track to temp file (survives app restart). Synchronous — must complete before stopSelf. */
-    private fun autoSaveTrack() {
-        if (trackPoints.isEmpty()) return
+    private fun autoSaveTrack(points: List<Pair<Double, Double>> = trackPoints.toList()) {
+        if (points.isEmpty()) return
         try {
             val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
-            file.writeText(GpxParser.writeGpx(trackPoints.toList(), "Текущий трек"))
+            file.writeText(GpxParser.writeGpx(points, "Текущий трек"))
         } catch (_: Exception) {}
     }
 

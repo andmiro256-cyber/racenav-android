@@ -1,5 +1,6 @@
 package com.andreykoff.racenav
 
+import android.graphics.PointF
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
 import com.mapbox.mapboxsdk.geometry.LatLng
@@ -10,7 +11,7 @@ import org.json.JSONObject
 
 /**
  * Режим рисования полигона для выбора области скачивания карт.
- * 3-8 точек → convex hull → bounding box.
+ * 3-8 точек → пользовательский полигон → bounding box.
  */
 class PolygonAreaPicker(
     private val map: MapboxMap
@@ -86,13 +87,44 @@ class PolygonAreaPicker(
 
     fun canFinish(): Boolean = points.size >= MIN_POINTS
 
+    fun movePoint(index: Int, latLng: LatLng): Boolean {
+        if (index !in points.indices) return false
+        points[index] = latLng
+        updateLayers()
+        return true
+    }
+
+    fun findNearestPointIndex(screenPoint: PointF, thresholdPx: Float): Int {
+        if (points.isEmpty()) return -1
+        val thresholdSq = thresholdPx * thresholdPx
+        var bestIndex = -1
+        var bestDistSq = Float.MAX_VALUE
+        points.forEachIndexed { index, point ->
+            val pt = map.projection.toScreenLocation(point)
+            val dx = pt.x - screenPoint.x
+            val dy = pt.y - screenPoint.y
+            val distSq = dx * dx + dy * dy
+            if (distSq <= thresholdSq && distSq < bestDistSq) {
+                bestDistSq = distSq
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
+    fun previewAreaKm2(): Double {
+        if (points.size < MIN_POINTS) return 0.0
+        return points.calculateAreaKm2()
+    }
+
     fun finish(): PolygonArea? {
         if (!canFinish()) return null
-        val hull = ConvexHull.compute(points)
-        if (hull.size < 3) return null  // collinear points — degenerate polygon
-        val bbox = hull.toBoundingBox()
-        val areaKm2 = hull.calculateAreaKm2()
-        return PolygonArea(hull, bbox, areaKm2)
+        val polygon = points.toList()
+        val areaKm2 = polygon.calculateAreaKm2()
+        if (areaKm2 <= 0.000001) return null
+        if (hasSelfIntersection(polygon)) return null
+        val bbox = polygon.toBoundingBox()
+        return PolygonArea(polygon, bbox, areaKm2)
     }
 
     fun stop() {
@@ -126,13 +158,12 @@ class PolygonAreaPicker(
 
         // Update polygon source
         if (points.size >= 3) {
-            val hull = ConvexHull.compute(points)
             val coords = JSONArray()
-            for (pt in hull) {
+            for (pt in points) {
                 coords.put(JSONArray().put(pt.longitude).put(pt.latitude))
             }
             // Close polygon
-            coords.put(JSONArray().put(hull[0].longitude).put(hull[0].latitude))
+            coords.put(JSONArray().put(points[0].longitude).put(points[0].latitude))
 
             val polygon = JSONObject()
                 .put("type", "Feature")
@@ -159,6 +190,47 @@ class PolygonAreaPicker(
                 JSONObject().put("type", "FeatureCollection").put("features", JSONArray()).toString()
             )
         }
+    }
+
+    private fun hasSelfIntersection(vertices: List<LatLng>): Boolean {
+        if (vertices.size < 4) return false
+        for (i in vertices.indices) {
+            val a1 = vertices[i]
+            val a2 = vertices[(i + 1) % vertices.size]
+            for (j in i + 1 until vertices.size) {
+                if (kotlin.math.abs(i - j) <= 1) continue
+                if (i == 0 && j == vertices.lastIndex) continue
+                val b1 = vertices[j]
+                val b2 = vertices[(j + 1) % vertices.size]
+                if (segmentsIntersect(a1, a2, b1, b2)) return true
+            }
+        }
+        return false
+    }
+
+    private fun segmentsIntersect(a1: LatLng, a2: LatLng, b1: LatLng, b2: LatLng): Boolean {
+        val d1 = direction(a1, a2, b1)
+        val d2 = direction(a1, a2, b2)
+        val d3 = direction(b1, b2, a1)
+        val d4 = direction(b1, b2, a2)
+        if ((d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0) &&
+            (d3 > 0 && d4 < 0 || d3 < 0 && d4 > 0)) {
+            return true
+        }
+        return d1 == 0.0 && onSegment(a1, a2, b1) ||
+            d2 == 0.0 && onSegment(a1, a2, b2) ||
+            d3 == 0.0 && onSegment(b1, b2, a1) ||
+            d4 == 0.0 && onSegment(b1, b2, a2)
+    }
+
+    private fun direction(a: LatLng, b: LatLng, c: LatLng): Double {
+        return (b.longitude - a.longitude) * (c.latitude - a.latitude) -
+            (b.latitude - a.latitude) * (c.longitude - a.longitude)
+    }
+
+    private fun onSegment(a: LatLng, b: LatLng, c: LatLng): Boolean {
+        return c.longitude in minOf(a.longitude, b.longitude)..maxOf(a.longitude, b.longitude) &&
+            c.latitude in minOf(a.latitude, b.latitude)..maxOf(a.latitude, b.latitude)
     }
 }
 

@@ -6,11 +6,15 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.andreykoff.racenav.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var lastAppUpdateCheckAtMs = 0L
+    private var isAppUpdateCheckScheduled = false
+    private var appUpdateCheckRetryCount = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Head units (Li Auto, Chinese tablets) have large screens with low density (160dpi),
@@ -24,6 +28,7 @@ class MainActivity : AppCompatActivity() {
             metrics.densityDpi = (160 * scale).toInt()
         }
 
+        AppThemeHelper.applyTheme(this)
         super.onCreate(savedInstanceState)
 
         // Crash logger — saves stacktrace to /sdcard/Download/racenav_crash.txt
@@ -60,16 +65,15 @@ class MainActivity : AppCompatActivity() {
                 .commit()
             handleFileIntent(intent)
 
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                checkForAppUpdate()
-            }, 3000)
+            scheduleAppUpdateCheck(delayMs = 3000, force = true)
 
             // Check beta tester + license from server, then show trial dialogs
             Thread {
-                LicenseManager.checkBetaTester(this)
                 LicenseManager.checkLicenseFromServer(this)
+                LicenseManager.checkBetaTester(this)
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
+                    scheduleAppUpdateCheck(delayMs = 1200, force = true)
                     if (LicenseManager.shouldShowTrialWarning(this)) {
                         val days = LicenseManager.trialDaysLeft(this)
                         androidx.appcompat.app.AlertDialog.Builder(this)
@@ -111,12 +115,11 @@ class MainActivity : AppCompatActivity() {
 
                 // Handle offline maps separately — they can be very large
                 if (fileName.endsWith(".sqlitedb") || fileName.endsWith(".mbtiles") || fileName.endsWith(".db")) {
-                    val ext = fileName.substringAfterLast('.', "sqlitedb")
-                    val dest = java.io.File(filesDir, "offline_map_${System.currentTimeMillis()}.$ext")
+                    val displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "map"
+                    val dest = MapStorageManager.createManagedMapFile(this, displayName)
                     contentResolver.openInputStream(uri)?.use { input ->
                         dest.outputStream().use { output -> input.copyTo(output) }
                     }
-                    val displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "map.$ext"
                     val key = mapFrag.addOfflineMap(dest.absolutePath, displayName)
                     if (key != null) {
                         android.widget.Toast.makeText(this, "🗺 Карта загружена: $displayName", android.widget.Toast.LENGTH_SHORT).show()
@@ -310,6 +313,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         UpdateManager.retryPendingInstall(this)
+        scheduleAppUpdateCheck(delayMs = 1200)
     }
 
     @Suppress("DEPRECATION")
@@ -392,38 +396,73 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
-    private fun checkForAppUpdate() {
-        val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return
+    private fun checkForAppUpdate(): Boolean {
+        supportFragmentManager.executePendingTransactions()
+        val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return false
         mapFrag.checkForUpdates { latest, current, hasUpdate, apkUrl, changelog ->
             if (!hasUpdate || apkUrl == null) return@checkForUpdates
             try {
                 showUpdateDialogWithProgress(latest ?: "", current, apkUrl, changelog)
             } catch (_: Exception) {}
         }
+        return true
+    }
+
+    private fun scheduleAppUpdateCheck(delayMs: Long = 0L, force: Boolean = false) {
+        if (!::binding.isInitialized) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastAppUpdateCheckAtMs < APP_UPDATE_CHECK_MIN_INTERVAL_MS) return
+        if (isAppUpdateCheckScheduled) return
+        isAppUpdateCheckScheduled = true
+        binding.root.postDelayed({
+            isAppUpdateCheckScheduled = false
+            if (checkForAppUpdate()) {
+                appUpdateCheckRetryCount = 0
+                lastAppUpdateCheckAtMs = android.os.SystemClock.elapsedRealtime()
+            } else if (!isFinishing && !isDestroyed && appUpdateCheckRetryCount < APP_UPDATE_CHECK_MAX_RETRIES) {
+                appUpdateCheckRetryCount += 1
+                scheduleAppUpdateCheck(delayMs = APP_UPDATE_CHECK_RETRY_DELAY_MS, force = true)
+            } else {
+                appUpdateCheckRetryCount = 0
+            }
+        }, delayMs)
+    }
+
+    private companion object {
+        const val APP_UPDATE_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000L
+        const val APP_UPDATE_CHECK_RETRY_DELAY_MS = 1500L
+        const val APP_UPDATE_CHECK_MAX_RETRIES = 3
     }
 
     private fun showUpdateDialogWithProgress(latest: String, current: String, apkUrl: String, changelog: String?) {
         val dp = resources.displayMetrics.density
+        val secondaryText = ContextCompat.getColor(this, R.color.text_secondary)
+        val mutedText = ContextCompat.getColor(this, R.color.text_muted)
+        val accent = ContextCompat.getColor(this, R.color.primary)
+        val errorColor = ContextCompat.getColor(this, R.color.error)
         val root = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding((20 * dp).toInt(), (16 * dp).toInt(), (20 * dp).toInt(), (8 * dp).toInt())
         }
         root.addView(android.widget.TextView(this).apply {
             text = "Новая версия: $latest\nТекущая: $current\n\n${changelog ?: "Исправления и улучшения"}"
-            setTextColor(0xFFCCCCCC.toInt()); textSize = 14f
+            setTextColor(secondaryText)
+            textSize = 14f
         })
         val progressBar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (6 * dp).toInt()).apply { topMargin = (12 * dp).toInt() }
             max = 100; progress = 0; visibility = android.view.View.GONE
-            progressDrawable.setColorFilter(0xFFFF6F00.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+            progressDrawable.setColorFilter(accent, android.graphics.PorterDuff.Mode.SRC_IN)
         }
         root.addView(progressBar)
         val progressText = android.widget.TextView(this).apply {
-            setTextColor(0xFF999999.toInt()); textSize = 12f; visibility = android.view.View.GONE
+            setTextColor(mutedText)
+            textSize = 12f
+            visibility = android.view.View.GONE
         }
         root.addView(progressText)
 
-        val dlg = AlertDialog.Builder(this, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+        val dlg = AlertDialog.Builder(this)
             .setTitle("Доступно обновление")
             .setView(root)
             .setPositiveButton("Скачать", null)
@@ -458,7 +497,7 @@ class MainActivity : AppCompatActivity() {
                         progressText.postDelayed({ dlg.dismiss() }, 1500)
                     } else {
                         progressText.text = "Ошибка: $error"
-                        progressText.setTextColor(0xFFEF4444.toInt())
+                        progressText.setTextColor(errorColor)
                         dlg.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
                         dlg.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
                         dlg.setCancelable(true)

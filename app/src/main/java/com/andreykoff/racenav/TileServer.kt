@@ -1,9 +1,12 @@
 package com.andreykoff.racenav
 
+import android.graphics.Bitmap
 import android.database.sqlite.SQLiteDatabase
 import android.util.LruCache
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
 
 class TileServer(port: Int) : NanoHTTPD(port) {
 
@@ -12,6 +15,8 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     private data class DbEntry(
         val db: SQLiteDatabase,
         val format: DbFormat,
+        val path: String,
+        val fileStamp: Long,
         @Volatile var workingFormula: Pair<Boolean, Boolean>? = null,
         @Volatile var rmapsInverted: Boolean? = null  // cached result of detectRMapsScheme
     )
@@ -23,11 +28,29 @@ class TileServer(port: Int) : NanoHTTPD(port) {
         override fun sizeOf(key: String, value: ByteArray): Int = value.size
     }
 
+    private fun computeFileStamp(path: String): Long {
+        val file = File(path)
+        return (file.lastModified() shl 1) xor file.length()
+    }
+
+    private fun clearTileCache() {
+        tileCache.evictAll()
+    }
+
     /** Open SQLite file at given index. Returns true on success. */
     fun openDatabase(index: Int, path: String): Boolean {
         return try {
-            databases[index]?.db?.close()
-            val opened = SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
+            val normalizedPath = File(path).absolutePath
+            val fileStamp = computeFileStamp(normalizedPath)
+            databases[index]?.let { existing ->
+                if (existing.path == normalizedPath && existing.fileStamp == fileStamp) {
+                    return true
+                }
+                try { existing.db.close() } catch (_: Exception) {}
+                databases.remove(index)
+                clearTileCache()
+            }
+            val opened = SQLiteDatabase.openDatabase(normalizedPath, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
 
             // Performance: WAL for concurrent reads + larger cache + mmap
             try {
@@ -62,7 +85,14 @@ class TileServer(port: Int) : NanoHTTPD(port) {
                 opened.close()
                 return false
             }
-            databases[index] = DbEntry(opened, format)
+
+            val sampleTile = sampleTileData(opened, format)
+            if (sampleTile == null || !isSupportedRasterTileData(sampleTile)) {
+                opened.close()
+                return false
+            }
+
+            databases[index] = DbEntry(opened, format, normalizedPath, fileStamp)
             true
         } catch (e: Exception) {
             false
@@ -70,7 +100,10 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     }
 
     fun closeDatabase(index: Int) {
-        databases.remove(index)?.db?.close()
+        databases.remove(index)?.let { entry ->
+            clearTileCache()
+            try { entry.db.close() } catch (_: Exception) {}
+        }
     }
 
     /** Detect if RMaps file uses inverted z convention (actual_z = 17 - stored_z).
@@ -246,21 +279,23 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     }
 
     override fun serve(session: IHTTPSession): Response {
-        val parts = session.uri.trim('/').split("/")
+        val rawParts = session.uri.trim('/').split("/").filter { it.isNotBlank() }
+        val parts = if (rawParts.firstOrNull() == "offline") rawParts.drop(1) else rawParts
         if (parts.size < 4) return notFound()
         val idx = parts[0].toIntOrNull() ?: return notFound()
         val z   = parts[1].toIntOrNull() ?: return notFound()
         val x   = parts[2].toIntOrNull() ?: return notFound()
         val y   = parts[3].removeSuffix(".png").toIntOrNull() ?: return notFound()
+        val entry = databases[idx] ?: return notFound()
 
         // Check LRU cache first
-        val cacheKey = "$idx/$z/$x/$y"
+        val cacheKey = "${entry.fileStamp}/$idx/$z/$x/$y"
         tileCache.get(cacheKey)?.let { cached ->
             return tileResponse(cached)
         }
 
-        val data = queryTile(idx, z, x, y)
-        if (data == null || data.isEmpty()) return notFound()
+        val data = queryTile(entry, z, x, y)
+        if (data == null || data.isEmpty() || !isSupportedRasterTileData(data)) return notFound()
 
         // Store in cache
         tileCache.put(cacheKey, data)
@@ -286,11 +321,26 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             && data[10] == 0x42.toByte() && data[11] == 0x50.toByte() -> "image/webp"
         // Detect gzip-compressed tiles
         data.size >= 2 && data[0] == 0x1F.toByte() && data[1] == 0x8B.toByte() -> "application/x-protobuf"
-        else -> "image/png"
+        else -> "application/octet-stream"
     }
 
-    private fun queryTile(idx: Int, z: Int, x: Int, y: Int): ByteArray? {
-        val entry = databases[idx] ?: return null
+    private fun isSupportedRasterTileData(data: ByteArray): Boolean = when (detectMime(data)) {
+        "image/jpeg", "image/png", "image/webp" -> true
+        else -> false
+    }
+
+    private fun sampleTileData(db: SQLiteDatabase, format: DbFormat): ByteArray? {
+        val query = when (format) {
+            DbFormat.MBTILES -> "SELECT tile_data FROM tiles LIMIT 1"
+            DbFormat.RMAPS -> "SELECT image FROM tiles LIMIT 1"
+            DbFormat.UNKNOWN -> return null
+        }
+        return db.rawQuery(query, null).use { c ->
+            if (c.moveToFirst()) c.getBlob(0) else null
+        }
+    }
+
+    private fun queryTile(entry: DbEntry, z: Int, x: Int, y: Int): ByteArray? {
         val db = entry.db
         return try {
             when (entry.format) {
@@ -366,13 +416,13 @@ class TileServer(port: Int) : NanoHTTPD(port) {
 
     fun cleanup() {
         try { stop() } catch (_: Exception) {}
-        tileCache.evictAll()
+        clearTileCache()
         databases.values.forEach { try { it.db.close() } catch (_: Exception) {} }
         databases.clear()
     }
 
     private fun notFound(): Response {
-        val png = TRANSPARENT_PNG
+        val png = EMPTY_TILE_PNG
         val resp = newFixedLengthResponse(
             Response.Status.OK, "image/png",
             ByteArrayInputStream(png), png.size.toLong()
@@ -382,16 +432,13 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     }
 
     companion object {
-        private val TRANSPARENT_PNG = byteArrayOf(
-            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15.toByte(), 0xC4.toByte(), 0x89.toByte(),
-            0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,
-            0x78, 0x9C.toByte(), 0x62, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
-            0xE5.toByte(), 0x27.toByte(), 0xDE.toByte(), 0xFC.toByte(),
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
-            0xAE.toByte(), 0x42.toByte(), 0x60.toByte(), 0x82.toByte()
-        )
+        private val EMPTY_TILE_PNG: ByteArray by lazy {
+            val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+            ByteArrayOutputStream().use { output ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+                bitmap.recycle()
+                output.toByteArray()
+            }
+        }
     }
 }

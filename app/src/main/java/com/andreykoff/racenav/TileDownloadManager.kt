@@ -37,12 +37,18 @@ data class BoundsRect(
 data class DownloadProgress(
     val totalTiles: Int,
     val downloadedTiles: Int,
+    val successfulTiles: Int,
+    val failedTiles: Int,
+    val skippedTiles: Int,
     val currentLayer: String,
     val bytesDownloaded: Long,
     val isRunning: Boolean,
+    val isPaused: Boolean,
+    val wasCancelled: Boolean,
     val error: String? = null
 ) {
     val percent: Int get() = if (totalTiles > 0) (downloadedTiles * 100 / totalTiles) else 0
+    val isPartial: Boolean get() = failedTiles > 0 || skippedTiles > 0
 }
 
 object TileDownloadManager {
@@ -53,9 +59,15 @@ object TileDownloadManager {
     var lastTask: DownloadTask? = null
     val isDownloading = AtomicBoolean(false)
     val downloaded = AtomicInteger(0)
+    val successful = AtomicInteger(0)
+    val failed = AtomicInteger(0)
+    val skipped = AtomicInteger(0)
     val totalTiles = AtomicInteger(0)
     val bytesTotal = AtomicLong(0)
+    val paused = AtomicBoolean(false)
+    val cancelled = AtomicBoolean(false)
     var currentLayerName = ""
+    var currentAreaId: String? = null
     var error: String? = null
 
     // Callbacks
@@ -121,7 +133,8 @@ object TileDownloadManager {
             countPolygonTiles(task)
         } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
         val estimatedBytes = tilesPerLayer.toLong() * task.layers.size * 25_000L // ~25KB per tile avg
-        val mapsDir = getRaceNavDir(context)
+        val mapsDir = task.layers.firstOrNull()?.let { File(it.outputPath).parentFile }?.also { it.mkdirs() }
+            ?: MapStorageManager.getMapsDir(context)
         val stat = StatFs(mapsDir.absolutePath)
         val available = stat.availableBytes
         if (estimatedBytes > available * 0.9) {
@@ -132,19 +145,18 @@ object TileDownloadManager {
         return null
     }
 
-    private fun getRaceNavDir(context: Context): File {
-        val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, "RaceNav/maps")
-        dir.mkdirs()
-        return dir
-    }
-
-    fun startDownload(context: Context, task: DownloadTask) {
-        if (isDownloading.get()) return
+    fun startDownload(context: Context, task: DownloadTask): Boolean {
+        if (isDownloading.get()) return false
 
         lastTask = task
         skippedLayers.clear()
         isDownloading.set(true)
         downloaded.set(0)
+        successful.set(0)
+        failed.set(0)
+        skipped.set(0)
+        paused.set(false)
+        cancelled.set(false)
         error = null
 
         val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
@@ -191,6 +203,7 @@ object TileDownloadManager {
                 }
             }
         }.start()
+        return true
     }
 
     private fun countPolygonTiles(task: DownloadTask): Int {
@@ -214,6 +227,17 @@ object TileDownloadManager {
     }
 
     fun stopDownload() {
+        paused.set(false)
+        cancelled.set(true)
+        isDownloading.set(false)
+        job?.cancel()
+        client.dispatcher.cancelAll()
+    }
+
+    fun pauseDownload() {
+        if (!isDownloading.get()) return
+        paused.set(true)
+        cancelled.set(false)
         isDownloading.set(false)
         job?.cancel()
         client.dispatcher.cancelAll()
@@ -223,9 +247,14 @@ object TileDownloadManager {
         return DownloadProgress(
             totalTiles = totalTiles.get(),
             downloadedTiles = downloaded.get(),
+            successfulTiles = successful.get(),
+            failedTiles = failed.get(),
+            skippedTiles = skipped.get(),
             currentLayer = currentLayerName,
             bytesDownloaded = bytesTotal.get(),
             isRunning = isDownloading.get(),
+            isPaused = paused.get(),
+            wasCancelled = cancelled.get(),
             error = error
         )
     }
@@ -270,21 +299,9 @@ object TileDownloadManager {
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('bounds', ?)",
             arrayOf("${bounds.west},${bounds.south},${bounds.east},${bounds.north}"))
 
-        if (layer.layerKey in skippedLayers) {
-            Log.d("TileDownload", "Skipping layer: ${layer.layerKey}")
-            db.close()
-            return
-        }
-        val sourceInfo = tileSourcesRef?.get(layer.layerKey)
-        Log.d("TileDownload", "downloadLayerSync: key='${layer.layerKey}', has sourceInfo=${sourceInfo != null}")
-        if (sourceInfo == null) {
-            db.close()
-            return
-        }
-
         // Collect tiles (filtered by polygon if available)
         val polygon = lastTask?.polygon
-        val tiles = mutableListOf<Triple<Int, Int, Int>>()
+        val collectedTiles = mutableListOf<Triple<Int, Int, Int>>()
         for (z in minZoom..maxZoom) {
             val n = 1 shl z
             for (x in lonToTileX(bounds.west, n)..lonToTileX(bounds.east, n)) {
@@ -294,19 +311,50 @@ object TileDownloadManager {
                         val centerLon = tileCenterLon(x, z)
                         if (!pointInPolygon(centerLat, centerLon, polygon)) continue
                     }
-                    tiles.add(Triple(x, y, z))
+                    collectedTiles.add(Triple(x, y, z))
                 }
             }
         }
 
-        // Filter out already downloaded tiles (resume support)
-        val existingCount = try {
-            db.rawQuery("SELECT COUNT(*) FROM tiles", null).use {
-                if (it.moveToFirst()) it.getInt(0) else 0
+        if (layer.layerKey in skippedLayers) {
+            Log.d("TileDownload", "Skipping layer: ${layer.layerKey}")
+            skipped.addAndGet(collectedTiles.size)
+            downloaded.addAndGet(collectedTiles.size)
+            db.close()
+            dbFile.delete()
+            notifyProgressThrottled()
+            return
+        }
+
+        val sourceInfo = tileSourcesRef?.get(layer.layerKey)
+        Log.d("TileDownload", "downloadLayerSync: key='${layer.layerKey}', has sourceInfo=${sourceInfo != null}")
+        if (sourceInfo == null) {
+            db.close()
+            dbFile.delete()
+            throw IllegalStateException("Не найден источник слоя ${layer.layerLabel}")
+        }
+
+        val existingTiles = mutableSetOf<Triple<Int, Int, Int>>()
+        try {
+            db.rawQuery("SELECT zoom_level, tile_column, tile_row FROM tiles", null).use { c ->
+                while (c.moveToNext()) {
+                    existingTiles.add(Triple(c.getInt(0), c.getInt(1), c.getInt(2)))
+                }
             }
-        } catch (_: Exception) { 0 }
-        if (existingCount > 0) {
-            Log.d("TileDownload", "Resume: ${existingCount} tiles already in DB, filtering")
+        } catch (_: Exception) {}
+        if (existingTiles.isNotEmpty()) {
+            Log.d("TileDownload", "Resume: ${existingTiles.size} tiles already in DB, filtering")
+        }
+        val alreadyDownloaded = collectedTiles.count { (x, y, z) ->
+            Triple(z, x, (1 shl z) - 1 - y) in existingTiles
+        }
+        val tiles = collectedTiles.filterNot { (x, y, z) ->
+            Triple(z, x, (1 shl z) - 1 - y) in existingTiles
+        }
+        if (alreadyDownloaded > 0) {
+            successful.addAndGet(alreadyDownloaded)
+            downloaded.addAndGet(alreadyDownloaded)
+            notifyProgressThrottled()
         }
 
         Log.d("TileDownload", "downloadLayerSync: ${tiles.size} tiles for ${layer.layerKey}")
@@ -348,13 +396,19 @@ object TileDownloadManager {
         for ((x, y, z) in tiles) {
             if (!isDownloading.get()) { latch.countDown(); continue }
             executor.submit {
+                var tileOk = false
                 try {
                     val url = buildTileUrl(sourceInfo, x, y, z)
-                    if (url == null) { downloaded.incrementAndGet(); notifyProgressThrottled(); latch.countDown(); return@submit }
+                    if (url == null) {
+                        Log.w("TileDownload", "Tile URL missing: z=$z x=$x y=$y layer=${layer.layerKey}")
+                        return@submit
+                    }
 
-                    // Retry up to 3 times with backoff
+                    // Retry with progressive backoff: 1s -> 5s -> 30s
+                    val retryDelaysMs = longArrayOf(1_000L, 5_000L, 30_000L)
                     var lastError: Exception? = null
-                    for (attempt in 1..3) {
+                    for (attempt in 0..retryDelaysMs.size) {
+                        if (!isDownloading.get()) break
                         try {
                             val request = Request.Builder().url(url)
                                 .header("User-Agent", "RaceNav/2.1 Android")
@@ -362,29 +416,51 @@ object TileDownloadManager {
                             val response = client.newCall(request).execute()
                             response.use { resp ->
                                 if (resp.isSuccessful) {
+                                    val contentType = resp.body?.contentType()?.toString()
+                                        ?: resp.header("Content-Type").orEmpty()
                                     val bytes = resp.body?.bytes()
-                                    if (bytes != null && bytes.isNotEmpty()) {
+                                    if (bytes != null && bytes.isNotEmpty() && isSupportedRasterTile(bytes)) {
                                         val tmsY = (1 shl z) - 1 - y
                                         insertBuffer.add(Triple(Triple(x, y, z), bytes, tmsY))
                                         bytesTotal.addAndGet(bytes.size.toLong())
                                         if (insertBuffer.size >= BATCH_SIZE) flushBatch()
+                                        tileOk = true
+                                        lastError = null
+                                    } else {
+                                        lastError = IllegalStateException(
+                                            if (bytes == null || bytes.isEmpty()) {
+                                                "Empty tile body"
+                                            } else {
+                                                "Unsupported tile body (${contentType.ifBlank { "unknown" }})"
+                                            }
+                                        )
                                     }
+                                } else {
+                                    lastError = IllegalStateException("HTTP ${resp.code}")
                                 }
                             }
-                            lastError = null
-                            break // success
+                            if (tileOk) break
                         } catch (e: Exception) {
                             lastError = e
-                            if (attempt < 3) Thread.sleep(1000L * attempt)
+                        }
+                        if (attempt < retryDelaysMs.size && !tileOk && isDownloading.get()) {
+                            Thread.sleep(retryDelaysMs[attempt])
                         }
                     }
                     if (lastError != null) {
-                        Log.w("TileDownload", "Tile fail after 3 retries: z=$z x=$x y=$y: $lastError")
+                        Log.w("TileDownload", "Tile fail after retries: z=$z x=$x y=$y: $lastError")
                     }
                 } catch (e: Exception) {
                     Log.w("TileDownload", "Tile fail: $e")
                 } finally {
-                    downloaded.incrementAndGet()
+                    val interrupted = !tileOk && (paused.get() || cancelled.get())
+                    if (tileOk) {
+                        successful.incrementAndGet()
+                        downloaded.incrementAndGet()
+                    } else if (!interrupted) {
+                        failed.incrementAndGet()
+                        downloaded.incrementAndGet()
+                    }
                     notifyProgressThrottled()
                     latch.countDown()
                 }
@@ -414,6 +490,16 @@ object TileDownloadManager {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             onProgressUpdate?.invoke(progress)
         }
+    }
+
+    private fun isSupportedRasterTile(bytes: ByteArray): Boolean = when {
+        bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> true
+        bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() -> true
+        bytes.size >= 12 && bytes[0] == 0x52.toByte() && bytes[1] == 0x49.toByte()
+            && bytes[2] == 0x46.toByte() && bytes[3] == 0x46.toByte()
+            && bytes[8] == 0x57.toByte() && bytes[9] == 0x45.toByte()
+            && bytes[10] == 0x42.toByte() && bytes[11] == 0x50.toByte() -> true
+        else -> false
     }
 
     /** Build a tile URL from the source info urls list, substituting {z}/{x}/{y} */

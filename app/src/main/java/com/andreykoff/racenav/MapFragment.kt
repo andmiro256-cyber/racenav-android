@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.graphics.*
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -27,6 +28,7 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.ImageViewCompat
+import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -51,6 +53,8 @@ import com.mapbox.mapboxsdk.style.layers.SymbolLayer
 import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -70,6 +74,10 @@ class MapFragment : Fragment() {
     var lastLiveDevices: List<LiveUsersPoller.LiveDevice> = emptyList()
         private set
     private var favoritesPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
+    private var monitoringMessagesJob: Job? = null
+    private val monitoringUiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var monitoringPreviewHideRunnable: Runnable? = null
+    private val customCheckpointPlayers = mutableSetOf<android.media.MediaPlayer>()
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -97,6 +105,9 @@ class MapFragment : Fragment() {
     private val recordingStartMs get() = TrackingService.startTimeMs
     private var autoRecordDone = false  // prevent repeated auto-start on style change
     private var autoSyncDone = false    // prevent repeated auto-sync on resume
+    private var lastTraccarStatusName: String? = null
+    private var lastUiLocationUpdate: LocationUpdate? = null
+    private var lastUiLocationUpdateAtMs = 0L
 
     // BroadcastReceiver для получения GPS из TrackingService когда приложение на экране
     private val locationReceiver = object : BroadcastReceiver() {
@@ -116,6 +127,7 @@ class MapFragment : Fragment() {
 
     /** Shared handler for location updates from both BroadcastReceiver and StateFlow */
     private fun handleLocationUpdate(update: LocationUpdate) {
+        if (shouldSkipDuplicateUiLocationUpdate(update)) return
         val b = _binding ?: return
 
         // Обновляем трек на карте
@@ -145,6 +157,15 @@ class MapFragment : Fragment() {
         // Battery
         updateBatteryLevel()
     }
+
+    private fun shouldSkipDuplicateUiLocationUpdate(update: LocationUpdate): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val prev = lastUiLocationUpdate
+        val isDuplicate = prev == update && (now - lastUiLocationUpdateAtMs) < 400L
+        lastUiLocationUpdate = update
+        lastUiLocationUpdateAtMs = now
+        return isDuplicate
+    }
     // BroadcastReceiver для обновления виджета заряда батареи
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -157,25 +178,8 @@ class MapFragment : Fragment() {
     private val traccarStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != TraccarService.BROADCAST_TRACCAR_STATUS) return
-            val statusName = intent.getStringExtra(TraccarService.EXTRA_TRACCAR_STATUS) ?: return
-            val color = when (statusName) {
-                "OK" -> 0xFF4CAF50.toInt()       // green
-                "SYNCING" -> 0xFFFFEB3B.toInt()  // yellow
-                "ERROR" -> 0xFFF44336.toInt()     // red
-                else -> 0xFF888888.toInt()         // grey = idle
-            }
-            val statusText = when (statusName) {
-                "OK" -> "онлайн"
-                "SYNCING" -> "отправка"
-                "ERROR" -> "ошибка"
-                else -> "сервер"
-            }
-            // Update top bar server indicator
-            _binding?.topBarServerDot?.background?.setTint(color)
-            // Update server status widget in bottom bar
-            _binding?.widgetServerDot?.background?.setTint(color)
-            _binding?.widgetServerText?.text = statusText
-            _binding?.widgetServerText?.setTextColor(color)
+            lastTraccarStatusName = intent.getStringExtra(TraccarService.EXTRA_TRACCAR_STATUS)
+            updateServerStatusIndicator(lastTraccarStatusName)
         }
     }
 
@@ -277,6 +281,7 @@ class MapFragment : Fragment() {
     private var lastGpsBearing = 0f       // effectiveBearing from GPS callback
     private var lastGpsTimeNanos = 0L     // System.nanoTime() at GPS fix
     private var lastGpsSpeedKmh = 0.0
+    private var lastGpsAccuracyM = Float.NaN
     private var startupFollowPending = false
     private var startupFollowTransitionPending = false
     private var startupFixConsistencyCount = 0
@@ -291,7 +296,12 @@ class MapFragment : Fragment() {
     private var renderCamLat = Double.NaN
     private var renderCamLon = Double.NaN
     private var lastRenderFrameNanos = 0L
+    private var pendingGestureZoomCapture = false
+    private var gestureStartZoom = -1.0
     private val minStableFollowZoom = 8.0
+    private val minRestorableZoom = 3.0
+    private val minUserZoom = 2.0
+    private val maxUserZoom = 20.0
     private val cameraInterpolationNanos = 1_000_000_000L
     private val courseFreezeSpeedKmh = 1.2
     private val courseUnfreezeSpeedKmh = 2.5
@@ -307,6 +317,9 @@ class MapFragment : Fragment() {
     private var tileServer: TileServer? = null
     private val offlineMaps = mutableListOf<OfflineMapInfo>()
     private var lastKnownGpsPoint: LatLng? = null
+    private var lastGpsDistanceRingSignature: String = ""
+    private var lastGpsDistanceRingRefreshMs: Long = 0L
+    private var lastAccuracyCircleRefreshMs: Long = 0L
     fun getLastGpsPoint(): LatLng? = lastKnownGpsPoint
     private val recenterHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var recenterRunnable: Runnable? = null
@@ -337,6 +350,9 @@ class MapFragment : Fragment() {
     private var polygonPicker: PolygonAreaPicker? = null
     private var polygonSnackbar: com.google.android.material.snackbar.Snackbar? = null
     private var downloadRectSource: GeoJsonSource? = null
+    private var isDraggingDownloadPoint = false
+    private var downloadDragPointIndex = -1
+    private var downloadPointDragRunnable: Runnable? = null
 
     companion object {
         /** Sentinel LatLng used as segment separator (South Pole - never appears in real tracks) */
@@ -356,6 +372,10 @@ class MapFragment : Fragment() {
         const val GPS_ARROW_LAYER_ID = "gps-arrow-layer"
         const val GPS_ACCURACY_SOURCE_ID = "gps-accuracy-source"
         const val GPS_ACCURACY_LAYER_ID = "gps-accuracy-layer"
+        const val GPS_DISTANCE_RINGS_SOURCE_ID = "gps-distance-rings-source"
+        const val GPS_DISTANCE_RINGS_LAYER_ID = "gps-distance-rings-layer"
+        const val GPS_DISTANCE_RING_LABELS_SOURCE_ID = "gps-distance-ring-labels-source"
+        const val GPS_DISTANCE_RING_LABELS_LAYER_ID = "gps-distance-ring-labels-layer"
         const val GPS_ARROW_ICON = "gps-arrow-icon"
         const val PREFS_NAME = "racenav_prefs"
         const val PREF_VOLUME_ZOOM = "volume_zoom_enabled"
@@ -364,8 +384,15 @@ class MapFragment : Fragment() {
         const val PREF_FULLSCREEN = "fullscreen_enabled"
         const val PREF_MARKER_COLOR = "marker_color"
         const val PREF_MARKER_SIZE = "marker_size"
+        const val PREF_GPS_DISTANCE_RINGS_VISIBLE = "gps_distance_rings_visible"
+        const val PREF_GPS_DISTANCE_RINGS_RADII = "gps_distance_rings_radii"
+        const val PREF_GPS_DISTANCE_RINGS_COLOR = "gps_distance_rings_color"
+        const val PREF_GPS_DISTANCE_RINGS_WIDTH = "gps_distance_rings_width"
         const val DEFAULT_MARKER_COLOR = "#FF4444"
         const val DEFAULT_MARKER_SIZE = 3
+        const val DEFAULT_GPS_DISTANCE_RINGS_RADII = "100,250,500,1000,2000"
+        const val DEFAULT_GPS_DISTANCE_RINGS_COLOR = "#5BC0FF"
+        const val DEFAULT_GPS_DISTANCE_RINGS_WIDTH = 2f
         const val PREF_CAMERA_LAT = "camera_lat"
         const val PREF_CAMERA_LON = "camera_lon"
         const val PREF_CAMERA_ZOOM = "camera_zoom"
@@ -418,6 +445,9 @@ class MapFragment : Fragment() {
         const val PREF_OVERLAY_KEY = "overlay_key"
         const val PREF_HIDE_ONLINE_BASE = "hide_online_base"  // bool, default false
         const val PREF_WIDGET_FONT_SCALE = "widget_font_scale"  // 1-10, default 5
+        const val PREF_BOTTOM_BAR_HEIGHT = "bottom_bar_height"  // 1-10 slider, default 5
+        const val PREF_BOTTOM_BAR_HEIGHT_MIGRATED = "bottom_bar_height_migrated_v2"
+        const val PREF_BOTTOM_BAR_THEME = "bottom_bar_theme"    // dark | light
         const val PREF_WIDGET_SPEED = "widget_speed"
         const val PREF_WIDGET_BEARING = "widget_bearing"
         const val PREF_WIDGET_TRACKLEN = "widget_tracklen"
@@ -435,6 +465,7 @@ class MapFragment : Fragment() {
         const val DEFAULT_WP_APPROACH_RADIUS = 30
         const val PREF_WP_TAKEN_RADIUS = "wp_taken_radius"    // metres, default 20 (taken/auto-advance)
         const val DEFAULT_WP_TAKEN_RADIUS = 20
+        const val PREF_DISTANCE_RINGS_VISIBLE = "distance_rings_visible"
         const val PREF_SYNC_API_KEY = "sync_api_key"
         const val SYNC_BASE_URL = "http://87.120.84.254"
 
@@ -456,7 +487,7 @@ class MapFragment : Fragment() {
         val ALL_WIDGET_KEYS = listOf("speed","bearing","tracklen","nextcp","altitude","chrono","time","remain_km","nextcp_name","tripmaster","server_status","battery")
 
         const val PREF_TOP_BAR_ORDER = "top_bar_order"
-        val ALL_TOP_BAR_KEYS = listOf("compass","zoom","waypoint","quick","stop","spacer","go","zoom_level","battery","layers","rec","map_switch","gps_dot","server_dot","settings")
+        val ALL_TOP_BAR_KEYS = listOf("compass","zoom","waypoint","quick","stop","spacer","go","zoom_level","battery","layers","rec","map_switch","gps_dot","server_dot","messages","settings")
 
         // Top bar button visibility prefs
         const val PREF_BTN_COMPASS = "btn_compass"
@@ -478,7 +509,7 @@ class MapFragment : Fragment() {
         fun lockButtonScaleToDp(scale: Int): Int = scale * 4 + 24
 
         const val PREF_GPS_SMOOTHING = "gps_smoothing"
-        const val DEFAULT_GPS_SMOOTHING = 5  // 1=off, 10=heavy
+        const val DEFAULT_GPS_SMOOTHING = 5  // 1=responsive, 10=heavy
 
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
 
@@ -500,6 +531,26 @@ class MapFragment : Fragment() {
 
         /** Convert 1-10 scale to sp for label sizes: 1=8sp, 3=11sp, 5=14sp, 10=21.5sp */
         fun labelScaleToSp(scale: Int): Float = scale * 1.5f + 6.5f
+        fun readBottomBarHeightScale(prefs: android.content.SharedPreferences): Int {
+            val migrated = prefs.getBoolean(PREF_BOTTOM_BAR_HEIGHT_MIGRATED, false)
+            if (migrated) return prefs.getInt(PREF_BOTTOM_BAR_HEIGHT, 5).coerceIn(1, 10)
+
+            val raw = prefs.getInt(PREF_BOTTOM_BAR_HEIGHT, Int.MIN_VALUE)
+            val scale = when {
+                raw == Int.MIN_VALUE -> 5
+                raw in 1..3 -> when (raw) {
+                    1 -> 3
+                    2 -> 5
+                    else -> 8
+                }
+                else -> raw.coerceIn(1, 10)
+            }
+            prefs.edit()
+                .putInt(PREF_BOTTOM_BAR_HEIGHT, scale)
+                .putBoolean(PREF_BOTTOM_BAR_HEIGHT_MIGRATED, true)
+                .apply()
+            return scale
+        }
         const val PREF_CROSSHAIR_ENABLED = "crosshair_enabled"
         const val PREF_CROSSHAIR_SIZE = "crosshair_size"       // dp, default 60
         const val PREF_NAV_COMPASS_ENABLED = "nav_compass_enabled"
@@ -531,6 +582,7 @@ class MapFragment : Fragment() {
         const val PREF_BTN_SERVER_DOT = "btn_server_dot"
         const val PREF_BTN_BATTERY = "btn_battery"
         const val PREF_BTN_ZOOM_LEVEL = "btn_zoom_level"
+        const val PREF_BTN_MESSAGES = "btn_messages"
         const val PREF_HIDDEN_MAPS = "hidden_maps"  // comma-separated keys of hidden map sources
         const val PREF_MAP_SWITCH_A = "map_switch_a"  // first map key
         const val PREF_MAP_SWITCH_B = "map_switch_b"  // second map key
@@ -556,6 +608,10 @@ class MapFragment : Fragment() {
         // Sound notifications
         const val PREF_SOUND_APPROACH = "sound_approach"   // bool, default true
         const val PREF_SOUND_TAKEN    = "sound_taken"      // bool, default true
+        const val PREF_SOUND_APPROACH_URI = "sound_approach_uri"
+        const val PREF_SOUND_APPROACH_NAME = "sound_approach_name"
+        const val PREF_SOUND_TAKEN_URI = "sound_taken_uri"
+        const val PREF_SOUND_TAKEN_NAME = "sound_taken_name"
         const val PREF_HINTS_ENABLED  = "hints_enabled"    // bool, default true
 
         const val PREF_ROUTE_NAME = "route_name"           // display name of loaded route/waypoint set
@@ -719,7 +775,24 @@ class MapFragment : Fragment() {
         applyUiScale()
         applyWidgetFontScale()
         applyTopBarPrefs()
+        applyTopBarAppearance()
         applyCrosshairPrefs()
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                TrackingService.locationFlow.collect { update ->
+                    if (update != null) {
+                        handleLocationUpdate(update)
+                    }
+                }
+            }
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                GnssStatusMonitor.gnssInfo.collect { info ->
+                    updateGpsDot(info)
+                }
+            }
+        }
 
         binding.mapView.onCreate(savedInstanceState)
         applyCacheSize()
@@ -767,8 +840,11 @@ class MapFragment : Fragment() {
             val savedBearing = tilePrefs?.getFloat(PREF_CAMERA_BEARING, Float.NaN) ?: Float.NaN
             Log.d("CamDebug", "STARTUP: lat=$savedLat lon=$savedLon zoom=$savedZoom")
             if (savedLat != Float.MIN_VALUE) {
-                // Have saved coordinates — use them. Clamp bad zoom (world-view artifact) to 10.
-                val useZoom = if (savedZoom >= 10f) savedZoom.toDouble() else 10.0
+                // Have saved coordinates — preserve the user's zoom unless it is a broken world-view artifact.
+                val useZoom = sanitizeFollowZoom(
+                    savedZoom.toDouble().takeIf { savedZoom > 0f },
+                    13.0
+                )
                 val camBuilder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
                     .target(LatLng(savedLat.toDouble(), savedLon.toDouble()))
                     .zoom(useZoom)
@@ -820,13 +896,20 @@ class MapFragment : Fragment() {
 
             // Load custom and offline maps BEFORE loadTileStyle so tile sources are ready
             reloadCustomSources()
-            loadOfflineMapsFromPrefs()
-            // Apply cached catalog instantly (no network), then load style
             val ctx = context ?: return@getMapAsync
+            OfflineAreasManager.cleanupIncomplete(ctx)
+            loadOfflineMapsFromPrefs()
+            syncOfflineAreaSources()
+            // Apply cached catalog instantly (no network), then load style
             val cachedCatalog = TileCatalogManager.loadCachedCatalog(ctx)
                 ?: TileCatalogManager.loadBundledCatalog(ctx)
             applyCatalog(cachedCatalog)
-            loadTileStyle(savedTile, savedOverlays)
+            val startupCamera = lastSavedCamera?.let { sanitizeCameraPosition(it) }
+                ?: lastGoodCamera?.let { sanitizeCameraPosition(it) }
+                ?: loadCameraFromPrefs()
+            val validSavedTile = sanitizeStartupSavedTile(savedTile, startupCamera)
+            val validSavedOverlays = sanitizeStartupOverlayKeys(savedOverlays, startupCamera)
+            loadTileStyle(validSavedTile, validSavedOverlays)
             // Async fetch fresh catalog from server
             val cachedVersion = cachedCatalog?.version ?: -1
             TileCatalogManager.fetchCatalog(ctx) { catalog ->
@@ -849,8 +932,6 @@ class MapFragment : Fragment() {
             checkEmailPrompt()
             // Warn if battery optimization is active (kills GPS in background)
             checkBatteryOptimization()
-            // Cleanup incomplete offline map downloads from previous session
-            context?.let { OfflineAreasManager.cleanupIncomplete(it) }
             // Tap on live user marker → show info card
             map.addOnMapClickListener { latLng ->
                 if (trackEditorMode && !editMoveMode) {
@@ -877,7 +958,26 @@ class MapFragment : Fragment() {
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }
                         dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
+                        downloadPointDragRunnable?.let { emergencyHandler.removeCallbacks(it) }; downloadPointDragRunnable = null
                         touchDownX = event.x; touchDownY = event.y
+
+                        if (isDownloadSelecting) {
+                            val nearIdx = polygonPicker?.findNearestPointIndex(
+                                android.graphics.PointF(event.x, event.y),
+                                28f * density
+                            ) ?: -1
+                            if (nearIdx >= 0) {
+                                downloadPointDragRunnable = Runnable {
+                                    downloadDragPointIndex = nearIdx
+                                    isDraggingDownloadPoint = true
+                                    mapboxMap?.uiSettings?.isScrollGesturesEnabled = false
+                                    mapboxMap?.uiSettings?.isZoomGesturesEnabled = false
+                                    binding.mapView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                }
+                                emergencyHandler.postDelayed(downloadPointDragRunnable!!, 300L)
+                                return@setOnTouchListener false
+                            }
+                        }
 
                         // In track editor mode: check for long-press on a point → drag it
                         if (trackEditorMode && !editMoveMode && !drawMode) {
@@ -890,9 +990,7 @@ class MapFragment : Fragment() {
                                     mapboxMap?.uiSettings?.isScrollGesturesEnabled = false
                                     mapboxMap?.uiSettings?.isZoomGesturesEnabled = false
                                     _binding?.editPointPopup?.visibility = android.view.View.GONE
-                                    // Haptic feedback
-                                    @Suppress("DEPRECATION")
-                                    (context?.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(40)
+                                    binding.mapView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                                     renderEditorPoints()
                                 }
                                 emergencyHandler.postDelayed(dragStartRunnable!!, 400L)
@@ -901,22 +999,31 @@ class MapFragment : Fragment() {
                             }
                         }
 
-                        // Widget-free mode toggle (1.5s hold)
-                        panelRunnable = Runnable {
-                            val nowVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
-                            isWidgetFreeMode = nowVisible  // bars were visible → now going to widget-free
-                            _binding?.topBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
-                            _binding?.bottomBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
-                            applyNavCompassPrefs()
+                        if (!isDownloadSelecting) {
+                            panelRunnable = Runnable {
+                                val nowVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
+                                isWidgetFreeMode = nowVisible
+                                _binding?.topBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
+                                _binding?.bottomBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
+                                applyNavCompassPrefs()
+                            }
+                            emergencyHandler.postDelayed(panelRunnable!!, 1500L)
+                            emergencyRunnable = Runnable {
+                                _binding?.btnEmergencySettings?.visibility = android.view.View.VISIBLE
+                            }
+                            emergencyHandler.postDelayed(emergencyRunnable!!, 3500L)
                         }
-                        emergencyHandler.postDelayed(panelRunnable!!, 1500L)
-                        // 3.5s: show gear icon
-                        emergencyRunnable = Runnable {
-                            _binding?.btnEmergencySettings?.visibility = android.view.View.VISIBLE
-                        }
-                        emergencyHandler.postDelayed(emergencyRunnable!!, 3500L)
                     }
                     android.view.MotionEvent.ACTION_MOVE -> {
+                        if (isDraggingDownloadPoint) {
+                            val latLng = mapboxMap?.projection?.fromScreenLocation(
+                                android.graphics.PointF(event.x, event.y)
+                            )
+                            if (latLng != null && polygonDragMovePoint(downloadDragPointIndex, latLng)) {
+                                showPolygonControls()
+                            }
+                            return@setOnTouchListener true
+                        }
                         // Dragging an editor point
                         if (isDraggingPoint) {
                             val latLng = mapboxMap?.projection?.fromScreenLocation(
@@ -936,12 +1043,22 @@ class MapFragment : Fragment() {
                             panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
                             emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
                             dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
+                            downloadPointDragRunnable?.let { emergencyHandler.removeCallbacks(it) }; downloadPointDragRunnable = null
                         }
                     }
                     android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                         panelRunnable?.let { emergencyHandler.removeCallbacks(it) }; panelRunnable = null
                         emergencyRunnable?.let { emergencyHandler.removeCallbacks(it) }; emergencyRunnable = null
                         dragStartRunnable?.let { emergencyHandler.removeCallbacks(it) }; dragStartRunnable = null
+                        downloadPointDragRunnable?.let { emergencyHandler.removeCallbacks(it) }; downloadPointDragRunnable = null
+                        if (isDraggingDownloadPoint) {
+                            isDraggingDownloadPoint = false
+                            downloadDragPointIndex = -1
+                            mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
+                            mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
+                            showPolygonControls()
+                            return@setOnTouchListener true
+                        }
                         if (isDraggingPoint) {
                             isDraggingPoint = false
                             dragPointIndex = -1
@@ -1004,6 +1121,42 @@ class MapFragment : Fragment() {
     }
 
     private data class WidgetDef(val key: String, val prefKey: String, val defaultOn: Boolean)
+    private data class BottomBarPalette(
+        val barColor: Int,
+        val cardColor: Int,
+        val cardStroke: Int,
+        val primaryText: Int,
+        val secondaryText: Int,
+        val tripValue: Int,
+        val success: Int,
+        val warning: Int,
+        val error: Int
+    )
+
+    private data class TopBarPalette(
+        val barColor: Int,
+        val primaryText: Int,
+        val mutedText: Int,
+        val neutralText: Int,
+        val accent: Int,
+        val success: Int,
+        val warning: Int,
+        val error: Int
+    )
+
+    private data class ModalPalette(
+        val surface: Int,
+        val surfaceVariant: Int,
+        val divider: Int,
+        val textPrimary: Int,
+        val textSecondary: Int,
+        val textMuted: Int,
+        val textHint: Int,
+        val accent: Int,
+        val warning: Int,
+        val success: Int,
+        val error: Int
+    )
 
     private fun widgetContainer(key: String): android.view.View? {
         val b = _binding ?: return null
@@ -1035,6 +1188,356 @@ class MapFragment : Fragment() {
         }
     }
 
+    private fun currentBottomBarPalette(): BottomBarPalette {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return when (prefs?.getString(PREF_BOTTOM_BAR_THEME, "dark")) {
+            "light" -> BottomBarPalette(
+                barColor = 0xD9ECECEC.toInt(),
+                cardColor = 0xF7FFFFFF.toInt(),
+                cardStroke = 0x55000000.toInt(),
+                primaryText = 0xFF111111.toInt(),
+                secondaryText = 0xFF4A4A4A.toInt(),
+                tripValue = 0xFF0F8A4A.toInt(),
+                success = 0xFF2E7D32.toInt(),
+                warning = 0xFF8D6E00.toInt(),
+                error = 0xFFC62828.toInt()
+            )
+            else -> BottomBarPalette(
+                barColor = 0xCC1A1A1A.toInt(),
+                cardColor = 0xE6242424.toInt(),
+                cardStroke = 0x44FFFFFF.toInt(),
+                primaryText = 0xFFFFFFFF.toInt(),
+                secondaryText = 0xFFB0B0B0.toInt(),
+                tripValue = 0xFF00E676.toInt(),
+                success = 0xFF4CAF50.toInt(),
+                warning = 0xFFFFEB3B.toInt(),
+                error = 0xFFFF4444.toInt()
+            )
+        }
+    }
+
+    private fun currentBottomBarHeight(): Int {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return 2
+        return readBottomBarHeightScale(prefs)
+    }
+
+    private fun currentTopBarPalette(): TopBarPalette {
+        val ctx = context ?: return TopBarPalette(
+            barColor = 0xCC1A1A1A.toInt(),
+            primaryText = 0xFFFFFFFF.toInt(),
+            mutedText = 0xFF888888.toInt(),
+            neutralText = 0xFF666666.toInt(),
+            accent = 0xFFFF6F00.toInt(),
+            success = 0xFF4CAF50.toInt(),
+            warning = 0xFFFFEB3B.toInt(),
+            error = 0xFFFF4444.toInt()
+        )
+        return if (AppThemeHelper.isDarkTheme(ctx)) {
+            TopBarPalette(
+                barColor = 0xCC1A1A1A.toInt(),
+                primaryText = ContextCompat.getColor(ctx, R.color.text_primary),
+                mutedText = ContextCompat.getColor(ctx, R.color.text_muted),
+                neutralText = ContextCompat.getColor(ctx, R.color.text_hint),
+                accent = ContextCompat.getColor(ctx, R.color.primary),
+                success = ContextCompat.getColor(ctx, R.color.success),
+                warning = ContextCompat.getColor(ctx, R.color.warning),
+                error = ContextCompat.getColor(ctx, R.color.error)
+            )
+        } else {
+            TopBarPalette(
+                barColor = 0xEAF7F9FC.toInt(),
+                primaryText = ContextCompat.getColor(ctx, R.color.text_primary),
+                mutedText = ContextCompat.getColor(ctx, R.color.text_muted),
+                neutralText = ContextCompat.getColor(ctx, R.color.text_hint),
+                accent = ContextCompat.getColor(ctx, R.color.primary),
+                success = ContextCompat.getColor(ctx, R.color.success),
+                warning = ContextCompat.getColor(ctx, R.color.warning),
+                error = ContextCompat.getColor(ctx, R.color.error)
+            )
+        }
+    }
+
+    private fun applyTopBarAppearance() {
+        val b = _binding ?: return
+        val palette = currentTopBarPalette()
+        b.topBar.setBackgroundColor(palette.barColor)
+
+        val tintableButtons = listOf(
+            b.btnZoomIn,
+            b.btnZoomOut,
+            b.btnQuickAction,
+            b.btnLayers,
+            b.btnMapSwitch,
+            b.btnSettings
+        )
+        tintableButtons.forEach { button ->
+            button.imageTintList = android.content.res.ColorStateList.valueOf(palette.primaryText)
+        }
+        b.btnAddWaypoint.imageTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+
+        b.btnZoomLevel.setTextColor(palette.mutedText)
+        b.btnBatteryIndicator.setTextColor(palette.mutedText)
+        if (!navActive) {
+            b.btnWidgetGo.setTextColor(palette.neutralText)
+            b.btnWidgetStop.setTextColor(palette.neutralText)
+        }
+        refreshMonitoringMessagesUi()
+    }
+
+    private fun currentModalPalette(): ModalPalette {
+        val ctx = context ?: return ModalPalette(
+            surface = 0xFF1A1A1A.toInt(),
+            surfaceVariant = 0xFF2A2A2A.toInt(),
+            divider = 0xFF555555.toInt(),
+            textPrimary = 0xFFFFFFFF.toInt(),
+            textSecondary = 0xFFCCCCCC.toInt(),
+            textMuted = 0xFF888888.toInt(),
+            textHint = 0xFF666666.toInt(),
+            accent = 0xFFFF6F00.toInt(),
+            warning = 0xFFFFEB3B.toInt(),
+            success = 0xFF4CAF50.toInt(),
+            error = 0xFFFF4444.toInt()
+        )
+        return ModalPalette(
+            surface = ContextCompat.getColor(ctx, R.color.surface),
+            surfaceVariant = ContextCompat.getColor(ctx, R.color.surface_variant),
+            divider = ContextCompat.getColor(ctx, R.color.card_stroke),
+            textPrimary = ContextCompat.getColor(ctx, R.color.text_primary),
+            textSecondary = ContextCompat.getColor(ctx, R.color.text_secondary),
+            textMuted = ContextCompat.getColor(ctx, R.color.text_muted),
+            textHint = ContextCompat.getColor(ctx, R.color.text_hint),
+            accent = ContextCompat.getColor(ctx, R.color.primary),
+            warning = ContextCompat.getColor(ctx, R.color.warning),
+            success = ContextCompat.getColor(ctx, R.color.success),
+            error = ContextCompat.getColor(ctx, R.color.error)
+        )
+    }
+
+    private fun remapModalBackgroundColor(current: Int, palette: ModalPalette): Int? = when (current) {
+        0xFF121212.toInt(),
+        0xFF1A1A1A.toInt(),
+        0xFF1E1E1E.toInt() -> palette.surface
+        0xFF111111.toInt(),
+        0xFF242424.toInt(),
+        0xFF252525.toInt(),
+        0xFF2A2A2A.toInt(),
+        0xFF2A2A3E.toInt(),
+        0xFF1A1A2E.toInt(),
+        0xFF333333.toInt(),
+        0xFF444444.toInt() -> palette.surfaceVariant
+        0xFF555555.toInt() -> palette.divider
+        else -> null
+    }
+
+    private fun remapModalTextColor(current: Int, palette: ModalPalette): Int? = when (current) {
+        0xFFFFFFFF.toInt() -> palette.textPrimary
+        0xFFDDDDDD.toInt(),
+        0xFFCCCCCC.toInt(),
+        0xFFAAAAAA.toInt() -> palette.textSecondary
+        0xFF999999.toInt(),
+        0xFF888888.toInt(),
+        0xFF777777.toInt() -> palette.textMuted
+        0xFF666666.toInt(),
+        0xFF555555.toInt() -> palette.textHint
+        0xFFFF6F00.toInt() -> palette.accent
+        0xFFFFD600.toInt(),
+        0xFFFFD700.toInt(),
+        0xFFFFEB3B.toInt(),
+        0xFFFFAB00.toInt() -> palette.warning
+        else -> null
+    }
+
+    private fun remapModalTintColor(current: Int, palette: ModalPalette): Int? = when (current) {
+        0xFF252525.toInt(),
+        0xFF2A2A2A.toInt(),
+        0xFF2A2A3E.toInt(),
+        0xFF333333.toInt(),
+        0xFF444444.toInt() -> palette.surfaceVariant
+        0xFFFF6F00.toInt() -> palette.accent
+        0xFFFFD600.toInt(),
+        0xFFFFD700.toInt(),
+        0xFFFFEB3B.toInt(),
+        0xFFFFAB00.toInt() -> palette.warning
+        else -> null
+    }
+
+    private fun applyModalThemeRecursive(view: View, palette: ModalPalette) {
+        val bgColor = (view.background as? android.graphics.drawable.ColorDrawable)?.color
+        remapModalBackgroundColor(bgColor ?: Int.MIN_VALUE, palette)?.let { view.setBackgroundColor(it) }
+
+        when (view) {
+            is android.widget.TextView -> {
+                remapModalTextColor(view.currentTextColor, palette)?.let(view::setTextColor)
+                remapModalTextColor(view.currentHintTextColor, palette)?.let(view::setHintTextColor)
+            }
+            is android.widget.Button -> {
+                val tint = view.backgroundTintList?.defaultColor
+                remapModalTintColor(tint ?: Int.MIN_VALUE, palette)?.let {
+                    view.backgroundTintList = android.content.res.ColorStateList.valueOf(it)
+                }
+            }
+            is android.widget.CompoundButton -> {
+                val tint = view.buttonTintList?.defaultColor
+                remapModalTintColor(tint ?: Int.MIN_VALUE, palette)?.let {
+                    view.buttonTintList = android.content.res.ColorStateList.valueOf(it)
+                }
+            }
+        }
+
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                applyModalThemeRecursive(view.getChildAt(i), palette)
+            }
+        }
+    }
+
+    private fun styleModalInput(input: android.widget.EditText) {
+        val palette = currentModalPalette()
+        input.setTextColor(palette.textPrimary)
+        input.setHintTextColor(palette.textHint)
+        input.setBackgroundColor(palette.surfaceVariant)
+    }
+
+    private fun prepareModalSheet(dialog: BottomSheetDialog, contentView: View) {
+        val palette = currentModalPalette()
+        contentView.setBackgroundColor(palette.surface)
+        applyModalThemeRecursive(contentView, palette)
+        dialog.window?.navigationBarColor = palette.surface
+        dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            ?.setBackgroundColor(palette.surface)
+        (contentView.parent as? View)?.setBackgroundColor(palette.surface)
+    }
+
+    private fun createBottomBarCardBackground(
+        fillColor: Int,
+        strokeColor: Int,
+        strokeWidthPx: Int,
+        radiusPx: Float
+    ): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = radiusPx
+        setColor(fillColor)
+        setStroke(strokeWidthPx, strokeColor)
+    }
+
+    private fun isBottomBarValueTextView(view: android.widget.TextView): Boolean = when (view.id) {
+        R.id.widgetSpeed,
+        R.id.widgetBearing,
+        R.id.widgetTrackLen,
+        R.id.widgetNextCp,
+        R.id.widgetAltitude,
+        R.id.widgetChrono,
+        R.id.widgetTime,
+        R.id.widgetRemainKm,
+        R.id.widgetNextCpName,
+        R.id.widgetTripmaster,
+        R.id.widgetBattery -> true
+        else -> false
+    }
+
+    private fun applyBottomBarTextColors(view: View, palette: BottomBarPalette) {
+        when (view) {
+            is android.widget.TextView -> {
+                val color = when (view.id) {
+                    R.id.widgetTripmaster -> palette.tripValue
+                    R.id.widgetServerText -> palette.secondaryText
+                    else -> if (isBottomBarValueTextView(view)) palette.primaryText else palette.secondaryText
+                }
+                view.setTextColor(color)
+            }
+            is android.view.ViewGroup -> {
+                for (i in 0 until view.childCount) {
+                    applyBottomBarTextColors(view.getChildAt(i), palette)
+                }
+            }
+        }
+    }
+
+    fun applyBottomBarAppearance() {
+        val b = _binding ?: return
+        val palette = currentBottomBarPalette()
+        val density = resources.displayMetrics.density
+        val heightScale = currentBottomBarHeight()
+
+        val barHorizontalPaddingDp = 2f + heightScale.toFloat()
+        val barVerticalPaddingDp = 1.5f + heightScale * 0.8f
+        val cardHorizontalPaddingDp = 3.5f + heightScale * 1.15f
+        val cardVerticalPaddingDp = 2.5f + heightScale * 0.95f
+        val cardMarginDp = if (heightScale >= 8) 3 else 2
+        val radiusPx = (8f + heightScale * 0.8f) * density
+        val strokeWidthPx = (1f * density + 0.5f).toInt().coerceAtLeast(1)
+
+        b.bottomBar.setBackgroundColor(palette.barColor)
+        b.bottomBar.setPadding(
+            (barHorizontalPaddingDp * density + 0.5f).toInt(),
+            (barVerticalPaddingDp * density + 0.5f).toInt(),
+            (barHorizontalPaddingDp * density + 0.5f).toInt(),
+            (barVerticalPaddingDp * density + 0.5f).toInt()
+        )
+
+        for (i in 0 until b.bottomBar.childCount) {
+            val child = b.bottomBar.getChildAt(i)
+            val container = child as? android.view.ViewGroup ?: continue
+            applyBottomBarTextColors(container, palette)
+            container.background = createBottomBarCardBackground(
+                fillColor = palette.cardColor,
+                strokeColor = palette.cardStroke,
+                strokeWidthPx = strokeWidthPx,
+                radiusPx = radiusPx
+            )
+            container.setPadding(
+                (cardHorizontalPaddingDp * density + 0.5f).toInt(),
+                (cardVerticalPaddingDp * density + 0.5f).toInt(),
+                (cardHorizontalPaddingDp * density + 0.5f).toInt(),
+                (cardVerticalPaddingDp * density + 0.5f).toInt()
+            )
+            (container.layoutParams as? android.widget.LinearLayout.LayoutParams)?.let { lp ->
+                val marginPx = (cardMarginDp * density + 0.5f).toInt()
+                lp.marginStart = marginPx
+                lp.marginEnd = marginPx
+                lp.topMargin = marginPx
+                lp.bottomMargin = marginPx
+                container.layoutParams = lp
+            }
+        }
+
+        updateServerStatusIndicator(lastTraccarStatusName)
+        updateBatteryLevel()
+    }
+
+    private fun updateServerStatusIndicator(statusName: String? = null) {
+        val b = _binding ?: return
+        val palette = currentBottomBarPalette()
+        val normalizedStatus = when (statusName ?: if (TraccarService.isRunning) "OK" else "IDLE") {
+            "OK" -> "OK"
+            "SYNCING" -> "SYNCING"
+            "ERROR" -> "ERROR"
+            else -> "IDLE"
+        }
+        val topDotColor = when (normalizedStatus) {
+            "OK" -> palette.success
+            "SYNCING" -> palette.warning
+            "ERROR" -> palette.error
+            else -> 0xFF888888.toInt()
+        }
+        val widgetTextColor = when (normalizedStatus) {
+            "OK" -> palette.success
+            "SYNCING" -> palette.warning
+            "ERROR" -> palette.error
+            else -> palette.secondaryText
+        }
+        val statusText = when (normalizedStatus) {
+            "OK" -> "онлайн"
+            "SYNCING" -> "отправка"
+            "ERROR" -> "ошибка"
+            else -> "сервер"
+        }
+        b.topBarServerDot.background?.setTint(topDotColor)
+        b.widgetServerDot.background?.setTint(topDotColor)
+        b.widgetServerText.text = statusText
+        b.widgetServerText.setTextColor(widgetTextColor)
+    }
+
     /**
      * Read map_tilt_enabled preference and apply:
      * - enable/disable tilt gestures on map
@@ -1044,8 +1547,9 @@ class MapFragment : Fragment() {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         val map = mapboxMap ?: return
         val tiltAllowed = prefs.getBoolean(PREF_MAP_TILT_ENABLED, false)
+        val keepFollowTilt = tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE
         map.uiSettings.isTiltGesturesEnabled = tiltAllowed
-        if (!tiltAllowed && (map.cameraPosition?.tilt ?: 0.0) > 0.0) {
+        if (!tiltAllowed && !keepFollowTilt && (map.cameraPosition?.tilt ?: 0.0) > 0.0) {
             val cam = com.mapbox.mapboxsdk.camera.CameraPosition.Builder(map.cameraPosition)
                 .tilt(0.0).build()
             map.moveCamera(CameraUpdateFactory.newCameraPosition(cam))
@@ -1080,63 +1584,53 @@ class MapFragment : Fragment() {
 
         val bar = b.bottomBar
         bar.removeAllViews()
-        var added = 0
         for (w in ordered) {
             if (!prefs.getBoolean(w.prefKey, w.defaultOn)) continue
             val container = widgetContainer(w.key) ?: continue
             // Containers from XML may have visibility=GONE (chrono/time/etc.) — force visible
             container.visibility = View.VISIBLE
-            if (added > 0) bar.addView(makeDivider())
             // Explicit LayoutParams: width=0dp, height=match_parent, weight=1
             // (ensures equal distribution even after detach/re-attach cycle)
             bar.addView(container, android.widget.LinearLayout.LayoutParams(
                 0, android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1f
             ))
-            added++
         }
 
         val timeOn = prefs.getBoolean(PREF_WIDGET_TIME, false)
         if (timeOn) startTimeTicker() else stopTimeTicker()
 
-        // Update server status widget color based on TraccarService state
-        val serverOn = prefs.getBoolean(PREF_WIDGET_SERVER_STATUS, false)
-        if (serverOn) {
-            val dot = b.widgetServerDot
-            val text = b.widgetServerText
-            if (TraccarService.isRunning) {
-                dot.background?.setTint(0xFF4CAF50.toInt())
-                text.text = "онлайн"
-                text.setTextColor(0xFF4CAF50.toInt())
-            } else {
-                dot.background?.setTint(0xFF888888.toInt())
-                text.text = "сервер"
-                text.setTextColor(0xFF888888.toInt())
-            }
-        }
-
         // Battery: bottom widget + top bar indicator (separate prefs)
-        updateBatteryLevel()
         b.btnBatteryIndicator.visibility = if (prefs.getBoolean(PREF_BTN_BATTERY, false)) View.VISIBLE else View.GONE
+        applyBottomBarAppearance()
+        applyWidgetFontScale()
     }
 
     private fun updateBatteryLevel() {
         val ctx = context ?: return
         val b = _binding ?: return
+        val palette = currentBottomBarPalette()
         val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
         val level = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val batteryIntent = ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
         val plugged = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0
         val isCharging = plugged != 0
-        val color = when {
-            isCharging -> 0xFF4CAF50.toInt()  // green when charging
-            level > 50 -> 0xFFFFFFFF.toInt()  // white
-            level > 20 -> 0xFFFFEB3B.toInt()  // yellow
-            else -> 0xFFFF4444.toInt()         // red
+        val topPalette = currentTopBarPalette()
+        val bottomColor = when {
+            isCharging -> palette.success
+            level > 50 -> palette.primaryText
+            level > 20 -> palette.warning
+            else -> palette.error
+        }
+        val topBarColor = when {
+            isCharging -> topPalette.success
+            level > 50 -> topPalette.primaryText
+            level > 20 -> topPalette.warning
+            else -> topPalette.error
         }
         b.widgetBattery.text = "$level"
-        b.widgetBattery.setTextColor(color)
+        b.widgetBattery.setTextColor(bottomColor)
         b.btnBatteryIndicator.text = "$level%"
-        b.btnBatteryIndicator.setTextColor(color)
+        b.btnBatteryIndicator.setTextColor(topBarColor)
     }
 
     private fun loadCameraFromPrefs(): com.mapbox.mapboxsdk.camera.CameraPosition? {
@@ -1144,7 +1638,7 @@ class MapFragment : Fragment() {
         val lat = prefs.getFloat(PREF_CAMERA_LAT, Float.MIN_VALUE)
         if (lat == Float.MIN_VALUE) return null
         val lon = prefs.getFloat(PREF_CAMERA_LON, Float.MIN_VALUE)
-        val zoom = prefs.getFloat(PREF_CAMERA_ZOOM, 10f).toDouble().coerceIn(10.0, 20.0)
+        val zoom = sanitizeFollowZoom(prefs.getFloat(PREF_CAMERA_ZOOM, 10f).toDouble(), 10.0)
         val bearing = prefs.getFloat(PREF_CAMERA_BEARING, Float.NaN)
         val builder = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
             .target(LatLng(lat.toDouble(), lon.toDouble()))
@@ -1153,10 +1647,62 @@ class MapFragment : Fragment() {
         return builder.build()
     }
 
+    private fun isOfflineKeyNearCamera(
+        key: String,
+        camera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): Boolean {
+        if (!key.startsWith(OFFLINE_TILE_KEY)) return true
+        val target = camera?.target ?: return true
+        val info = offlineMaps.find { it.key == key } ?: return false
+        val bounds = tileServer?.getBounds(info.index) ?: return true
+        if (bounds.size < 4) return true
+
+        val north = bounds[0]
+        val south = bounds[1]
+        val east = bounds[2]
+        val west = bounds[3]
+        val latMargin = maxOf(0.05, kotlin.math.abs(north - south) * 0.35)
+        val lonMargin = maxOf(0.05, kotlin.math.abs(east - west) * 0.35)
+
+        return target.latitude in (south - latMargin)..(north + latMargin) &&
+            target.longitude in (west - lonMargin)..(east + lonMargin)
+    }
+
+    private fun sanitizeStartupSavedTile(
+        savedTile: String,
+        camera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): String {
+        if (!savedTile.startsWith(OFFLINE_TILE_KEY)) return savedTile
+        if (offlineMaps.none { it.key == savedTile }) return "osm"
+        return if (isOfflineKeyNearCamera(savedTile, camera)) {
+            savedTile
+        } else {
+            Log.i("OfflineMap", "Dropping startup offline base outside saved camera: $savedTile")
+            "osm"
+        }
+    }
+
+    private fun sanitizeStartupOverlayKeys(
+        savedOverlays: List<String>,
+        camera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): Set<String> {
+        val valid = linkedSetOf<String>()
+        savedOverlays.forEach { key ->
+            when {
+                !key.startsWith(OFFLINE_TILE_KEY) -> valid += key
+                offlineMaps.none { it.key == key } -> Unit
+                isOfflineKeyNearCamera(key, camera) -> valid += key
+                else -> Log.i("OfflineMap", "Dropping startup offline overlay outside saved camera: $key")
+            }
+        }
+        return valid
+    }
+
     private fun updateZoomLevel() {
+        val palette = currentTopBarPalette()
         val z = mapboxMap?.cameraPosition?.zoom?.toInt() ?: 0
         _binding?.btnZoomLevel?.text = "Z$z"
-        _binding?.btnZoomLevel?.setTextColor(0xFFFFFFFF.toInt())
+        _binding?.btnZoomLevel?.setTextColor(palette.primaryText)
     }
 
     fun applyCrosshairAndDistancePrefs() {
@@ -1185,6 +1731,7 @@ class MapFragment : Fragment() {
         if (prefs.getBoolean(PREF_BTN_BATTERY, false)) updateBatteryLevel()
         b.btnZoomLevel.visibility = if (prefs.getBoolean(PREF_BTN_ZOOM_LEVEL, false)) View.VISIBLE else View.GONE
         if (prefs.getBoolean(PREF_BTN_ZOOM_LEVEL, false)) updateZoomLevel()
+        b.btnMessages.visibility = if (prefs.getBoolean(PREF_BTN_MESSAGES, true)) View.VISIBLE else View.GONE
         // Update server dot color
         if (TraccarService.isRunning) {
             b.topBarServerDot.background?.setTint(0xFF4CAF50.toInt())
@@ -1195,6 +1742,7 @@ class MapFragment : Fragment() {
 
         // Reorder top bar buttons according to saved order
         applyTopBarOrder()
+        applyTopBarAppearance()
         applyLockButtonPrefs()
     }
 
@@ -1250,6 +1798,7 @@ class MapFragment : Fragment() {
             "map_switch" -> listOf(b.btnMapSwitch)
             "gps_dot"    -> listOf(b.topBarGpsDot)
             "server_dot" -> listOf(b.topBarServerDot)
+            "messages"   -> listOf(b.btnMessages)
             "settings"   -> listOf(b.btnSettings)
             else         -> emptyList()
         }
@@ -1301,14 +1850,112 @@ class MapFragment : Fragment() {
     }
 
     fun zoomIn() {
-        val cur = mapboxMap?.cameraPosition?.zoom ?: 14.0
-        userBaseZoom = (if (userBaseZoom > 0) userBaseZoom else cur) + 1.0
-        mapboxMap?.animateCamera(CameraUpdateFactory.zoomIn())
+        val currentZoom = mapboxMap?.cameraPosition?.zoom ?: 14.0
+        val baseZoom = if (userBaseZoom > 0) {
+            userBaseZoom
+        } else {
+            (currentZoom + currentAutoZoomDelta()).coerceIn(2.0, 20.0)
+        }
+        applyManualZoomPreference(baseZoom + 1.0)
     }
     fun zoomOut() {
-        val cur = mapboxMap?.cameraPosition?.zoom ?: 14.0
-        userBaseZoom = ((if (userBaseZoom > 0) userBaseZoom else cur) - 1.0).coerceAtLeast(2.0)
-        mapboxMap?.animateCamera(CameraUpdateFactory.zoomOut())
+        val currentZoom = mapboxMap?.cameraPosition?.zoom ?: 14.0
+        val baseZoom = if (userBaseZoom > 0) {
+            userBaseZoom
+        } else {
+            (currentZoom + currentAutoZoomDelta()).coerceIn(2.0, 20.0)
+        }
+        applyManualZoomPreference(baseZoom - 1.0)
+    }
+
+    private fun currentAutoZoomDelta(): Double {
+        if (autoZoomLevel <= 0) return 0.0
+        val maxDelta = autoZoomLevel * 0.4
+        return lastGpsSpeedKmh.coerceIn(0.0, 120.0) / 120.0 * maxDelta
+    }
+
+    private fun clampUserZoom(zoom: Double): Double = zoom.coerceIn(minUserZoom, maxUserZoom)
+
+    private fun sanitizeFollowZoom(candidate: Double?, fallback: Double): Double {
+        val safeFallback = clampUserZoom(fallback)
+        val value = candidate ?: return safeFallback
+        return if (value.isFinite() && value >= minRestorableZoom) {
+            clampUserZoom(value)
+        } else {
+            safeFallback
+        }
+    }
+
+    private fun isOfflineKeyRelevantForCamera(
+        key: String,
+        camera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): Boolean {
+        if (!key.startsWith(OFFLINE_TILE_KEY)) return true
+        val cam = camera ?: return true
+        val info = offlineMaps.find { it.key == key } ?: return false
+        val bounds = tileServer?.getBounds(info.index) ?: return true
+        if (bounds.size < 4) return true
+
+        val north = maxOf(bounds[0], bounds[1])
+        val south = minOf(bounds[0], bounds[1])
+        val east = maxOf(bounds[2], bounds[3])
+        val west = minOf(bounds[2], bounds[3])
+        val latMargin = maxOf(0.05, kotlin.math.abs(north - south) * 0.35)
+        val lonMargin = maxOf(0.05, kotlin.math.abs(east - west) * 0.35)
+        val target = cam.target ?: return true
+
+        return target.latitude in (south - latMargin)..(north + latMargin) &&
+            target.longitude in (west - lonMargin)..(east + lonMargin)
+    }
+
+    private fun sanitizeStartupBaseKey(
+        savedTile: String,
+        startupCamera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): String {
+        if (!savedTile.startsWith(OFFLINE_TILE_KEY)) return savedTile
+        if (offlineMaps.none { it.key == savedTile }) return "osm"
+        if (isOfflineKeyRelevantForCamera(savedTile, startupCamera)) return savedTile
+        Log.i("OfflineMap", "Dropping startup offline base outside saved camera: $savedTile")
+        return "osm"
+    }
+
+    private fun sanitizeStartupOverlayKeys(
+        savedOverlays: Collection<String>,
+        startupCamera: com.mapbox.mapboxsdk.camera.CameraPosition?
+    ): Set<String> {
+        return savedOverlays.filter { key ->
+            if (!key.startsWith(OFFLINE_TILE_KEY)) {
+                true
+            } else if (offlineMaps.none { it.key == key }) {
+                false
+            } else {
+                val keep = isOfflineKeyRelevantForCamera(key, startupCamera)
+                if (!keep) {
+                    Log.i("OfflineMap", "Dropping startup offline overlay outside saved camera: $key")
+                }
+                keep
+            }
+        }.toSet()
+    }
+
+    private fun applyManualZoomPreference(baseZoom: Double) {
+        val map = mapboxMap ?: return
+        val currentCam = map.cameraPosition
+        userBaseZoom = clampUserZoom(baseZoom)
+        val visibleZoom = if (autoZoomLevel > 0) {
+            clampUserZoom(userBaseZoom - currentAutoZoomDelta())
+        } else {
+            userBaseZoom
+        }
+        smoothedZoom = visibleZoom
+        val manualCam = com.mapbox.mapboxsdk.camera.CameraPosition.Builder()
+            .target(currentCam.target ?: lastKnownGpsPoint ?: LatLng(lastGpsLat, lastGpsLon))
+            .zoom(visibleZoom)
+            .bearing(currentCam.bearing)
+            .tilt(currentCam.tilt)
+            .build()
+        if (manualCam.zoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(manualCam)
+        map.animateCamera(CameraUpdateFactory.newCameraPosition(manualCam))
     }
 
     private fun isNetworkAvailable(): Boolean {
@@ -1475,10 +2122,11 @@ class MapFragment : Fragment() {
         val features = map.queryRenderedFeatures(screenPoint, LIVE_USERS_LAYER_ID)
         if (features.isNotEmpty()) {
             val props = features[0].properties() ?: return false
-            val name = props.get("name")?.asString ?: "?"
-            val speed = props.get("speed")?.asDouble ?: 0.0
-            val status = props.get("status")?.asString ?: "unknown"
-            showLiveUserPopup(name, speed, status, latLng, screenPoint)
+            val deviceId = props.get("deviceId")?.asInt ?: 0
+            val device = lastLiveDevices.firstOrNull { it.deviceId == deviceId }
+                ?: lastLiveDevices.firstOrNull { it.name == (props.get("name")?.asString ?: "") }
+                ?: return false
+            showLiveUserPopup(device, latLng, screenPoint)
             return true
         }
         return false
@@ -1501,17 +2149,25 @@ class MapFragment : Fragment() {
     }
 
     /** Show popup card near the marker on map */
-    private fun showLiveUserPopup(name: String, speed: Double, status: String, latLng: LatLng, screenPt: android.graphics.PointF) {
+    private fun showLiveUserPopup(
+        device: LiveUsersPoller.LiveDevice,
+        latLng: LatLng,
+        screenPt: android.graphics.PointF
+    ) {
         val ctx = context ?: return
-        val device = lastLiveDevices.find { it.name == name }
         val density = resources.displayMetrics.density
         val pad = (12 * density).toInt()
+        val topPalette = currentTopBarPalette()
+        val monitoringStatus = MonitoringPresenceStatus.fromCode(device.monitorStatusCode)
 
-        val stText = if (status == "online") "● Онлайн" else "○ Офлайн"
-        val stColor = if (status == "online") "#22C55E" else "#EF4444"
-        val spd = if (speed > 0) "➤ ${"%.0f".format(speed)} км/ч" else "🅿️ На стоянке"
-        val batt = device?.battery?.let { "$it%" } ?: "—"
-        val timeAgo = formatTimeAgo(device?.lastUpdate)
+        val stText = if (device.status == "online") "● Онлайн" else "○ Офлайн"
+        val stColor = if (device.status == "online") "#22C55E" else "#EF4444"
+        val spd = if (device.speed > 0) "➤ ${"%.0f".format(device.speed)} км/ч" else "🅿️ На стоянке"
+        val batt = device.battery?.let { "$it%" } ?: "—"
+        val timeAgo = formatTimeAgo(device.lastUpdate)
+        val groups = FavoritesGroupsRepository.getCached(ctx).groups
+            .filter { device.uniqueId.uppercase() in it.members }
+        fun colorHex(color: Int): String = String.format("#%06X", 0xFFFFFF and color)
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -1528,9 +2184,9 @@ class MapFragment : Fragment() {
         root.background = bg
 
         // Name header with PRO badge
-        val isPro = device?.plan == "full"
+        val isPro = device.plan == "full"
         root.addView(android.widget.TextView(ctx).apply {
-            text = if (isPro) "⭐ $name" else name
+            text = if (isPro) "⭐ ${device.name}" else device.name
             setTextColor(if (isPro) 0xFFFFD700.toInt() else Color.WHITE)
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
@@ -1539,6 +2195,7 @@ class MapFragment : Fragment() {
 
         // Info lines (no name duplication — it's already in the header above)
         val lines = listOf(
+            monitoringStatus.displayLabel to colorHex(monitoringStatus.accentColor),
             stText to stColor,
             "$timeAgo  •  $spd" to "#CCCCCC",
             "🔋 $batt" to "#CCCCCC",
@@ -1551,6 +2208,67 @@ class MapFragment : Fragment() {
                 textSize = 12f
             })
         }
+
+        val actionRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, (8 * density).toInt(), 0, 0)
+        }
+        fun actionButton(
+            text: String,
+            bgColor: Int,
+            layoutParams: android.widget.LinearLayout.LayoutParams? = null,
+            onClick: () -> Unit
+        ) =
+            com.google.android.material.button.MaterialButton(ctx).apply {
+                this.text = text
+                textSize = 11f
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                cornerRadius = (8 * density).toInt()
+                setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
+                setBackgroundColor(bgColor)
+                if (layoutParams != null) this.layoutParams = layoutParams
+                setOnClickListener {
+                    liveUserPopup?.dismiss()
+                    onClick()
+                }
+            }
+        actionRow.addView(actionButton("💬 Написать", topPalette.accent) {
+            openMonitoringConversation(
+                targetScope = MonitoringMessage.SCOPE_DIRECT,
+                targetId = device.uniqueId,
+                targetName = device.name,
+                openComposer = true
+            )
+        })
+        if (groups.isNotEmpty()) {
+            val lp = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = (8 * density).toInt() }
+            actionRow.addView(actionButton("👥 В группу", topPalette.success, lp) {
+                if (groups.size == 1) {
+                    val group = groups.first()
+                    openMonitoringConversation(
+                        targetScope = MonitoringMessage.SCOPE_GROUP,
+                        targetId = group.id,
+                        targetName = group.name,
+                        openComposer = true
+                    )
+                } else {
+                    showMonitoringGroupPicker(groups) { group ->
+                        openMonitoringConversation(
+                            targetScope = MonitoringMessage.SCOPE_GROUP,
+                            targetId = group.id,
+                            targetName = group.name,
+                            openComposer = true
+                        )
+                    }
+                }
+            })
+        }
+        root.addView(actionRow)
 
         // Measure view
         root.measure(
@@ -1573,11 +2291,990 @@ class MapFragment : Fragment() {
 
         popup.showAtLocation(mapView, android.view.Gravity.NO_GRAVITY, x, y)
         liveUserPopup = popup
+    }
 
-        // Auto-dismiss after 5 seconds
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            popup.dismiss()
-        }, 5000)
+    fun openMonitoringStatusPicker() {
+        val ctx = context ?: return
+        if (!LicenseManager.hasFullAccess(ctx)) {
+            LicenseManager.showLicenseRequired(ctx)
+            return
+        }
+        val statuses = MonitoringPresenceStatus.selectable()
+        val current = MonitoringRepository.getMyStatus(ctx)
+        val labels = statuses.map { status ->
+            if (status == MonitoringPresenceStatus.SOS) "${status.displayLabel}  beta"
+            else status.displayLabel
+        }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Статус мониторинга beta")
+            .setSingleChoiceItems(labels, statuses.indexOf(current).coerceAtLeast(0)) { dlg, which ->
+                val selected = statuses[which]
+                MonitoringRepository.saveMyStatus(ctx, selected)
+                dlg.dismiss()
+                Toast.makeText(ctx, "Статус: ${selected.displayLabel}", Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val auth = currentMonitoringAuth(ctx)
+                    val result = if (auth != null) {
+                        MonitoringApi.pushStatus(auth.first, auth.second, selected)
+                    } else {
+                        MonitoringApi.StatusResult(false, error = "no_sync")
+                    }
+                    if (!isAdded) return@launch
+                    withContext(Dispatchers.Main) {
+                        if (result.ok) {
+                            Toast.makeText(ctx, "Статус отправлен на сервер", Toast.LENGTH_SHORT).show()
+                        } else if (!result.supported) {
+                            Toast.makeText(ctx, "Статус сохранён локально, сервер beta ещё не обновлён", Toast.LENGTH_LONG).show()
+                        } else if (result.error == "no_sync") {
+                            Toast.makeText(ctx, "Статус сохранён локально. Подключите email для синхронизации.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    fun openMonitoringMessagesCenter() {
+        val ctx = context ?: return
+        val palette = currentModalPalette()
+        MonitoringRepository.markAllRead(ctx)
+        refreshMonitoringMessagesUi()
+        hideIncomingMessagePreview(immediate = true)
+        val messages = MonitoringRepository.getMessages(ctx)
+
+        data class ConversationSummary(
+            val scope: String,
+            val targetId: String,
+            val targetName: String,
+            val lastMessage: MonitoringMessage,
+            val unreadCount: Int
+        )
+
+        val conversations = messages
+            .groupBy { "${it.scope}:${it.targetId}" }
+            .values
+            .mapNotNull { thread ->
+                val last = thread.maxByOrNull { it.sentAt } ?: return@mapNotNull null
+                val displayName = when {
+                    last.targetName.isNotBlank() -> last.targetName
+                    last.scope == MonitoringMessage.SCOPE_GROUP -> "Группа"
+                    else -> last.senderName.ifBlank { "Диалог" }
+                }
+                ConversationSummary(
+                    scope = last.scope,
+                    targetId = last.targetId,
+                    targetName = displayName,
+                    lastMessage = last,
+                    unreadCount = thread.count { it.incoming && !it.read }
+                )
+            }
+            .sortedByDescending { it.lastMessage.sentAt }
+
+        val dialog = BottomSheetDialog(ctx, R.style.BottomSheetTheme)
+        val scroll = android.widget.ScrollView(ctx)
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((16 * resources.displayMetrics.density).toInt(), (16 * resources.displayMetrics.density).toInt(), (16 * resources.displayMetrics.density).toInt(), (24 * resources.displayMetrics.density).toInt())
+            setBackgroundColor(palette.surface)
+        }
+        scroll.addView(root)
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Сообщения мониторинга beta"
+            setTextColor(palette.textPrimary)
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "Текст, emoji и GPX-вложения. Чтобы написать участнику, нажмите на его маркер на карте."
+            setTextColor(palette.textMuted)
+            textSize = 12f
+            setPadding(0, (6 * resources.displayMetrics.density).toInt(), 0, (12 * resources.displayMetrics.density).toInt())
+        })
+        val attachmentUsage = MonitoringRepository.getAttachmentCacheUsageBytes(ctx)
+        val attachmentLimit = MonitoringRepository.getAttachmentCacheLimitMb(ctx)
+        root.addView(android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(android.widget.TextView(ctx).apply {
+                text = "История: 120 сообщений • вложения: ${MonitoringRepository.formatCacheSize(attachmentUsage)} / ${attachmentLimit} МБ"
+                setTextColor(palette.textHint)
+                textSize = 11f
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(com.google.android.material.button.MaterialButton(ctx).apply {
+                text = "Очистить все"
+                textSize = 11f
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                cornerRadius = (8 * resources.displayMetrics.density).toInt()
+                setBackgroundColor(palette.error)
+                setOnClickListener {
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle("Очистить сообщения")
+                        .setMessage("Удалить всю локальную историю сообщений на этом устройстве?")
+                        .setPositiveButton("Удалить") { _, _ ->
+                            MonitoringRepository.clearMessages(ctx)
+                            refreshMonitoringMessagesUi()
+                            dialog.dismiss()
+                            openMonitoringMessagesCenter()
+                        }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                }
+            })
+        })
+
+        if (conversations.isEmpty()) {
+            root.addView(android.widget.TextView(ctx).apply {
+                text = "Диалогов пока нет. Начните с нажатия на участника на карте."
+                setTextColor(palette.textHint)
+                textSize = 13f
+                setPadding(0, (12 * resources.displayMetrics.density).toInt(), 0, 0)
+            })
+        } else {
+            conversations.forEach { summary ->
+                val message = summary.lastMessage
+                val card = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    setPadding((12 * resources.displayMetrics.density).toInt(), (10 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt(), (10 * resources.displayMetrics.density).toInt())
+                    background = GradientDrawable().apply {
+                        cornerRadius = 12f * resources.displayMetrics.density
+                        setColor(palette.surfaceVariant)
+                        setStroke(
+                            (1 * resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                            if (summary.unreadCount > 0) palette.accent else palette.divider
+                        )
+                    }
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        topMargin = (8 * resources.displayMetrics.density).toInt()
+                    }
+                }
+                val who = buildString {
+                    if (message.scope == MonitoringMessage.SCOPE_GROUP) {
+                        append("👥 ")
+                    } else {
+                        append("💬 ")
+                    }
+                    append(summary.targetName)
+                }
+                val meta = buildString {
+                    append(MonitoringTime.formatShort(message.sentAt))
+                    if (summary.unreadCount > 0) {
+                        append("  •  ")
+                        append("новых: ${summary.unreadCount}")
+                    }
+                }
+                val preview = buildString {
+                    if (message.scope == MonitoringMessage.SCOPE_GROUP && message.incoming) {
+                        append(message.senderName)
+                        append(": ")
+                    } else if (!message.incoming) {
+                        append("Вы: ")
+                    }
+                    append(message.previewText)
+                    if (!message.incoming && message.delivery == MonitoringMessage.DELIVERY_FAILED) {
+                        append("  [не отправлено]")
+                    }
+                }
+                card.addView(android.widget.TextView(ctx).apply {
+                    text = who
+                    setTextColor(palette.textPrimary)
+                    textSize = 13f
+                    setTypeface(typeface, android.graphics.Typeface.BOLD)
+                })
+                card.addView(android.widget.TextView(ctx).apply {
+                    text = meta
+                    setTextColor(palette.textMuted)
+                    textSize = 11f
+                    setPadding(0, (2 * resources.displayMetrics.density).toInt(), 0, 0)
+                })
+                card.addView(android.widget.TextView(ctx).apply {
+                    text = preview
+                    setTextColor(palette.textSecondary)
+                    textSize = 14f
+                    setPadding(0, (8 * resources.displayMetrics.density).toInt(), 0, 0)
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+                card.setOnClickListener {
+                    dialog.dismiss()
+                    openMonitoringConversation(
+                        targetScope = summary.scope,
+                        targetId = summary.targetId,
+                        targetName = summary.targetName
+                    )
+                }
+                root.addView(card)
+            }
+        }
+
+        dialog.setContentView(scroll)
+        dialog.show()
+        prepareModalSheet(dialog, scroll)
+    }
+
+    private fun openMonitoringConversation(
+        targetScope: String,
+        targetId: String,
+        targetName: String,
+        openComposer: Boolean = false
+    ) {
+        val ctx = context ?: return
+        val palette = currentModalPalette()
+        val density = resources.displayMetrics.density
+        val dialog = BottomSheetDialog(ctx, R.style.BottomSheetTheme)
+
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(palette.surface)
+        }
+        val header = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+        }
+        header.addView(android.widget.TextView(ctx).apply {
+            text = if (targetScope == MonitoringMessage.SCOPE_GROUP) "👥 $targetName" else "💬 $targetName"
+            setTextColor(palette.textPrimary)
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        header.addView(android.widget.TextView(ctx).apply {
+            text = if (targetScope == MonitoringMessage.SCOPE_GROUP) {
+                "beta • текст, emoji и GPX-вложения"
+            } else {
+                "beta • текст и emoji"
+            }
+            setTextColor(palette.textMuted)
+            textSize = 12f
+            setPadding(0, (4 * density).toInt(), 0, 0)
+        })
+        root.addView(header)
+
+        val scroll = android.widget.ScrollView(ctx).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        val messagesContainer = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((16 * density).toInt(), (4 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+        }
+        scroll.addView(messagesContainer)
+        root.addView(scroll)
+
+        val composer = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding((12 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (12 * density).toInt())
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val attachBtn = com.google.android.material.button.MaterialButton(ctx).apply {
+            text = "📎"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setBackgroundColor(palette.success)
+            cornerRadius = (8 * density).toInt()
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (8 * density).toInt() }
+        }
+        val input = android.widget.EditText(ctx).apply {
+            hint = "Сообщение"
+            minLines = 1
+            maxLines = 4
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textHint)
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val sendBtn = com.google.android.material.button.MaterialButton(ctx).apply {
+            text = "Отпр."
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setBackgroundColor(palette.accent)
+            cornerRadius = (8 * density).toInt()
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = (8 * density).toInt() }
+        }
+        composer.addView(attachBtn)
+        composer.addView(input)
+        composer.addView(sendBtn)
+        root.addView(composer)
+
+        fun rebuildMessages() {
+            messagesContainer.removeAllViews()
+            val threadMessages = MonitoringRepository.getMessages(ctx)
+                .filter { it.scope == targetScope && it.targetId == targetId }
+                .sortedBy { it.sentAt }
+            if (threadMessages.isEmpty()) {
+                messagesContainer.addView(android.widget.TextView(ctx).apply {
+                    text = "Сообщений пока нет"
+                    setTextColor(palette.textHint)
+                    textSize = 13f
+                    setPadding(0, (12 * density).toInt(), 0, 0)
+                })
+            } else {
+                threadMessages.forEach { message ->
+                    val wrap = android.widget.LinearLayout(ctx).apply {
+                        orientation = android.widget.LinearLayout.VERTICAL
+                        gravity = if (message.incoming) android.view.Gravity.START else android.view.Gravity.END
+                        layoutParams = android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                        ).apply { topMargin = (8 * density).toInt() }
+                    }
+                    val bubble = android.widget.LinearLayout(ctx).apply {
+                        orientation = android.widget.LinearLayout.VERTICAL
+                        setPadding((12 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt())
+                        background = GradientDrawable().apply {
+                            cornerRadius = 14f * density
+                            setColor(if (message.incoming) palette.surfaceVariant else 0x262196F3)
+                            setStroke((1 * density).toInt().coerceAtLeast(1), if (message.incoming) palette.divider else palette.accent)
+                        }
+                    }
+                    if (targetScope == MonitoringMessage.SCOPE_GROUP && message.incoming) {
+                        bubble.addView(android.widget.TextView(ctx).apply {
+                            text = "${MonitoringPresenceStatus.fromCode(message.senderStatusCode).emoji} ${message.senderName}"
+                            setTextColor(palette.accent)
+                            textSize = 11f
+                            setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        })
+                    }
+                    val attachment = message.attachment
+                    if (attachment != null) {
+                        bubble.addView(android.widget.TextView(ctx).apply {
+                            text = attachment.previewText
+                            setTextColor(palette.textPrimary)
+                            textSize = 14f
+                            setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        })
+                        bubble.addView(android.widget.TextView(ctx).apply {
+                            val hasFile = attachment.localPath?.let { java.io.File(it).exists() } == true
+                            text = buildString {
+                                append(MonitoringRepository.formatCacheSize(attachment.sizeBytes))
+                                append(" • ")
+                                append(if (hasFile) "в кеше" else "удалено из кеша")
+                            }
+                            setTextColor(palette.textSecondary)
+                            textSize = 11f
+                            setPadding(0, (4 * density).toInt(), 0, 0)
+                        })
+                        if (message.text.isNotBlank() && message.text != attachment.previewText) {
+                            bubble.addView(android.widget.TextView(ctx).apply {
+                                text = message.text
+                                setTextColor(palette.textPrimary)
+                                textSize = 14f
+                                setPadding(0, (6 * density).toInt(), 0, 0)
+                            })
+                        }
+                        bubble.addView(com.google.android.material.button.MaterialButton(ctx).apply {
+                            text = "Импортировать"
+                            isAllCaps = false
+                            setTextColor(Color.WHITE)
+                            setBackgroundColor(palette.accent)
+                            cornerRadius = (8 * density).toInt()
+                            textSize = 11f
+                            layoutParams = android.widget.LinearLayout.LayoutParams(
+                                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                            ).apply { topMargin = (8 * density).toInt() }
+                            setOnClickListener { openMonitoringAttachment(message) }
+                        })
+                    } else {
+                        bubble.addView(android.widget.TextView(ctx).apply {
+                            text = message.text
+                            setTextColor(palette.textPrimary)
+                            textSize = 14f
+                        })
+                    }
+                    bubble.addView(android.widget.TextView(ctx).apply {
+                        text = buildString {
+                            append(MonitoringTime.formatShort(message.sentAt))
+                            if (!message.incoming && message.delivery == MonitoringMessage.DELIVERY_FAILED) {
+                                append("  •  не отправлено")
+                            }
+                        }
+                        setTextColor(palette.textMuted)
+                        textSize = 10f
+                        setPadding(0, (4 * density).toInt(), 0, 0)
+                    })
+                    wrap.addView(bubble)
+                    messagesContainer.addView(wrap)
+                }
+            }
+            scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        }
+
+        attachBtn.setOnClickListener {
+            showMonitoringAttachmentPicker(targetScope, targetId, targetName) {
+                rebuildMessages()
+            }
+        }
+        sendBtn.setOnClickListener {
+            val text = input.text?.toString()?.trim().orEmpty()
+            if (text.isBlank()) return@setOnClickListener
+            sendMonitoringMessage(targetScope, targetId, targetName, text) {
+                input.setText("")
+                rebuildMessages()
+            }
+        }
+
+        dialog.setContentView(root)
+        dialog.show()
+        prepareModalSheet(dialog, root)
+        rebuildMessages()
+        attachBtn.visibility = if (targetScope == MonitoringMessage.SCOPE_GROUP) View.VISIBLE else View.GONE
+        if (openComposer) {
+            input.requestFocus()
+        }
+    }
+
+    private fun showMonitoringGroupPicker(
+        groups: List<FavoritesGroup>,
+        onPick: (FavoritesGroup) -> Unit
+    ) {
+        val ctx = context ?: return
+        val labels = groups.map { "${it.name} (${it.members.size})" }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Выберите группу")
+            .setItems(labels) { _, which -> onPick(groups[which]) }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showMonitoringComposeDialog(
+        title: String,
+        targetScope: String,
+        targetId: String,
+        targetName: String
+    ) {
+        val ctx = context ?: return
+        if (!LicenseManager.hasFullAccess(ctx)) {
+            LicenseManager.showLicenseRequired(ctx)
+            return
+        }
+        val density = resources.displayMetrics.density
+        val container = android.widget.FrameLayout(ctx).apply {
+            setPadding((18 * density).toInt(), (8 * density).toInt(), (18 * density).toInt(), 0)
+        }
+        val input = android.widget.EditText(ctx).apply {
+            hint = "Текст сообщения, можно с emoji"
+            minLines = 3
+            maxLines = 5
+            setTextColor(currentModalPalette().textPrimary)
+            setHintTextColor(currentModalPalette().textHint)
+            setBackgroundColor(0x00000000)
+        }
+        container.addView(input)
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("$title  beta")
+            .setView(container)
+            .setPositiveButton("Отправить") { _, _ ->
+                val text = input.text?.toString()?.trim().orEmpty()
+                if (text.isBlank()) {
+                    Toast.makeText(ctx, "Введите текст сообщения", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                sendMonitoringMessage(targetScope, targetId, targetName, text)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private data class MonitoringAttachmentDraft(
+        val type: MonitoringAttachmentType,
+        val name: String,
+        val payload: String
+    )
+
+    private fun showMonitoringAttachmentPicker(
+        targetScope: String,
+        targetId: String,
+        targetName: String,
+        onComplete: (() -> Unit)? = null
+    ) {
+        val ctx = context ?: return
+        if (targetScope != MonitoringMessage.SCOPE_GROUP) {
+            Toast.makeText(ctx, "В beta вложения пока отправляются только в группу", Toast.LENGTH_LONG).show()
+            return
+        }
+        val options = listOfNotNull(
+            buildMonitoringAttachmentDraft(MonitoringAttachmentType.ROUTE),
+            buildMonitoringAttachmentDraft(MonitoringAttachmentType.TRACK),
+            buildMonitoringAttachmentDraft(MonitoringAttachmentType.WAYPOINTS)
+        )
+        if (options.isEmpty()) {
+            Toast.makeText(ctx, "На карте нет маршрута, трека или точек для отправки", Toast.LENGTH_LONG).show()
+            return
+        }
+        val labels = options.map { draft ->
+            "${draft.type.emoji} ${draft.type.label}: ${draft.name}"
+        }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Вложение мониторинга beta")
+            .setItems(labels) { _, which ->
+                sendMonitoringAttachment(
+                    targetScope = targetScope,
+                    targetId = targetId,
+                    targetName = targetName,
+                    draft = options[which],
+                    onComplete = onComplete
+                )
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun buildMonitoringAttachmentDraft(type: MonitoringAttachmentType): MonitoringAttachmentDraft? {
+        val ctx = context ?: return null
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val timestamp = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        return when (type) {
+            MonitoringAttachmentType.ROUTE -> {
+                if (waypoints.isEmpty()) return null
+                val routeName = prefs.getString(PREF_ROUTE_NAME, null)
+                    ?.ifBlank { null }
+                    ?: "Маршрут $timestamp"
+                MonitoringAttachmentDraft(
+                    type = type,
+                    name = routeName,
+                    payload = GpxParser.writeFullGpx(
+                        routeWaypoints = waypoints.toList(),
+                        name = routeName
+                    )
+                )
+            }
+            MonitoringAttachmentType.TRACK -> {
+                val loaded = loadedTrackPoints.map { it.latitude to it.longitude }
+                    .filterNot { it.first == 0.0 && it.second == 0.0 }
+                val recorded = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+                val trackPoints = if (loaded.isNotEmpty()) loaded else recorded
+                if (trackPoints.isEmpty()) return null
+                val trackName = if (loaded.isNotEmpty()) {
+                    prefs.getString(PREF_LOADED_TRACK_NAME, null)?.ifBlank { null } ?: "Трек $timestamp"
+                } else {
+                    "Записанный трек $timestamp"
+                }
+                MonitoringAttachmentDraft(
+                    type = type,
+                    name = trackName,
+                    payload = GpxParser.writeGpx(trackPoints, trackName)
+                )
+            }
+            MonitoringAttachmentType.WAYPOINTS -> {
+                if (userMarkers.isEmpty()) return null
+                val pointsName = "Точки $timestamp"
+                val payloadPoints = userMarkers.mapIndexed { idx, p ->
+                    Waypoint(
+                        name = p.name.ifBlank { "WP%02d".format(idx + 1) },
+                        lat = p.position.latitude,
+                        lon = p.position.longitude,
+                        index = idx + 1,
+                        color = p.color,
+                        symbol = p.symbol,
+                        proximity = p.proximity
+                    )
+                }
+                MonitoringAttachmentDraft(
+                    type = type,
+                    name = pointsName,
+                    payload = GpxParser.writeWaypointsGpx(payloadPoints, pointsName)
+                )
+            }
+            MonitoringAttachmentType.GPX -> null
+        }
+    }
+
+    private fun sendMonitoringAttachment(
+        targetScope: String,
+        targetId: String,
+        targetName: String,
+        draft: MonitoringAttachmentDraft,
+        onComplete: (() -> Unit)? = null
+    ) {
+        val ctx = context ?: return
+        if (targetScope != MonitoringMessage.SCOPE_GROUP) {
+            Toast.makeText(ctx, "В beta вложения пока отправляются только в группу", Toast.LENGTH_LONG).show()
+            return
+        }
+        val auth = currentMonitoringAuth(ctx)
+        if (auth == null) {
+            Toast.makeText(ctx, "Подключите email в мониторинге для отправки вложений", Toast.LENGTH_LONG).show()
+            return
+        }
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val localId = "attach_" + System.currentTimeMillis().toString(36)
+        val myName = prefs.getString(PREF_TRACCAR_DEVICE_NAME, "")?.ifBlank { "Вы" } ?: "Вы"
+        val myUniqueId = prefs.getString(PREF_TRACCAR_DEVICE_ID, "")?.ifBlank { null }
+        val myStatusCode = MonitoringRepository.getMyStatus(ctx).code
+            .takeIf { it != MonitoringPresenceStatus.NONE.code }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = GroupShareApi.sendToGroup(
+                email = auth.first,
+                syncKey = auth.second,
+                groupId = targetId,
+                name = draft.name,
+                gpxData = draft.payload,
+                type = draft.type.code
+            )
+            val attachment = MonitoringRepository.cacheAttachment(
+                context = ctx,
+                type = draft.type,
+                name = draft.name,
+                payload = draft.payload,
+                remoteId = result.shareId
+            ) ?: MonitoringAttachment(
+                attachmentId = result.shareId ?: localId,
+                type = draft.type.code,
+                name = draft.name,
+                sizeBytes = draft.payload.toByteArray().size.toLong(),
+                remoteId = result.shareId,
+                cachedAt = System.currentTimeMillis()
+            )
+            MonitoringRepository.addLocalMessage(
+                ctx,
+                MonitoringMessage(
+                    messageId = result.shareId ?: localId,
+                    scope = targetScope,
+                    targetId = targetId,
+                    targetName = targetName,
+                    senderUniqueId = myUniqueId,
+                    senderName = myName,
+                    senderStatusCode = myStatusCode,
+                    text = attachment.previewText,
+                    kind = MonitoringMessageKind.ATTACHMENT.code,
+                    attachment = attachment,
+                    sentAt = System.currentTimeMillis(),
+                    incoming = false,
+                    read = true,
+                    delivery = if (result.ok) MonitoringMessage.DELIVERY_SENT else MonitoringMessage.DELIVERY_FAILED
+                )
+            )
+            withContext(Dispatchers.Main) {
+                refreshMonitoringMessagesUi()
+                onComplete?.invoke()
+                val toastText = when {
+                    result.ok -> "${draft.type.label} отправлен"
+                    result.error == "auth_error" -> "Ошибка авторизации. Проверьте email и ключ."
+                    result.error == "too_large" -> "Вложение слишком большое для beta-сервера"
+                    else -> "${draft.type.label} не отправлен: ${result.error ?: "сетевая ошибка"}"
+                }
+                Toast.makeText(ctx, toastText, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun openMonitoringAttachment(message: MonitoringMessage) {
+        val ctx = context ?: return
+        val attachment = message.attachment ?: return
+        val localPath = attachment.localPath
+        if (localPath.isNullOrBlank()) {
+            Toast.makeText(ctx, "Вложение не сохранено в кеше", Toast.LENGTH_LONG).show()
+            return
+        }
+        val file = java.io.File(localPath)
+        if (!file.exists()) {
+            Toast.makeText(ctx, "Вложение удалено из кеша. Увеличьте лимит или попросите прислать снова.", Toast.LENGTH_LONG).show()
+            return
+        }
+        MonitoringRepository.touchAttachment(ctx, attachment)
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { GpxParser.parseGpxFull(file.inputStream()) }.getOrNull()
+            }
+            if (!isAdded || result == null) {
+                Toast.makeText(ctx, "Не удалось прочитать вложение", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val type = attachment.typeInfo
+            when (type) {
+                MonitoringAttachmentType.ROUTE -> {
+                    if (result.waypoints.isEmpty()) {
+                        Toast.makeText(ctx, "В маршруте нет точек", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    loadWaypointsToMap(result.waypoints, attachment.name)
+                    Toast.makeText(ctx, "Маршрут загружен: ${attachment.name}", Toast.LENGTH_SHORT).show()
+                }
+                MonitoringAttachmentType.WAYPOINTS -> {
+                    if (result.waypoints.isEmpty()) {
+                        Toast.makeText(ctx, "Во вложении нет точек", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    loadUserPointsToMap(result.waypoints, attachment.name)
+                    Toast.makeText(ctx, "Точки загружены: ${attachment.name}", Toast.LENGTH_SHORT).show()
+                }
+                MonitoringAttachmentType.TRACK -> {
+                    if (result.trackPoints.isEmpty()) {
+                        Toast.makeText(ctx, "Во вложении нет трека", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    loadTrackToMap(result.trackPoints, attachment.name)
+                    Toast.makeText(ctx, "Трек загружен: ${attachment.name}", Toast.LENGTH_SHORT).show()
+                }
+                MonitoringAttachmentType.GPX -> {
+                    var loadedAny = false
+                    if (result.waypoints.isNotEmpty()) {
+                        loadWaypointsToMap(result.waypoints, attachment.name)
+                        loadedAny = true
+                    }
+                    if (result.trackPoints.isNotEmpty()) {
+                        loadTrackToMap(result.trackPoints, attachment.name)
+                        loadedAny = true
+                    }
+                    if (loadedAny) {
+                        Toast.makeText(ctx, "GPX загружен: ${attachment.name}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(ctx, "Во вложении нет данных", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendMonitoringMessage(
+        targetScope: String,
+        targetId: String,
+        targetName: String,
+        text: String,
+        onComplete: (() -> Unit)? = null
+    ) {
+        val ctx = context ?: return
+        val auth = currentMonitoringAuth(ctx)
+        if (auth == null) {
+            Toast.makeText(ctx, "Подключите email в мониторинге для отправки сообщений", Toast.LENGTH_LONG).show()
+            return
+        }
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val clientId = System.currentTimeMillis().toString(36) + "_" + (Math.random() * 1e6).toLong().toString(36)
+        val myName = prefs.getString(PREF_TRACCAR_DEVICE_NAME, "")?.ifBlank { "Вы" } ?: "Вы"
+        val myUniqueId = prefs.getString(PREF_TRACCAR_DEVICE_ID, "")?.ifBlank { null }
+        val myStatusCode = MonitoringRepository.getMyStatus(ctx).code
+            .takeIf { it != MonitoringPresenceStatus.NONE.code }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = when (targetScope) {
+                MonitoringMessage.SCOPE_GROUP -> MonitoringApi.sendGroupMessage(
+                    email = auth.first,
+                    syncKey = auth.second,
+                    groupId = targetId,
+                    groupName = targetName,
+                    text = text,
+                    senderStatusCode = myStatusCode,
+                    clientMessageId = clientId
+                )
+                else -> MonitoringApi.sendDirectMessage(
+                    email = auth.first,
+                    syncKey = auth.second,
+                    targetUniqueId = targetId,
+                    targetName = targetName,
+                    text = text,
+                    senderStatusCode = myStatusCode,
+                    clientMessageId = clientId
+                )
+            }
+            val localMessage = MonitoringMessage(
+                messageId = result.messageId ?: clientId,
+                clientMessageId = result.clientMessageId ?: clientId,
+                scope = targetScope,
+                targetId = targetId,
+                targetName = targetName,
+                senderUniqueId = myUniqueId,
+                senderName = myName,
+                senderStatusCode = myStatusCode,
+                text = text,
+                sentAt = System.currentTimeMillis(),
+                incoming = false,
+                read = true,
+                delivery = if (result.ok) MonitoringMessage.DELIVERY_SENT else MonitoringMessage.DELIVERY_FAILED
+            )
+            MonitoringRepository.addLocalMessage(ctx, localMessage)
+            withContext(Dispatchers.Main) {
+                refreshMonitoringMessagesUi()
+                onComplete?.invoke()
+                val toastText = when {
+                    result.ok -> "Сообщение отправлено"
+                    !result.supported -> "Сообщения сохранены локально, сервер beta ещё не поддерживает чат"
+                    result.error == "auth_error" -> "Ошибка авторизации. Проверьте email и ключ."
+                    else -> "Сообщение не отправлено: ${result.error ?: "сетевая ошибка"}"
+                }
+                Toast.makeText(ctx, toastText, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun refreshMonitoringMessagesUi() {
+        val ctx = context ?: return
+        val b = _binding ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(PREF_BTN_MESSAGES, true)) return
+        val palette = currentTopBarPalette()
+        val unread = MonitoringRepository.getUnreadCount(ctx)
+        b.btnMessages.text = if (unread > 99) "💬99+" else if (unread > 0) "💬$unread" else "💬"
+        b.btnMessages.setTextColor(if (unread > 0) palette.accent else palette.mutedText)
+    }
+
+    private fun hideIncomingMessagePreview(immediate: Boolean = false) {
+        val b = _binding ?: return
+        monitoringPreviewHideRunnable?.let { monitoringUiHandler.removeCallbacks(it) }
+        monitoringPreviewHideRunnable = null
+        if (immediate) {
+            b.messagePreviewCard.animate().cancel()
+            b.messagePreviewCard.alpha = 0f
+            b.messagePreviewCard.visibility = View.GONE
+            return
+        }
+        b.messagePreviewCard.animate()
+            .alpha(0f)
+            .setDuration(180)
+            .withEndAction { if (isAdded) b.messagePreviewCard.visibility = View.GONE }
+            .start()
+    }
+
+    private fun showIncomingMessagePreview(message: MonitoringMessage) {
+        if (!message.incoming) return
+        val b = _binding ?: return
+        val palette = currentModalPalette()
+        val senderStatus = MonitoringPresenceStatus.fromCode(message.senderStatusCode)
+        b.messagePreviewSender.text = buildString {
+            append(senderStatus.emoji)
+            append(" ")
+            append(message.senderName)
+            if (message.scope == MonitoringMessage.SCOPE_GROUP) {
+                append(" • ")
+                append(message.targetName)
+            }
+        }
+        b.messagePreviewText.text = message.previewText
+        b.messagePreviewCard.background = GradientDrawable().apply {
+            cornerRadius = 12f * resources.displayMetrics.density
+            setColor(0xE61A1A2E.toInt())
+            setStroke((1 * resources.displayMetrics.density).toInt().coerceAtLeast(1), palette.accent)
+        }
+        b.messagePreviewCard.visibility = View.VISIBLE
+        b.messagePreviewCard.alpha = 0f
+        b.messagePreviewCard.setOnClickListener {
+            hideIncomingMessagePreview(immediate = true)
+            openMonitoringMessagesCenter()
+        }
+        b.messagePreviewCard.animate().alpha(1f).setDuration(140).start()
+        monitoringPreviewHideRunnable?.let { monitoringUiHandler.removeCallbacks(it) }
+        monitoringPreviewHideRunnable = Runnable { hideIncomingMessagePreview() }
+        monitoringUiHandler.postDelayed(monitoringPreviewHideRunnable!!, 2000L)
+    }
+
+    private fun currentMonitoringAuth(ctx: Context): Pair<String, String>? {
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null).orEmpty()
+        val key = prefs.getString(PREF_SYNC_API_KEY, null).orEmpty()
+        return if (email.isBlank() || key.isBlank()) null else email to key
+    }
+
+    private fun shouldRunMonitoringMessages(ctx: Context): Boolean {
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(PREF_LIVE_USERS_ENABLED, false)) return false
+        if (!LicenseManager.hasFullAccess(ctx)) return false
+        return currentMonitoringAuth(ctx) != null
+    }
+
+    private suspend fun syncMonitoringMessages(showPreview: Boolean) {
+        val ctx = context ?: return
+        val auth = currentMonitoringAuth(ctx) ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val myUniqueId = prefs.getString(PREF_TRACCAR_DEVICE_ID, null)
+            ?.ifBlank { null }
+            ?: LicenseManager.getShortDeviceId(ctx)
+        val result = withContext(Dispatchers.IO) {
+            MonitoringApi.fetchInbox(
+                email = auth.first,
+                syncKey = auth.second,
+                myUniqueId = myUniqueId,
+                afterCursor = MonitoringRepository.getLastCursor(ctx)
+            )
+        }
+        if (!isAdded || _binding == null) return
+        if (!result.ok) return
+        result.cursor?.let { MonitoringRepository.saveLastCursor(ctx, it) }
+        val merge = MonitoringRepository.mergeIncoming(ctx, result.messages)
+        refreshMonitoringMessagesUi()
+        if (showPreview) {
+            merge.newIncoming.lastOrNull()?.let { showIncomingMessagePreview(it) }
+        }
+    }
+
+    private suspend fun syncMonitoringAttachments(showPreview: Boolean) {
+        val ctx = context ?: return
+        val auth = currentMonitoringAuth(ctx) ?: return
+        val entries = withContext(Dispatchers.IO) {
+            GroupShareApi.getInbox(auth.first, auth.second)
+        }
+        if (!isAdded || _binding == null || entries.isEmpty()) return
+        val incomingMessages = withContext(Dispatchers.IO) {
+            entries.sortedBy { MonitoringTime.parseToMillis(it.timestamp) }.mapNotNull { entry ->
+                val payload = GroupShareApi.downloadData(auth.first, auth.second, entry.shareId) ?: return@mapNotNull null
+                val attachmentType = MonitoringAttachmentType.fromCode(entry.type)
+                val attachment = MonitoringRepository.cacheAttachment(
+                    context = ctx,
+                    type = attachmentType,
+                    name = entry.name,
+                    payload = payload,
+                    remoteId = entry.shareId
+                ) ?: return@mapNotNull null
+                GroupShareApi.ack(auth.first, auth.second, entry.shareId)
+                MonitoringMessage(
+                    messageId = entry.shareId,
+                    scope = MonitoringMessage.SCOPE_GROUP,
+                    targetId = entry.groupId?.ifBlank { null } ?: "group_share",
+                    targetName = entry.groupName?.ifBlank { null } ?: "Группа",
+                    senderUniqueId = entry.senderUniqueId,
+                    senderName = entry.senderName.ifBlank { "Участник" },
+                    text = attachment.previewText,
+                    kind = MonitoringMessageKind.ATTACHMENT.code,
+                    attachment = attachment,
+                    sentAt = MonitoringTime.parseToMillis(entry.timestamp).takeIf { it > 0L } ?: System.currentTimeMillis(),
+                    incoming = true,
+                    read = false
+                )
+            }
+        }
+        if (!isAdded || _binding == null || incomingMessages.isEmpty()) return
+        val merge = MonitoringRepository.mergeIncoming(ctx, incomingMessages)
+        refreshMonitoringMessagesUi()
+        if (showPreview) {
+            merge.newIncoming.lastOrNull()?.let { showIncomingMessagePreview(it) }
+        }
+    }
+
+    fun startMonitoringMessagesPolling() {
+        val ctx = context ?: return
+        if (!shouldRunMonitoringMessages(ctx)) {
+            stopMonitoringMessagesPolling()
+            refreshMonitoringMessagesUi()
+            return
+        }
+        if (monitoringMessagesJob?.isActive == true) return
+        monitoringMessagesJob = viewLifecycleOwner.lifecycleScope.launch {
+            syncMonitoringMessages(showPreview = false)
+            syncMonitoringAttachments(showPreview = false)
+            while (isActive) {
+                delay(6000L)
+                syncMonitoringMessages(showPreview = true)
+                syncMonitoringAttachments(showPreview = true)
+            }
+        }
+    }
+
+    fun stopMonitoringMessagesPolling() {
+        monitoringMessagesJob?.cancel()
+        monitoringMessagesJob = null
     }
 
     /** Called from loadTileStyle */
@@ -1609,11 +3306,18 @@ class MapFragment : Fragment() {
         return Color.parseColor("#888888")
     }
 
-    private fun createLiveUserBitmap(name: String, status: String = "online", lastUpdate: String? = null, plan: String? = null): Bitmap {
+    private fun createLiveUserBitmap(
+        name: String,
+        status: String = "online",
+        lastUpdate: String? = null,
+        plan: String? = null,
+        monitorStatusCode: String? = null
+    ): Bitmap {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val markerSizeScale = prefs?.getInt(PREF_LIVE_USER_SIZE, DEFAULT_LIVE_USER_SIZE) ?: DEFAULT_LIVE_USER_SIZE
         val density = resources.displayMetrics.density
         val isPro = plan == "full"
+        val monitoringStatus = MonitoringPresenceStatus.fromCode(monitorStatusCode)
 
         val circleSizePx = (markerScaleToDp(markerSizeScale) * density).toInt().coerceAtLeast(28)
         val cr = circleSizePx / 2f  // circle radius
@@ -1632,7 +3336,11 @@ class MapFragment : Fragment() {
         val textHeight = labelPaint.descent() - labelPaint.ascent()
         val textGap = 4 * density
 
-        val markerColor = liveUserMarkerColor(status, lastUpdate)
+        val markerColor = if (monitoringStatus == MonitoringPresenceStatus.SOS) {
+            monitoringStatus.accentColor
+        } else {
+            liveUserMarkerColor(status, lastUpdate)
+        }
         val bmpW = maxOf(circleSizePx, (textWidth + 8 * density).toInt())
         val bmpH = circleSizePx + textGap.toInt() + textHeight.toInt() + (2 * density).toInt()
         val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
@@ -1669,15 +3377,19 @@ class MapFragment : Fragment() {
                 strokeWidth = 2f * density; strokeJoin = Paint.Join.ROUND
             })
         }
-        // Star symbol ✴ inside
-        val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // Status symbol inside the marker
+        val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
-            textSize = circleSizePx * 0.44f
+            textSize = if (monitoringStatus == MonitoringPresenceStatus.SOS) {
+                circleSizePx * 0.28f
+            } else {
+                circleSizePx * 0.42f
+            }
             textAlign = Paint.Align.CENTER
             isFakeBoldText = true
         }
-        val starY = cr - (starPaint.ascent() + starPaint.descent()) / 2f
-        canvas.drawText("\u2734", cx, starY, starPaint)  // ✴ Eight Pointed Black Star
+        val glyphY = cr - (glyphPaint.ascent() + glyphPaint.descent()) / 2f
+        canvas.drawText(monitoringStatus.markerGlyph, cx, glyphY, glyphPaint)
 
         // Name label below circle
         labelPaint.color = if (isPro) 0xFFFFD700.toInt() else Color.WHITE
@@ -1717,6 +3429,7 @@ class MapFragment : Fragment() {
             refreshLiveUsersMarkers()
         }
         liveUsersPoller?.start()
+        startMonitoringMessagesPolling()
     }
 
     /**
@@ -1746,7 +3459,7 @@ class MapFragment : Fragment() {
             val features = JSONArray()
             filtered.forEach { d ->
                 val iconId = "live-user-${d.deviceId}"
-                style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan))
+                style.addImage(iconId, createLiveUserBitmap(d.name, d.status, d.lastUpdate, d.plan, d.monitorStatusCode))
                 features.put(JSONObject()
                     .put("type", "Feature")
                     .put("geometry", JSONObject().put("type", "Point")
@@ -1756,6 +3469,7 @@ class MapFragment : Fragment() {
                         .put("name", d.name)
                         .put("speed", d.speed)
                         .put("status", d.status)
+                        .put("monitorStatusCode", d.monitorStatusCode)
                         .put("deviceId", d.deviceId)))
             }
             val fc = JSONObject().put("type", "FeatureCollection").put("features", features).toString()
@@ -1775,6 +3489,7 @@ class MapFragment : Fragment() {
     fun stopLiveUsersPoller() {
         liveUsersPoller?.stop()
         liveUsersPoller = null
+        stopMonitoringMessagesPolling()
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(LIVE_USERS_SOURCE_ID)
             ?.setGeoJson("""{"type":"FeatureCollection","features":[]}""")
     }
@@ -1840,12 +3555,40 @@ class MapFragment : Fragment() {
         val markerColor = Color.parseColor(prefs.getString(PREF_MARKER_COLOR, DEFAULT_MARKER_COLOR) ?: DEFAULT_MARKER_COLOR)
         val markerSize = prefs.getInt(PREF_MARKER_SIZE, DEFAULT_MARKER_SIZE)
         style.addImage(GPS_ARROW_ICON, makeArrowBitmap(markerScaleToDp(markerSize), markerColor))
-        // GPS accuracy circle — drawn UNDER the arrow
+        if (style.getSource(GPS_DISTANCE_RINGS_SOURCE_ID) == null) {
+            style.addSource(GeoJsonSource(GPS_DISTANCE_RINGS_SOURCE_ID))
+        }
+        if (style.getLayer(GPS_DISTANCE_RINGS_LAYER_ID) == null) {
+            val ringsLayer = LineLayer(GPS_DISTANCE_RINGS_LAYER_ID, GPS_DISTANCE_RINGS_SOURCE_ID)
+                .withProperties(
+                    PropertyFactory.lineColor(DEFAULT_GPS_DISTANCE_RINGS_COLOR),
+                    PropertyFactory.lineWidth(DEFAULT_GPS_DISTANCE_RINGS_WIDTH),
+                    PropertyFactory.lineOpacity(0.65f),
+                    PropertyFactory.lineDasharray(arrayOf(3f, 3f))
+                )
+            if (style.getLayer(WP_RADIUS_LAYER_ID) != null) {
+                style.addLayerBelow(ringsLayer, WP_RADIUS_LAYER_ID)
+            } else {
+                style.addLayer(ringsLayer)
+            }
+        }
+        // GPS accuracy circle — drawn under labels/arrow
         if (style.getSource(GPS_ACCURACY_SOURCE_ID) == null) {
             style.addSource(GeoJsonSource(GPS_ACCURACY_SOURCE_ID))
             style.addLayer(com.mapbox.mapboxsdk.style.layers.FillLayer(GPS_ACCURACY_LAYER_ID, GPS_ACCURACY_SOURCE_ID).withProperties(
-                PropertyFactory.fillColor(Color.argb(40, 100, 150, 255)),  // semi-transparent blue
+                PropertyFactory.fillColor(Color.argb(40, 100, 150, 255)),
                 PropertyFactory.fillAntialias(true)
+            ))
+        }
+        if (style.getSource(GPS_DISTANCE_RING_LABELS_SOURCE_ID) == null) {
+            style.addSource(GeoJsonSource(GPS_DISTANCE_RING_LABELS_SOURCE_ID))
+        }
+        if (style.getLayer(GPS_DISTANCE_RING_LABELS_LAYER_ID) == null) {
+            style.addLayer(SymbolLayer(GPS_DISTANCE_RING_LABELS_LAYER_ID, GPS_DISTANCE_RING_LABELS_SOURCE_ID).withProperties(
+                PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconAnchor("center")
             ))
         }
         if (style.getSource(GPS_ARROW_SOURCE_ID) == null) {
@@ -1859,10 +3602,12 @@ class MapFragment : Fragment() {
                 PropertyFactory.iconSize(1.0f)
             ))
         }
+        applyGpsDistanceRingsStyle(style)
         // Restore arrow at last known position (e.g. after screen rotation)
         val lastLat = prefs.getFloat(PREF_LAST_LAT, Float.MIN_VALUE)
         val lastLon = prefs.getFloat(PREF_LAST_LON, Float.MIN_VALUE)
         val lastBearing = prefs.getFloat(PREF_LAST_BEARING, 0f)
+        refreshGpsDistanceRings()
         if (lastLat != Float.MIN_VALUE) {
             updateGpsArrow(lastLat.toDouble(), lastLon.toDouble(), lastBearing)
         }
@@ -1940,6 +3685,7 @@ class MapFragment : Fragment() {
     private fun resetStartupMotionState() {
         stopCameraLoop()
         lastKnownGpsPoint = null
+        clearGpsDistanceRings()
         startupWarmupUntilMs = 0L
         startupLockedZoom = -1.0
         startupZoomLockUntilMs = 0L
@@ -1955,12 +3701,15 @@ class MapFragment : Fragment() {
         lastGpsBearing = lastValidBearing
         lastGpsTimeNanos = 0L
         lastGpsSpeedKmh = 0.0
+        lastGpsAccuracyM = Float.NaN
+        lastAccuracyCircleRefreshMs = 0L
         lastRenderFrameNanos = 0L
         displayBearing = -1.0
         renderCamLat = Double.NaN
         renderCamLon = Double.NaN
         freezeConsecutiveCount = 0
         unfreezeConsecutiveCount = 0
+        clearAccuracyCircle()
     }
 
     private fun hasActiveStartupCameraAutomation(nowMs: Long = System.currentTimeMillis()): Boolean {
@@ -1984,7 +3733,6 @@ class MapFragment : Fragment() {
         lastSavedCamera = null
         lastRenderFrameNanos = 0L
         if (currentCam != null) {
-            if (currentCam.zoom > 0) userBaseZoom = currentCam.zoom
             if (currentCam.zoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(currentCam)
         }
         if (followMode != FollowMode.FREE) {
@@ -2000,14 +3748,15 @@ class MapFragment : Fragment() {
             return
         }
         val currentCam = map.cameraPosition
-        val baseZoom = when {
+        val baseZoomCandidate = when {
             startupLockedZoom > 0 -> startupLockedZoom
             currentCam.zoom >= 8.0 -> currentCam.zoom
             userBaseZoom > 0 -> userBaseZoom
             lastSavedCamera?.zoom != null -> lastSavedCamera!!.zoom
             lastGoodCamera?.zoom != null -> lastGoodCamera!!.zoom
-            else -> loadCameraFromPrefs()?.zoom ?: 14.0
-        }.coerceIn(10.0, 20.0)
+            else -> loadCameraFromPrefs()?.zoom
+        }
+        val baseZoom = sanitizeFollowZoom(baseZoomCandidate, 14.0)
         val targetBearing = when (followMode) {
             FollowMode.FOLLOW_COURSE -> bearing.toDouble()
             FollowMode.FOLLOW_NORTH -> 0.0
@@ -2048,19 +3797,70 @@ class MapFragment : Fragment() {
         }
     }
 
-    private fun renderPositionAlpha(speedKmh: Double): Double {
-        val smoothing = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private fun currentGpsSmoothingLevel(): Int {
+        return context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING)
             ?.coerceIn(1, 10) ?: DEFAULT_GPS_SMOOTHING
-        val base = 0.62 - (smoothing - 1) * 0.03
-        val speedBoost = when {
-            speedKmh >= 40.0 -> 0.24
-            speedKmh >= 20.0 -> 0.18
-            speedKmh >= 10.0 -> 0.12
-            speedKmh >= courseUnfreezeSpeedKmh -> 0.07
+    }
+
+    // High zoom feels nervous mostly when coarse fixes are also extrapolated forward.
+    private fun renderPredictionFactor(
+        speedKmh: Double,
+        accuracyM: Double,
+        stepDistanceM: Double,
+        smoothing: Int
+    ): Double {
+        val smoothingT = (smoothing - 1) / 9.0
+        var factor = lerp(1.0, 0.58, smoothingT)
+        factor *= when {
+            accuracyM >= 18.0 -> 0.30
+            accuracyM >= 12.0 -> 0.55
+            accuracyM >= 8.0 -> 0.78
+            else -> 1.0
+        }
+        factor += when {
+            stepDistanceM >= maxOf(accuracyM * 0.9, 8.0) -> 0.18
+            stepDistanceM >= maxOf(accuracyM * 0.45, 4.0) -> 0.10
             else -> 0.0
         }
-        return (base + speedBoost).coerceIn(0.22, 0.82)
+        factor += when {
+            speedKmh >= 35.0 -> 0.15
+            speedKmh >= 20.0 -> 0.10
+            speedKmh >= 10.0 -> 0.05
+            else -> 0.0
+        }
+        return factor.coerceIn(0.18, 1.0)
+    }
+
+    private fun renderPositionAlpha(
+        speedKmh: Double,
+        accuracyM: Double,
+        stepDistanceM: Double,
+        smoothing: Int,
+        stationary: Boolean
+    ): Double {
+        val smoothingT = (smoothing - 1) / 9.0
+        var alpha = lerp(0.78, 0.30, smoothingT)
+        alpha += when {
+            speedKmh >= 40.0 -> 0.12
+            speedKmh >= 20.0 -> 0.08
+            speedKmh >= 10.0 -> 0.05
+            speedKmh >= courseUnfreezeSpeedKmh -> 0.02
+            else -> 0.0
+        }
+        alpha -= when {
+            accuracyM >= 20.0 -> 0.16
+            accuracyM >= 12.0 -> 0.10
+            accuracyM >= 8.0 -> 0.05
+            else -> 0.0
+        }
+        if (stationary) alpha -= 0.06
+        alpha += when {
+            stepDistanceM >= maxOf(accuracyM * 0.9, 8.0) -> 0.14
+            stepDistanceM >= maxOf(accuracyM * 0.45, 4.0) -> 0.08
+            else -> 0.0
+        }
+        return alpha.coerceIn(0.18, 0.86)
     }
 
     private fun startMagnetometer() {
@@ -2099,15 +3899,321 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Update accuracy circle polygon (circle approximation as 36-point polygon) */
-    private fun updateAccuracyCircle(lat: Double, lon: Double, accuracyM: Float) {
+    private fun parseGpsDistanceRingRadii(): List<Double> {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs?.getString(PREF_GPS_DISTANCE_RINGS_RADII, DEFAULT_GPS_DISTANCE_RINGS_RADII)
+            ?: DEFAULT_GPS_DISTANCE_RINGS_RADII
+        val parsed = raw.split(",")
+            .mapNotNull { it.trim().toDoubleOrNull() }
+            .map { it.coerceIn(10.0, 50_000.0) }
+            .distinct()
+            .sorted()
+            .take(5)
+        if (parsed.isNotEmpty()) return parsed
+        return DEFAULT_GPS_DISTANCE_RINGS_RADII.split(",").mapNotNull { it.toDoubleOrNull() }
+    }
+
+    private fun gpsDistanceRingColor(): String {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs?.getString(PREF_GPS_DISTANCE_RINGS_COLOR, DEFAULT_GPS_DISTANCE_RINGS_COLOR)
+            ?: DEFAULT_GPS_DISTANCE_RINGS_COLOR
+    }
+
+    private fun gpsDistanceRingWidth(): Float {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs?.getFloat(PREF_GPS_DISTANCE_RINGS_WIDTH, DEFAULT_GPS_DISTANCE_RINGS_WIDTH)
+            ?.coerceIn(1f, 8f)
+            ?: DEFAULT_GPS_DISTANCE_RINGS_WIDTH
+    }
+
+    private fun gpsDistanceRingLabelSize(): Float {
+        val width = gpsDistanceRingWidth()
+        return (10f + width * 2.5f).coerceIn(12f, 26f)
+    }
+
+    fun applyGpsDistanceRingsStyle() {
+        applyGpsDistanceRingsStyle(mapboxMap?.style)
+    }
+
+    private fun applyGpsDistanceRingsStyle(style: Style?) {
+        val safeStyle = style ?: return
+        val color = gpsDistanceRingColor()
+        val width = gpsDistanceRingWidth()
+        safeStyle.getLayerAs<LineLayer>(GPS_DISTANCE_RINGS_LAYER_ID)?.setProperties(
+            PropertyFactory.lineColor(color),
+            PropertyFactory.lineWidth(width),
+            PropertyFactory.lineOpacity((0.52f + width * 0.07f).coerceAtMost(0.92f)),
+            PropertyFactory.lineDasharray(arrayOf((2.5f + width * 0.55f), (2.0f + width * 0.45f)))
+        )
+        safeStyle.getLayerAs<SymbolLayer>(GPS_DISTANCE_RING_LABELS_LAYER_ID)?.setProperties(
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true)
+        )
+    }
+
+    private fun currentAdaptiveGpsRingCount(zoom: Double): Int = when {
+        zoom >= 16.8 -> 2
+        zoom >= 14.8 -> 3
+        zoom >= 12.8 -> 4
+        else -> 5
+    }
+
+    private fun metersPerPixel(lat: Double, zoom: Double): Double {
+        val latFactor = kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.01)
+        return 156543.03392 * latFactor / Math.pow(2.0, zoom)
+    }
+
+    private fun niceDistanceMeters(rawMeters: Double): Double {
+        if (rawMeters <= 10.0) return 10.0
+        val exponent = Math.floor(Math.log10(rawMeters))
+        val base = Math.pow(10.0, exponent)
+        val fraction = rawMeters / base
+        val niceFraction = when {
+            fraction <= 1.0 -> 1.0
+            fraction <= 2.0 -> 2.0
+            fraction <= 5.0 -> 5.0
+            else -> 10.0
+        }
+        return (niceFraction * base).coerceIn(10.0, 50_000.0)
+    }
+
+    private fun formatGpsRingRadius(radiusM: Double): String {
+        val rounded = normalizeGpsRingDistance(radiusM)
+        return if (rounded >= 1000.0) {
+            val km = rounded / 1000.0
+            if (kotlin.math.abs(km - km.toInt()) < 0.01) {
+                "${km.toInt()} км"
+            } else {
+                String.format(java.util.Locale.US, "%.1f км", km)
+            }
+        } else {
+            "${rounded.toInt()} м"
+        }
+    }
+
+    private fun normalizeGpsRingDistance(radiusM: Double): Double {
+        val clamped = radiusM.coerceIn(10.0, 50_000.0)
+        val step = when {
+            clamped < 100.0 -> 5.0
+            clamped < 250.0 -> 10.0
+            clamped < 750.0 -> 25.0
+            clamped < 2500.0 -> 50.0
+            clamped < 10_000.0 -> 100.0
+            else -> 500.0
+        }
+        return (kotlin.math.round(clamped / step) * step).coerceIn(10.0, 50_000.0)
+    }
+
+    private fun gpsRingLabelIconId(radiusM: Double): String {
+        val rounded = normalizeGpsRingDistance(radiusM).toInt()
+        val colorKey = gpsDistanceRingColor().replace("#", "").uppercase(java.util.Locale.US)
+        val sizeKey = gpsDistanceRingLabelSize().toInt()
+        return "gps-ring-label-$rounded-$colorKey-$sizeKey"
+    }
+
+    private fun makeGpsRingLabelBitmap(text: String, colorHex: String): Bitmap {
+        val density = resources.displayMetrics.density
+        val textSizePx = gpsDistanceRingLabelSize() * density * 0.92f
+        val strokeWidth = (1.3f + gpsDistanceRingWidth() * 0.25f) * density
+        val padH = (6f + gpsDistanceRingWidth() * 2.2f) * density
+        val padV = (3f + gpsDistanceRingWidth() * 1.2f) * density
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            val parsedColor = try { Color.parseColor(colorHex) } catch (_: Exception) { Color.parseColor(DEFAULT_GPS_DISTANCE_RINGS_COLOR) }
+            color = Color.argb(225, Color.red(parsedColor), Color.green(parsedColor), Color.blue(parsedColor))
+            textSize = textSizePx
+            textAlign = Paint.Align.CENTER
+            style = Paint.Style.FILL
+        }
+        val strokePaint = Paint(fillPaint).apply {
+            color = Color.argb(165, 12, 12, 12)
+            style = Paint.Style.STROKE
+            this.strokeWidth = strokeWidth
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        val textWidth = maxOf(fillPaint.measureText(text), strokePaint.measureText(text))
+        val textHeight = maxOf(fillPaint.descent() - fillPaint.ascent(), strokePaint.descent() - strokePaint.ascent())
+        val bmpW = kotlin.math.ceil(textWidth + padH * 2f + strokeWidth).toInt().coerceAtLeast(1)
+        val bmpH = kotlin.math.ceil(textHeight + padV * 2f + strokeWidth).toInt().coerceAtLeast(1)
+        val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val baseline = (bmpH - (fillPaint.descent() + fillPaint.ascent())) / 2f
+        val cx = bmpW / 2f
+        canvas.drawText(text, cx, baseline, strokePaint)
+        canvas.drawText(text, cx, baseline, fillPaint)
+        return bmp
+    }
+
+    private fun computeGpsDistanceRingRadii(lat: Double): List<Double> {
+        val configured = parseGpsDistanceRingRadii()
+        val template = if (configured.size >= 5) configured.take(5)
+        else DEFAULT_GPS_DISTANCE_RINGS_RADII.split(",").mapNotNull { it.toDoubleOrNull() }.take(5)
+        val zoom = mapboxMap?.cameraPosition?.zoom ?: 15.0
+        val mapView = _binding?.mapView
+        val minDimPx = minOf(
+            mapView?.width?.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels,
+            mapView?.height?.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        ).toDouble()
+        val ringCount = currentAdaptiveGpsRingCount(zoom).coerceAtMost(5)
+        val targetOuterMeters = (metersPerPixel(lat, zoom) * minDimPx * 0.46)
+            .coerceIn(30.0, 50_000.0)
+        val effectiveCount = ringCount.coerceIn(2, template.size.coerceAtMost(5))
+        val visibleTemplate = template.take(effectiveCount)
+        val templateOuter = visibleTemplate.lastOrNull()?.coerceAtLeast(10.0) ?: 2000.0
+        val scale = targetOuterMeters / templateOuter
+        val scaled = visibleTemplate.map { (it * scale).coerceIn(10.0, 50_000.0) }
+        return scaled
+            .sorted()
+            .let { radii ->
+                if (radii.size == effectiveCount) radii
+                else {
+                    val stepMeters = (targetOuterMeters / effectiveCount).coerceIn(10.0, 50_000.0)
+                    (1..effectiveCount).map { (stepMeters * it).coerceIn(10.0, 50_000.0) }.sorted()
+                }
+            }
+    }
+
+    private fun buildGpsRingLabelPoints(lat: Double, lon: Double, radiusM: Double): List<JSONObject> {
+        val latRad = Math.toRadians(lat)
+        val dLon = radiusM / (111320.0 * kotlin.math.cos(latRad).coerceAtLeast(0.01))
+        val label = formatGpsRingRadius(radiusM)
+        val iconId = gpsRingLabelIconId(radiusM)
+        val positions = listOf(
+            (lon + dLon) to lat,
+            (lon - dLon) to lat
+        )
+        return positions.map { (labelLon, labelLat) ->
+            JSONObject()
+                .put("type", "Feature")
+                .put("geometry", JSONObject().put("type", "Point")
+                    .put("coordinates", JSONArray().put(labelLon).put(labelLat)))
+                .put("properties", JSONObject()
+                    .put("label", label)
+                    .put("icon", iconId))
+        }
+    }
+
+    private fun gpsRingSignature(radii: List<Double>): String {
+        return radii.joinToString("|") { normalizeGpsRingDistance(it).toInt().toString() }
+    }
+
+    private fun clearGpsDistanceRings() {
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(GPS_DISTANCE_RINGS_SOURCE_ID)
+            ?.setGeoJson("""{"type":"FeatureCollection","features":[]}""")
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(GPS_DISTANCE_RING_LABELS_SOURCE_ID)
+            ?.setGeoJson("""{"type":"FeatureCollection","features":[]}""")
+        lastGpsDistanceRingSignature = ""
+    }
+
+    private fun currentGpsDistanceRingCenter(): LatLng? {
+        return when {
+            cameraLoopRunning && !renderCamLat.isNaN() && !renderCamLon.isNaN() -> LatLng(renderCamLat, renderCamLon)
+            lastKnownGpsPoint != null -> lastKnownGpsPoint
+            else -> null
+        }
+    }
+
+    private fun updateGpsDistanceRings(lat: Double, lon: Double, forceLabelRefresh: Boolean = false) {
         val style = mapboxMap?.style ?: return
-        // Hide circle when accuracy is good (< 10m) — it would be invisible under the arrow anyway
-        if (accuracyM < 10f) {
-            style.getSourceAs<GeoJsonSource>(GPS_ACCURACY_SOURCE_ID)
-                ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        applyGpsDistanceRingsStyle(style)
+        val layerVisibility = if (prefs.getBoolean(PREF_GPS_DISTANCE_RINGS_VISIBLE, false)) "visible" else "none"
+        style.getLayer(GPS_DISTANCE_RINGS_LAYER_ID)?.setProperties(PropertyFactory.visibility(layerVisibility))
+        style.getLayer(GPS_DISTANCE_RING_LABELS_LAYER_ID)?.setProperties(PropertyFactory.visibility(layerVisibility))
+        if (layerVisibility != "visible") {
+            clearGpsDistanceRings()
             return
         }
+        val source = style.getSourceAs<GeoJsonSource>(GPS_DISTANCE_RINGS_SOURCE_ID) ?: return
+        val labelSource = style.getSourceAs<GeoJsonSource>(GPS_DISTANCE_RING_LABELS_SOURCE_ID) ?: return
+        val radii = computeGpsDistanceRingRadii(lat)
+        val ringColor = gpsDistanceRingColor()
+        val labelSignature = gpsRingSignature(radii)
+        val refreshLabels = forceLabelRefresh || labelSignature != lastGpsDistanceRingSignature
+        lastGpsDistanceRingSignature = labelSignature
+        lastGpsDistanceRingRefreshMs = android.os.SystemClock.elapsedRealtime()
+        val features = JSONArray()
+        val labelFeatures = JSONArray()
+        radii.forEach { radiusM ->
+            val iconId = gpsRingLabelIconId(radiusM)
+            if (refreshLabels) {
+                try { style.removeImage(iconId) } catch (_: Exception) {}
+                style.addImage(iconId, makeGpsRingLabelBitmap(formatGpsRingRadius(radiusM), ringColor))
+            }
+            features.put(buildCirclePolygon(lat, lon, radiusM))
+            buildGpsRingLabelPoints(lat, lon, radiusM).forEach { labelFeatures.put(it) }
+        }
+        source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", features).toString())
+        labelSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", labelFeatures).toString())
+    }
+
+    fun setGpsDistanceRingsVisible(visible: Boolean) {
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_GPS_DISTANCE_RINGS_VISIBLE, visible)?.apply()
+        refreshGpsDistanceRings()
+    }
+
+    fun refreshGpsDistanceRings() {
+        val style = mapboxMap?.style ?: return
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        applyGpsDistanceRingsStyle(style)
+        val visibility = if (prefs.getBoolean(PREF_GPS_DISTANCE_RINGS_VISIBLE, false)) "visible" else "none"
+        style.getLayer(GPS_DISTANCE_RINGS_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        style.getLayer(GPS_DISTANCE_RING_LABELS_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        if (visibility != "visible") {
+            clearGpsDistanceRings()
+            return
+        }
+        val gps = currentGpsDistanceRingCenter()
+        if (gps != null) {
+            updateGpsDistanceRings(gps.latitude, gps.longitude, forceLabelRefresh = true)
+            return
+        }
+        val lastLat = prefs.getFloat(PREF_LAST_LAT, Float.MIN_VALUE)
+        val lastLon = prefs.getFloat(PREF_LAST_LON, Float.MIN_VALUE)
+        if (lastLat != Float.MIN_VALUE && lastLon != Float.MIN_VALUE) {
+            updateGpsDistanceRings(lastLat.toDouble(), lastLon.toDouble(), forceLabelRefresh = true)
+        } else {
+            clearGpsDistanceRings()
+        }
+    }
+
+    private fun maybeRefreshGpsDistanceRingsForCamera(force: Boolean = false) {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(PREF_GPS_DISTANCE_RINGS_VISIBLE, false)) return
+        val gps = currentGpsDistanceRingCenter() ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastGpsDistanceRingRefreshMs < 33L) return
+        updateGpsDistanceRings(gps.latitude, gps.longitude, forceLabelRefresh = force)
+    }
+
+    private fun clearAccuracyCircle() {
+        mapboxMap?.style?.getSourceAs<GeoJsonSource>(GPS_ACCURACY_SOURCE_ID)
+            ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
+    }
+
+    private fun maybeRefreshAccuracyCircleForCamera(force: Boolean = false) {
+        val accuracyM = lastGpsAccuracyM
+        if (accuracyM.isNaN()) {
+            clearAccuracyCircle()
+            return
+        }
+        if (renderCamLat.isNaN() || renderCamLon.isNaN()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastAccuracyCircleRefreshMs < 33L) return
+        lastAccuracyCircleRefreshMs = now
+        updateAccuracyCircle(renderCamLat, renderCamLon, accuracyM)
+    }
+
+    /** Update accuracy circle polygon (circle approximation as 36-point polygon) */
+    private fun updateAccuracyCircle(lat: Double, lon: Double, accuracyM: Float) {
+        // Hide circle when accuracy is good (< 10m) — it would be invisible under the arrow anyway
+        if (accuracyM < 10f) {
+            clearAccuracyCircle()
+            return
+        }
+        val style = mapboxMap?.style ?: return
         // Build circle polygon: convert meters to degrees (approximate)
         val latRad = Math.toRadians(lat)
         val mPerDegLat = 111320.0
@@ -2181,6 +4287,7 @@ class MapFragment : Fragment() {
         applyLoadedTrackStyle()
         // Track editor layers (always set up, hidden until editor activated)
         setupTrackEditorLayers(style)
+        applyTrackEditorOverlayState(style)
         // Clear stale loaded-track name prefs (track is gone after app restart)
         if (loadedTrackPoints.isEmpty()) {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
@@ -2192,6 +4299,15 @@ class MapFragment : Fragment() {
         // Restore track editor / draw mode overlay if active
         if (trackEditorMode && TrackEditor.editPoints.isNotEmpty()) renderEditorPoints()
         if (drawMode && drawnPoints.isNotEmpty()) renderDrawnLine()
+    }
+
+    private fun applyTrackEditorOverlayState(style: Style? = mapboxMap?.style) {
+        val safeStyle = style ?: return
+        val overlayVisible = trackEditorMode || drawMode
+        safeStyle.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
+            ?.setProperties(PropertyFactory.lineOpacity(if (overlayVisible) 0.9f else 0f))
+        safeStyle.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
+            ?.setProperties(PropertyFactory.visibility(if (overlayVisible) "visible" else "none"))
     }
 
     // ─── Track Editor ──────────────────────────────────────────────────────────
@@ -2247,11 +4363,7 @@ class MapFragment : Fragment() {
         updateEditorUi()
         renderEditorPoints()
 
-        // Show the edit line overlay (orange) instead of hidden loaded track
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
-            ?.setProperties(PropertyFactory.lineOpacity(0.9f))
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
-            ?.setProperties(PropertyFactory.visibility("visible"))
+        applyTrackEditorOverlayState()
 
         setupEditorButtons()
 
@@ -2270,11 +4382,7 @@ class MapFragment : Fragment() {
         _binding?.editPointPopup?.visibility = View.GONE
         _binding?.editMoveBar?.visibility = View.GONE
 
-        // Hide editor layers
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
-            ?.setProperties(PropertyFactory.lineOpacity(0f))
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
-            ?.setProperties(PropertyFactory.visibility("none"))
+        applyTrackEditorOverlayState()
         // Clear editor sources
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)
             ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
@@ -2632,11 +4740,7 @@ class MapFragment : Fragment() {
         // Force FREE mode so crosshair is visible
         followMode = FollowMode.FREE
         _binding?.crosshairView?.visibility = View.VISIBLE
-        // Show editor layers
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
-            ?.setProperties(PropertyFactory.lineOpacity(0.9f))
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
-            ?.setProperties(PropertyFactory.visibility("visible"))
+        applyTrackEditorOverlayState()
         updateDrawStats()
         setupDrawModeButtons()
         Toast.makeText(ctx, "Режим рисования. Наведите крестик и нажмите ＋", Toast.LENGTH_SHORT).show()
@@ -2646,10 +4750,7 @@ class MapFragment : Fragment() {
         drawMode = false
         drawnPoints.clear()
         _binding?.drawModeBar?.visibility = View.GONE
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.LineLayer>(TRACK_EDIT_LINE_LAYER)
-            ?.setProperties(PropertyFactory.lineOpacity(0f))
-        mapboxMap?.style?.getLayerAs<com.mapbox.mapboxsdk.style.layers.CircleLayer>(TRACK_EDIT_POINTS_LAYER)
-            ?.setProperties(PropertyFactory.visibility("none"))
+        applyTrackEditorOverlayState()
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_LINE_SOURCE)
             ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_EDIT_POINTS_SOURCE)
@@ -2931,6 +5032,7 @@ class MapFragment : Fragment() {
         }
         restoreUserPoints()
         if (userMarkers.isNotEmpty()) updateUserMarkersOnMap()
+        applyDistanceRingsVisibility()
         updateNavLine()
         // If track was just restored from prefs, render it now (setupTrackLayers ran before restore)
         if (trackWasEmpty && loadedTrackPoints.isNotEmpty()) {
@@ -3441,8 +5543,8 @@ class MapFragment : Fragment() {
     }
 
     private fun setupButtons(map: MapboxMap) {
-        binding.btnZoomIn.setOnClickListener { map.animateCamera(CameraUpdateFactory.zoomIn()) }
-        binding.btnZoomOut.setOnClickListener { map.animateCamera(CameraUpdateFactory.zoomOut()) }
+        binding.btnZoomIn.setOnClickListener { zoomIn() }
+        binding.btnZoomOut.setOnClickListener { zoomOut() }
         binding.btnAddWaypoint.setOnClickListener { addWaypointAtCurrentPosition() }
         binding.btnQuickAction.setOnClickListener { showQuickActionMenu() }
 
@@ -3529,6 +5631,7 @@ class MapFragment : Fragment() {
         binding.downloadIndicator.setOnClickListener {
             showDownloadDetailsDialog()
         }
+        binding.btnMessages.setOnClickListener { openMonitoringMessagesCenter() }
         binding.btnSettings.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .add(R.id.container, SettingsFragment())
@@ -3557,6 +5660,7 @@ class MapFragment : Fragment() {
         binding.btnQuickAction.setOnLongClickListener { showHint("Управление данными: маршрут, трек, точки"); true }
         binding.btnLayers.setOnLongClickListener { showHint("Выбор слоёв карты"); true }
         binding.btnRec.setOnLongClickListener { showHint("Запись / остановка трека"); true }
+        binding.btnMessages.setOnLongClickListener { showHint("Сообщения мониторинга"); true }
         // btnLock gestures handled by setupLockButtonDrag
         binding.btnSettings.setOnLongClickListener { showHint("Настройки приложения"); true }
         binding.btnPrevWp.setOnLongClickListener { showHint("Предыдущая точка маршрута"); true }
@@ -3583,8 +5687,10 @@ class MapFragment : Fragment() {
         binding.btnWidgetGo.setOnClickListener { startNavigation() }
         binding.btnWidgetStop.setOnClickListener { stopNavigation() }
         // Init colors (grey = inactive)
-        binding.btnWidgetGo.setTextColor(0xFF666666.toInt())
-        binding.btnWidgetStop.setTextColor(0xFF666666.toInt())
+        currentTopBarPalette().let { palette ->
+            binding.btnWidgetGo.setTextColor(palette.neutralText)
+            binding.btnWidgetStop.setTextColor(palette.neutralText)
+        }
 
         // Nav always starts inactive — offer resume dialog after waypoints are loaded
         val prevNavActive = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -3600,21 +5706,26 @@ class MapFragment : Fragment() {
             updateCompass()
             updateCrosshairInfo()
             updateZoomLevel()
+            maybeRefreshGpsDistanceRingsForCamera()
         }
         map.addOnCameraIdleListener {
             updateCompass()
-            // When user manually zooms (pinch/double-tap), record their preferred zoom
-            if (autoZoomLevel > 0 &&
-                map.cameraPosition.zoom > 0 &&
-                !userDragged) {
-                // Only update base zoom if not in a follow-mode animation
-                // (follow-mode animations set the target themselves)
+            maybeRefreshGpsDistanceRingsForCamera(force = true)
+            if (pendingGestureZoomCapture) {
+                val finalZoom = map.cameraPosition.zoom
+                if (gestureStartZoom > 0 && kotlin.math.abs(finalZoom - gestureStartZoom) > 0.05) {
+                    userBaseZoom = (finalZoom + currentAutoZoomDelta()).coerceIn(2.0, 20.0)
+                    smoothedZoom = finalZoom
+                    if (finalZoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(map.cameraPosition)
+                }
+                pendingGestureZoomCapture = false
+                gestureStartZoom = -1.0
             }
         }
         map.addOnCameraMoveStartedListener { reason ->
             if (reason == MapboxMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
-                // User manually moved/zoomed — record their zoom preference
-                userBaseZoom = map.cameraPosition.zoom
+                pendingGestureZoomCapture = true
+                gestureStartZoom = map.cameraPosition.zoom
                 if (lastSavedCamera != null) Log.d("CamDebug", "USER MOVED MAP — lastSavedCamera CLEARED zoom=${map.cameraPosition.zoom}")
                 lastSavedCamera = null  // User moved map — no longer need to restore startup position
                 if (map.cameraPosition.zoom >= 3.0) lastGoodCamera = sanitizeCameraPosition(map.cameraPosition)
@@ -3703,41 +5814,116 @@ class MapFragment : Fragment() {
 
     /** Add an offline map and return its key. Returns null on failure. */
     fun addOfflineMap(path: String, displayName: String): String? {
-        val index = if (offlineMaps.isEmpty()) 0 else offlineMaps.maxOf { it.index } + 1
-        val key = "${OFFLINE_TILE_KEY}_$index"
         ensureTileServer()
+        val existing = offlineMaps.find { it.name == displayName || it.path == path }
+        val index = existing?.index ?: ((offlineMaps.maxOfOrNull { it.index } ?: -1) + 1)
+        val key = existing?.key ?: "${OFFLINE_TILE_KEY}_$index"
+        offlineMaps
+            .filter { it.key != key && (it.name == displayName || it.path == path) }
+            .map { it.key }
+            .forEach { removeOfflineMapInternal(it, deleteFile = false, reloadStyle = false) }
         val ok = tileServer?.openDatabase(index, path) ?: false
         if (!ok) return null
         val info = OfflineMapInfo(key, displayName, path)
-        offlineMaps.add(info)
+        val existingIndex = offlineMaps.indexOfFirst { it.key == key }
+        if (existingIndex >= 0) offlineMaps[existingIndex] = info else offlineMaps.add(info)
         val maxZoom = tileServer?.getMaxZoom(index) ?: 19
         val minZoom = tileServer?.getMinZoom(index) ?: 0
-        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
+        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/offline/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
         saveOfflineMapsToPrefs()
         return key
     }
 
+    private fun isOfflineAreaBaseName(infoName: String, areaName: String): Boolean {
+        return !infoName.contains("_слой_") && (infoName == areaName || infoName.startsWith("$areaName ("))
+    }
+
+    private fun offlineAreaBaseDisplayName(area: OfflineAreasManager.OfflineArea): String {
+        return "${area.name} (${area.layersDescription()})"
+    }
+
+    private fun offlineAreaOverlayDisplayName(areaName: String, overlayLabel: String): String {
+        return "${areaName}_слой_${overlayLabel}"
+    }
+
+    private fun findOfflineAreaBaseInfo(areaName: String): OfflineMapInfo? {
+        return offlineMaps.find { isOfflineAreaBaseName(it.name, areaName) }
+    }
+
+    private fun findOfflineAreaOverlayInfo(areaName: String, overlayLabel: String): OfflineMapInfo? {
+        return offlineMaps.find { it.name == offlineAreaOverlayDisplayName(areaName, overlayLabel) }
+    }
+
+    fun syncOfflineAreaSources(areaId: String? = null) {
+        val ctx = context ?: return
+        val mapsDir = MapStorageManager.getMapsDir(ctx)
+        val areas = OfflineAreasManager.loadAreas(ctx)
+        val targetAreas = if (areaId != null) areas.filter { it.id == areaId } else areas
+        targetAreas.forEach { area ->
+            val baseFile = java.io.File(mapsDir, area.baseFile)
+            if (countTilesInMbtiles(baseFile) > 0) {
+                addOfflineMap(baseFile.absolutePath, offlineAreaBaseDisplayName(area))
+            } else {
+                findOfflineAreaBaseInfo(area.name)?.let {
+                    removeOfflineMapInternal(it.key, deleteFile = false, reloadStyle = false)
+                }
+            }
+
+            area.overlays.forEach { overlay ->
+                val displayName = offlineAreaOverlayDisplayName(area.name, overlay.label)
+                val overlayFile = java.io.File(mapsDir, overlay.file)
+                if (countTilesInMbtiles(overlayFile) > 0) {
+                    addOfflineMap(overlayFile.absolutePath, displayName)
+                } else {
+                    findOfflineAreaOverlayInfo(area.name, overlay.label)?.let {
+                        removeOfflineMapInternal(it.key, deleteFile = false, reloadStyle = false)
+                    }
+                }
+            }
+        }
+    }
+
+    fun hasOfflineAreaBase(areaName: String): Boolean = findOfflineAreaBaseInfo(areaName) != null
+
+    fun hasOfflineAreaOverlays(areaName: String): Boolean {
+        return offlineMaps.any { it.name.startsWith("${areaName}_слой_") }
+    }
+
     /** Remove offline map by display name (searches offlineMaps by name) */
     fun removeOfflineMapByName(displayName: String) {
-        val info = offlineMaps.find { it.name.startsWith(displayName) } ?: return
+        val info = offlineMaps.find { it.name == displayName }
+            ?: findOfflineAreaBaseInfo(displayName)
+            ?: return
         removeOfflineMap(info.key)
     }
 
     fun removeOfflineMap(key: String) {
+        removeOfflineMapInternal(key, deleteFile = true, reloadStyle = true)
+    }
+
+    private fun removeOfflineMapInternal(key: String, deleteFile: Boolean, reloadStyle: Boolean) {
         val info = offlineMaps.find { it.key == key } ?: return
         tileServer?.closeDatabase(info.index)
         offlineMaps.remove(info)
         tileSources.remove(key)
-        if (currentTileKey == key) loadTileStyle("osm", currentOverlayKeys)
+        val overlayRemoved = currentOverlayKeys.remove(key)
+        if (reloadStyle) {
+            when {
+                currentTileKey == key -> loadTileStyle("osm", currentOverlayKeys.toSet())
+                overlayRemoved -> loadTileStyle(currentTileKey, currentOverlayKeys.toSet())
+            }
+        }
         saveOfflineMapsToPrefs()
-        // Delete the actual file to free storage
-        java.io.File(info.path).takeIf { it.exists() }?.delete()
+        if (deleteFile) {
+            java.io.File(info.path).takeIf { it.exists() }?.delete()
+        }
     }
 
     fun getOfflineMaps(): List<OfflineMapInfo> = offlineMaps.toList()
 
     /** Show submenu for offline map: toggle overlay layers on/off */
     fun showOfflineLayersMenu(areaName: String) {
+        syncOfflineAreaSources()
         val ctx = context ?: return
         val area = OfflineAreasManager.loadAreas(ctx).find { it.name == areaName } ?: run {
             Toast.makeText(ctx, "Область не найдена", Toast.LENGTH_SHORT).show()
@@ -3760,7 +5946,7 @@ class MapFragment : Fragment() {
                     if (ov.enabled != checked[i]) {
                         OfflineAreasManager.updateOverlayEnabled(ctx, area.id, ov.key, checked[i])
                         // Toggle overlay visibility in tile sources
-                        val ovKey = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }?.key
+                        val ovKey = findOfflineAreaOverlayInfo(area.name, ov.label)?.key
                         if (ovKey != null) {
                             if (checked[i]) {
                                 // Re-enable: add to current overlays
@@ -3777,6 +5963,81 @@ class MapFragment : Fragment() {
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    fun focusOfflineArea(areaName: String) {
+        syncOfflineAreaSources()
+        val ctx = context ?: return
+        val area = OfflineAreasManager.loadAreas(ctx).find { it.name == areaName } ?: run {
+            Toast.makeText(ctx, "Область не найдена", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val baseInfo = findOfflineAreaBaseInfo(area.name) ?: run {
+            Toast.makeText(ctx, "Базовая карта области не найдена", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val nextBase = if (currentTileKey.startsWith(OFFLINE_TILE_KEY)) "osm" else currentTileKey
+        val nextOverlays = currentOverlayKeys
+            .filterNot { it.startsWith(OFFLINE_TILE_KEY) }
+            .toMutableSet()
+        nextOverlays.add(baseInfo.key)
+        area.enabledOverlays().forEach { ov ->
+            findOfflineAreaOverlayInfo(area.name, ov.label)?.let { info ->
+                nextOverlays.add(info.key)
+            }
+        }
+        loadTileStyle(nextBase, nextOverlays)
+        flyToOfflineMapBounds(baseInfo.index)
+    }
+
+    fun deleteOfflineArea(areaId: String) {
+        val ctx = context ?: return
+        if (TileDownloadManager.currentAreaId == areaId) {
+            TileDownloadManager.stopDownload()
+            TileDownloadManager.currentAreaId = null
+            _binding?.downloadIndicator?.visibility = View.GONE
+        }
+        OfflineAreasManager.deleteArea(ctx, areaId) { name ->
+            removeOfflineMapByName(name)
+        }
+    }
+
+    fun restartOfflineAreaDownload(areaId: String, forceRedownload: Boolean): Boolean {
+        val ctx = context ?: return false
+        val area = OfflineAreasManager.getAreaById(ctx, areaId) ?: run {
+            Toast.makeText(ctx, "Область не найдена", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        if (!area.hasStoredGeometry()) {
+            Toast.makeText(ctx, "Для этой области не сохранены данные для перезакачки", Toast.LENGTH_LONG).show()
+            return false
+        }
+        if (forceRedownload) {
+            clearOfflineAreaFiles(ctx, area)
+        }
+        val task = OfflineAreasManager.buildDownloadTask(ctx, area) ?: run {
+            Toast.makeText(ctx, "Не удалось собрать задачу загрузки", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        val started = startTileDownload(ctx, task, areaId, cleanupOnFailure = false)
+        if (started) {
+            val msg = if (forceRedownload) "Обновление области начато" else "Продолжение загрузки начато"
+            Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+        }
+        return started
+    }
+
+    private fun clearOfflineAreaFiles(ctx: Context, area: OfflineAreasManager.OfflineArea) {
+        removeOfflineMapByName(area.name)
+        area.overlays.forEach { overlay ->
+            removeOfflineMapByName("${area.name}_слой_${overlay.label}")
+        }
+        val mapsDir = MapStorageManager.getMapsDir(ctx)
+        java.io.File(mapsDir, area.baseFile).delete()
+        area.overlays.forEach { overlay ->
+            java.io.File(mapsDir, overlay.file).delete()
+        }
     }
 
     fun getTileSources(): Map<String, TileSource> = tileSources.toMap()
@@ -3805,7 +6066,8 @@ class MapFragment : Fragment() {
     }
 
     private fun loadOfflineMapsFromPrefs() {
-        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val json = prefs.getString(PREF_OFFLINE_MAPS_JSON, null)
             ?: prefs.getString(PREF_OFFLINE_MAP_PATH, null)?.let { legacyPath ->
                 // Migrate legacy single-map pref
@@ -3814,23 +6076,61 @@ class MapFragment : Fragment() {
             } ?: return
         try {
             val arr = JSONArray(json)
+            var changed = false
+            val cleanArr = JSONArray()
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 val key = obj.getString("key")
                 val name = obj.getString("name")
-                val path = obj.getString("path")
-                if (java.io.File(path).exists()) {
-                    val idx = key.removePrefix("${OFFLINE_TILE_KEY}_").toIntOrNull() ?: continue
-                    ensureTileServer()
-                    if (tileServer?.openDatabase(idx, path) == true) {
-                        offlineMaps.add(OfflineMapInfo(key, name, path))
-                        val maxZoom = tileServer?.getMaxZoom(idx) ?: 19
-                        val minZoom = tileServer?.getMinZoom(idx) ?: 0
-                        tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
-                    }
+                val resolved = MapStorageManager.resolveExistingMapFile(ctx, obj.getString("path"))
+                if (resolved == null) {
+                    changed = true
+                    continue
+                }
+                if (obj.getString("path") != resolved.absolutePath) {
+                    obj.put("path", resolved.absolutePath)
+                    changed = true
+                }
+                val idx = key.removePrefix("${OFFLINE_TILE_KEY}_").toIntOrNull() ?: continue
+                ensureTileServer()
+                if (tileServer?.openDatabase(idx, resolved.absolutePath) == true) {
+                    offlineMaps.add(OfflineMapInfo(key, name, resolved.absolutePath))
+                    val maxZoom = tileServer?.getMaxZoom(idx) ?: 19
+                    val minZoom = tileServer?.getMinZoom(idx) ?: 0
+                    tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/offline/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
+                    cleanArr.put(JSONObject().put("key", key).put("name", name).put("path", resolved.absolutePath))
+                } else {
+                    changed = true
                 }
             }
+            if (changed || cleanArr.length() != arr.length()) {
+                prefs.edit().putString(PREF_OFFLINE_MAPS_JSON, cleanArr.toString()).apply()
+            }
         } catch (_: Exception) {}
+    }
+
+    fun prepareOfflineMapsForMigration() {
+        offlineMaps.forEach { info -> tileServer?.closeDatabase(info.index) }
+    }
+
+    fun reloadOfflineMapsFromStorage() {
+        val currentBase = currentTileKey
+        val currentOverlays = currentOverlayKeys.toSet()
+        offlineMaps.forEach { info -> tileServer?.closeDatabase(info.index) }
+        offlineMaps.forEach { info -> tileSources.remove(info.key) }
+        offlineMaps.clear()
+        loadOfflineMapsFromPrefs()
+        syncOfflineAreaSources()
+
+        val validBase = if (currentBase.startsWith(OFFLINE_TILE_KEY) && offlineMaps.none { it.key == currentBase }) {
+            "osm"
+        } else {
+            currentBase
+        }
+        val validOverlays = currentOverlays.filter { key ->
+            !key.startsWith(OFFLINE_TILE_KEY) || offlineMaps.any { it.key == key }
+        }.toSet()
+        loadTileStyle(validBase, validOverlays)
     }
 
     private fun ensureTileServer() {
@@ -3855,13 +6155,28 @@ class MapFragment : Fragment() {
         val vis = if (visible) "visible" else "none"
         val style = mapboxMap?.style
         style?.getLayer(WP_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
-        style?.getLayer(WP_RADIUS_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
-        style?.getLayer(WP_RADIUS_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
-        style?.getLayer(WP_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
-        style?.getLayer(WP_PROXIMITY_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         style?.getLayer(NAV_LINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(vis))
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putBoolean(PREF_LOADED_WP_VISIBLE, visible)?.apply()
+        applyDistanceRingsVisibility()
+    }
+
+    fun setDistanceRingsVisible(visible: Boolean) {
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_DISTANCE_RINGS_VISIBLE, visible)?.apply()
+        applyDistanceRingsVisibility()
+    }
+
+    fun applyDistanceRingsVisibility() {
+        val style = mapboxMap?.style ?: return
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val loadedWpVisible = prefs.getBoolean(PREF_LOADED_WP_VISIBLE, true)
+        val ringsVisible = loadedWpVisible && prefs.getBoolean(PREF_DISTANCE_RINGS_VISIBLE, true)
+        val visibility = if (ringsVisible) "visible" else "none"
+        style.getLayer(WP_RADIUS_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        style.getLayer(WP_RADIUS_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        style.getLayer(WP_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        style.getLayer(WP_PROXIMITY_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
     }
 
     fun setRouteLineVisible(visible: Boolean) {
@@ -4003,7 +6318,11 @@ class MapFragment : Fragment() {
 
     private fun updateLoadedTrackOnMap() {
         val style = mapboxMap?.style ?: return
-        if (loadedTrackPoints.size < 2) return
+        val source = style.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID) ?: return
+        if (loadedTrackPoints.size < 2) {
+            source.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", JSONArray()).toString())
+            return
+        }
         // Split by NaN markers into separate segments (same logic as recording track)
         val segments = mutableListOf<JSONArray>()
         var current = JSONArray()
@@ -4029,7 +6348,7 @@ class MapFragment : Fragment() {
                 .put("geometry", JSONObject().put("type", "MultiLineString").put("coordinates", multiCoords))
                 .put("properties", JSONObject())
         }
-        style.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
+        source.setGeoJson(geojson.toString())
     }
 
     private fun advanceWaypoint() {
@@ -4322,14 +6641,15 @@ class MapFragment : Fragment() {
     fun showQuickActionMenu() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val dialog = BottomSheetDialog(ctx)
+        val palette = currentModalPalette()
+        val dialog = BottomSheetDialog(ctx, R.style.BottomSheetTheme)
         val dp = resources.displayMetrics.density
         val pad = (16 * dp).toInt()
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(palette.surface)
         }
 
         // 4 tab buttons in a row
@@ -4371,8 +6691,8 @@ class MapFragment : Fragment() {
                     btn.setTextColor(android.graphics.Color.parseColor("#111111"))
                     btn.textSize = 14f
                 } else {
-                    // Unselected: dark background, dim colored text
-                    btn.backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#252525"))
+                    // Unselected: theme surface background, dim colored text
+                    btn.backgroundTintList = android.content.res.ColorStateList.valueOf(palette.surfaceVariant)
                     btn.setTextColor(android.graphics.Color.parseColor(tab.color).let {
                         android.graphics.Color.argb(160,
                             android.graphics.Color.red(it),
@@ -4383,6 +6703,7 @@ class MapFragment : Fragment() {
                 }
             }
             tabs[index].builder()
+            applyModalThemeRecursive(content, palette)
         }
 
         tabs.forEachIndexed { i, tab ->
@@ -4404,12 +6725,11 @@ class MapFragment : Fragment() {
 
         val scroll = androidx.core.widget.NestedScrollView(ctx).apply {
             addView(root)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(palette.surface)
         }
         dialog.setContentView(scroll)
-        dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
-        (scroll.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         dialog.show()
+        prepareModalSheet(dialog, scroll)
         dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
     }
 
@@ -4474,10 +6794,11 @@ class MapFragment : Fragment() {
                             }
                             4 -> {
                                 val input = android.widget.EditText(ctx).apply {
-                                    setText(pt.name); setTextColor(0xFFFFFFFF.toInt())
-                                    setBackgroundColor(0xFF2A2A2A.toInt()); setPadding(24, 16, 24, 16)
+                                    setText(pt.name)
+                                    styleModalInput(this)
+                                    setPadding(24, 16, 24, 16)
                                 }
-                                androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+                                androidx.appcompat.app.AlertDialog.Builder(ctx)
                                     .setTitle("Имя точки")
                                     .setView(input)
                                     .setPositiveButton("OK") { _, _ ->
@@ -5153,21 +7474,9 @@ class MapFragment : Fragment() {
         if (System.currentTimeMillis() - lastInboxCheck < 60_000) return
         if (inboxCheckJob?.isActive == true) return
         lastInboxCheck = System.currentTimeMillis()
-        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val email = prefs.getString("sync_email", null) ?: return
-        val syncKey = prefs.getString(PREF_SYNC_API_KEY, null) ?: return
-        if (email.isBlank() || syncKey.isBlank()) return
-
-        inboxCheckJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            val entries = GroupShareApi.getInbox(email, syncKey)
-            if (entries.isEmpty()) return@launch
-            withContext(Dispatchers.Main) {
-                if (!isAdded || view == null) return@withContext
-                // Queue entries, show one at a time
-                pendingShareQueue.clear()
-                pendingShareQueue.addAll(entries)
-                showNextShareNotification(email, syncKey)
-            }
+        if (!shouldRunMonitoringMessages(ctx)) return
+        inboxCheckJob = viewLifecycleOwner.lifecycleScope.launch {
+            syncMonitoringAttachments(showPreview = true)
         }
     }
 
@@ -5239,6 +7548,27 @@ class MapFragment : Fragment() {
         updateWaypointsOnMap()
     }
 
+    /** Load shared waypoints into user points layer */
+    private fun loadUserPointsToMap(wps: List<Waypoint>, name: String) {
+        userMarkers.clear()
+        wps.forEachIndexed { idx, wp ->
+            userMarkers.add(
+                UserPoint(
+                    name = wp.name.ifBlank { "WP%02d".format(idx + 1) },
+                    position = LatLng(wp.lat, wp.lon),
+                    color = wp.color.ifBlank { "#1565C0" },
+                    symbol = wp.symbol,
+                    proximity = wp.proximity
+                )
+            )
+        }
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_USER_POINTS_JSON, "[]")?.apply()
+        saveUserPoints()
+        updateUserMarkersOnMap()
+        updateUserMarkerRadiusCircles()
+    }
+
     /** Load track from shared GPX onto map */
     private fun loadTrackToMap(pts: List<Pair<Double, Double>>, name: String) {
         loadedTrackPoints.clear()
@@ -5253,7 +7583,12 @@ class MapFragment : Fragment() {
     }
 
     /** Show picker to select a favorites group for sharing GPX */
-    private fun showGroupSharePicker(ctx: android.content.Context, name: String, gpxContent: String) {
+    private fun showGroupSharePicker(
+        ctx: android.content.Context,
+        name: String,
+        gpxContent: String,
+        type: String = MonitoringAttachmentType.GPX.code
+    ) {
         val doc = FavoritesGroupsRepository.getCached(ctx)
         if (doc.groups.isEmpty()) {
             android.widget.Toast.makeText(ctx, "Нет групп. Создайте в Настройки → Мониторинг → Управление группами", android.widget.Toast.LENGTH_LONG).show()
@@ -5273,9 +7608,49 @@ class MapFragment : Fragment() {
                 }
                 android.widget.Toast.makeText(ctx, "Отправляю в «${group.name}»...", android.widget.Toast.LENGTH_SHORT).show()
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    val result = GroupShareApi.sendToGroup(email, syncKey, group.id, name, gpxContent)
+                    val result = GroupShareApi.sendToGroup(email, syncKey, group.id, name, gpxContent, type)
+                    val prefs = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                    val myName = prefs.getString(PREF_TRACCAR_DEVICE_NAME, "")?.ifBlank { "Вы" } ?: "Вы"
+                    val myUniqueId = prefs.getString(PREF_TRACCAR_DEVICE_ID, "")?.ifBlank { null }
+                    val myStatusCode = MonitoringRepository.getMyStatus(ctx).code
+                        .takeIf { it != MonitoringPresenceStatus.NONE.code }
+                    val attachmentType = MonitoringAttachmentType.fromCode(type)
+                    val attachment = MonitoringRepository.cacheAttachment(
+                        context = ctx,
+                        type = attachmentType,
+                        name = name,
+                        payload = gpxContent,
+                        remoteId = result.shareId
+                    ) ?: MonitoringAttachment(
+                        attachmentId = result.shareId ?: "share_" + System.currentTimeMillis().toString(36),
+                        type = attachmentType.code,
+                        name = name,
+                        sizeBytes = gpxContent.toByteArray().size.toLong(),
+                        remoteId = result.shareId,
+                        cachedAt = System.currentTimeMillis()
+                    )
+                    MonitoringRepository.addLocalMessage(
+                        ctx,
+                        MonitoringMessage(
+                            messageId = result.shareId ?: "share_" + System.currentTimeMillis().toString(36),
+                            scope = MonitoringMessage.SCOPE_GROUP,
+                            targetId = group.id,
+                            targetName = group.name,
+                            senderUniqueId = myUniqueId,
+                            senderName = myName,
+                            senderStatusCode = myStatusCode,
+                            text = attachment.previewText,
+                            kind = MonitoringMessageKind.ATTACHMENT.code,
+                            attachment = attachment,
+                            sentAt = System.currentTimeMillis(),
+                            incoming = false,
+                            read = true,
+                            delivery = if (result.ok) MonitoringMessage.DELIVERY_SENT else MonitoringMessage.DELIVERY_FAILED
+                        )
+                    )
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         if (!isAdded) return@withContext
+                        refreshMonitoringMessagesUi()
                         if (result.ok) {
                             android.widget.Toast.makeText(ctx, "✅ Отправлено в «${group.name}» (${result.deliveredCount} участников)", android.widget.Toast.LENGTH_LONG).show()
                         } else {
@@ -5303,11 +7678,13 @@ class MapFragment : Fragment() {
             return
         }
 
-        val dialog = BottomSheetDialog(ctx)
+        val palette = currentModalPalette()
+        val dialog = BottomSheetDialog(ctx, R.style.BottomSheetTheme)
         val pad = (16 * resources.displayMetrics.density).toInt()
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            setBackgroundColor(palette.surface)
         }
 
         val routeName = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -5405,9 +7782,6 @@ class MapFragment : Fragment() {
 
         val scroll = androidx.core.widget.NestedScrollView(ctx).apply { addView(root) }
         dialog.setContentView(scroll)
-        dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
-        (scroll.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
-        scroll.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         dialog.setOnShowListener {
             val bsView = dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
             bsView?.let { v ->
@@ -5420,13 +7794,15 @@ class MapFragment : Fragment() {
             }
         }
         dialog.show()
+        prepareModalSheet(dialog, scroll)
     }
 
     /** Full route editor — create/edit/delete waypoints, set radius, save as GPX */
     fun showRouteEditor() {
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val dialog = BottomSheetDialog(ctx)
+        val palette = currentModalPalette()
+        val dialog = BottomSheetDialog(ctx, R.style.BottomSheetTheme)
         val pad = (16 * resources.displayMetrics.density).toInt()
 
         // Editing copy of waypoints — if empty, import user markers
@@ -5443,7 +7819,7 @@ class MapFragment : Fragment() {
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(palette.surface)
         }
 
         // Title
@@ -5693,9 +8069,8 @@ class MapFragment : Fragment() {
         root.addView(saveRow)
 
         dialog.setContentView(root)
-        dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
-        (root.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
         dialog.show()
+        prepareModalSheet(dialog, root)
         dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
     }
 
@@ -5708,22 +8083,20 @@ class MapFragment : Fragment() {
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(currentModalPalette().surface)
         }
 
         val inputName = android.widget.EditText(ctx).apply {
             hint = "Имя точки"
             setText(wp.name)
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
         }
         root.addView(inputName)
 
         val inputLat = android.widget.EditText(ctx).apply {
             hint = "Широта"
             setText(wp.lat.toString())
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
         root.addView(inputLat)
@@ -5731,8 +8104,7 @@ class MapFragment : Fragment() {
         val inputLon = android.widget.EditText(ctx).apply {
             hint = "Долгота"
             setText(wp.lon.toString())
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
         }
         root.addView(inputLon)
@@ -5740,12 +8112,12 @@ class MapFragment : Fragment() {
         val inputDesc = android.widget.EditText(ctx).apply {
             hint = "Описание (необязательно)"
             setText(wp.description)
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
         }
         root.addView(inputDesc)
 
-        androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+        applyModalThemeRecursive(root, currentModalPalette())
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Редактировать WP ${index + 1}")
             .setView(root)
             .setPositiveButton("OK") { _, _ ->
@@ -5779,7 +8151,7 @@ class MapFragment : Fragment() {
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(currentModalPalette().surface)
         }
 
         fun label(text: String) = android.widget.TextView(ctx).apply {
@@ -5792,8 +8164,8 @@ class MapFragment : Fragment() {
         // Name
         root.addView(label("Имя"))
         val inputName = android.widget.EditText(ctx).apply {
-            setText(wp.name); setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            setText(wp.name)
+            styleModalInput(this)
             hint = "Имя точки"
         }
         root.addView(inputName)
@@ -5801,8 +8173,8 @@ class MapFragment : Fragment() {
         // Description
         root.addView(label("Описание"))
         val inputDesc = android.widget.EditText(ctx).apply {
-            setText(wp.description); setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            setText(wp.description)
+            styleModalInput(this)
             hint = "Описание (необязательно)"
             minLines = 2; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
         }
@@ -5813,16 +8185,14 @@ class MapFragment : Fragment() {
         val inputLat = android.widget.EditText(ctx).apply {
             hint = "N 59°52.123'"
             setText(formatDM(wp.lat, true))
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
             textSize = 14f
         }
         root.addView(inputLat)
         val inputLon = android.widget.EditText(ctx).apply {
             hint = "E 29°45.678'"
             setText(formatDM(wp.lon, false))
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
             textSize = 14f
         }
         root.addView(inputLon)
@@ -5900,8 +8270,7 @@ class MapFragment : Fragment() {
         val inputProx = android.widget.EditText(ctx).apply {
             setText(if (wp.proximity > 0) wp.proximity.toInt().toString() else "")
             hint = "0 = глобальный"
-            setTextColor(android.graphics.Color.WHITE)
-            setHintTextColor(android.graphics.Color.parseColor("#666666"))
+            styleModalInput(this)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -5911,7 +8280,8 @@ class MapFragment : Fragment() {
 
         val scroll = android.widget.ScrollView(ctx).apply { addView(root) }
 
-        androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+        applyModalThemeRecursive(scroll, currentModalPalette())
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Свойства WP ${index + 1}")
             .setView(scroll)
             .setPositiveButton("OK") { _, _ ->
@@ -6281,8 +8651,9 @@ class MapFragment : Fragment() {
             }
         }
         // GO/STOP in top bar — always visible, color indicates state
-        b.btnWidgetGo.setTextColor(if (navActive) 0xFF00E676.toInt() else 0xFF666666.toInt())
-        b.btnWidgetStop.setTextColor(if (navActive) 0xFFFF4444.toInt() else 0xFF666666.toInt())
+        val topPalette = currentTopBarPalette()
+        b.btnWidgetGo.setTextColor(if (navActive) topPalette.success else topPalette.neutralText)
+        b.btnWidgetStop.setTextColor(if (navActive) topPalette.error else topPalette.neutralText)
     }
 
     private fun saveWaypointsToPrefs() {
@@ -6641,6 +9012,7 @@ class MapFragment : Fragment() {
 
                     // Cursor, camera and track-tip must use the same filtered position.
                     updateGpsArrow(newPoint.latitude, newPoint.longitude, effectiveBearing)
+                    updateGpsDistanceRings(newPoint.latitude, newPoint.longitude)
                     // Update heading line from GPS — use same filtered bearing as cursor
                     val hlPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     if (hlPrefs?.getBoolean(PREF_HEADING_LINE_ENABLED, false) == true) {
@@ -6648,8 +9020,12 @@ class MapFragment : Fragment() {
                     }
 
                     // Update accuracy circle — shrinks as GPS locks on, hides when < 10m
-                    if (loc.hasAccuracy()) {
-                        updateAccuracyCircle(loc.latitude, loc.longitude, loc.accuracy)
+                    lastGpsAccuracyM = if (loc.hasAccuracy()) loc.accuracy else Float.NaN
+                    if (lastGpsAccuracyM.isNaN()) {
+                        clearAccuracyCircle()
+                    } else {
+                        lastAccuracyCircleRefreshMs = android.os.SystemClock.elapsedRealtime()
+                        updateAccuracyCircle(newPoint.latitude, newPoint.longitude, lastGpsAccuracyM)
                     }
 
                     // Keep GL renderer awake — prevents first-touch lag after GPU power saving
@@ -7308,17 +9684,25 @@ class MapFragment : Fragment() {
     // Cached track GeoJSON — rebuilt only on GPS fix, reused for extrapolation
     private var cachedTrackSegments: List<JSONArray>? = null
     private var cachedTrackPointCount = 0
+    private var cachedTrackGeoJson: String? = null
+    private var lastAppliedTrackGeoJson: String? = null
+    private var lastAppliedTrackSourceIdentity = 0
+    private var lastTrackExtrapolatedUpdateMs = 0L
 
     private fun updateTrackOnMap(extrapolateLat: Double = Double.NaN, extrapolateLon: Double = Double.NaN) {
         val style = mapboxMap?.style ?: return
         val pointCount = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.size }
+        val needsRebuild = cachedTrackSegments == null || pointCount != cachedTrackPointCount
 
         // Rebuild segment cache only when new points arrive (not every frame)
-        if (cachedTrackSegments == null || pointCount != cachedTrackPointCount) {
+        if (needsRebuild) {
             val snapshot = synchronized(TrackingService.trackPoints) { ArrayList(TrackingService.trackPoints) }
             if (snapshot.size < 2) {
                 cachedTrackSegments = emptyList()
                 cachedTrackPointCount = snapshot.size
+                cachedTrackGeoJson = null
+                lastAppliedTrackGeoJson = null
+                lastAppliedTrackSourceIdentity = 0
                 return
             }
             val segments = mutableListOf<JSONArray>()
@@ -7334,32 +9718,52 @@ class MapFragment : Fragment() {
             if (current.length() >= 2) segments.add(current)
             cachedTrackSegments = segments
             cachedTrackPointCount = snapshot.size
+            cachedTrackGeoJson = buildTrackGeoJson(segments)
         }
 
         val segments = cachedTrackSegments ?: return
         if (segments.isEmpty()) return
+        val source = style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID) ?: return
+        val sourceIdentity = System.identityHashCode(source)
+        val hasExtrapolation = !extrapolateLat.isNaN() && !extrapolateLon.isNaN() && segments.isNotEmpty()
+
+        if (!hasExtrapolation) {
+            val geoJson = cachedTrackGeoJson ?: return
+            if (geoJson == lastAppliedTrackGeoJson && sourceIdentity == lastAppliedTrackSourceIdentity) return
+            source.setGeoJson(geoJson)
+            lastAppliedTrackGeoJson = geoJson
+            lastAppliedTrackSourceIdentity = sourceIdentity
+            return
+        }
+
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!needsRebuild && (now - lastTrackExtrapolatedUpdateMs) < 200L) return
 
         // For extrapolation: clone only the last segment and append tip point
-        val outputSegments = if (!extrapolateLat.isNaN() && !extrapolateLon.isNaN() && segments.isNotEmpty()) {
-            val lastIdx = segments.size - 1
-            val lastClone = JSONArray(segments[lastIdx].toString())
-            lastClone.put(JSONArray().put(extrapolateLon).put(extrapolateLat))
-            segments.toMutableList().also { it[lastIdx] = lastClone }
-        } else segments
+        val lastIdx = segments.size - 1
+        val lastClone = JSONArray(segments[lastIdx].toString())
+        lastClone.put(JSONArray().put(extrapolateLon).put(extrapolateLat))
+        val outputSegments = segments.toMutableList().also { it[lastIdx] = lastClone }
+        val geoJson = buildTrackGeoJson(outputSegments)
+        source.setGeoJson(geoJson)
+        lastAppliedTrackGeoJson = geoJson
+        lastAppliedTrackSourceIdentity = sourceIdentity
+        lastTrackExtrapolatedUpdateMs = now
+    }
 
-        val geojson = if (outputSegments.size == 1) {
+    private fun buildTrackGeoJson(segments: List<JSONArray>): String {
+        val geojson = if (segments.size == 1) {
             JSONObject().put("type", "Feature")
-                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", outputSegments[0]))
+                .put("geometry", JSONObject().put("type", "LineString").put("coordinates", segments[0]))
                 .put("properties", JSONObject())
         } else {
             val multiCoords = JSONArray()
-            outputSegments.forEach { multiCoords.put(it) }
+            segments.forEach { multiCoords.put(it) }
             JSONObject().put("type", "Feature")
                 .put("geometry", JSONObject().put("type", "MultiLineString").put("coordinates", multiCoords))
                 .put("properties", JSONObject())
         }
-
-        style.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(geojson.toString())
+        return geojson.toString()
     }
 
     private fun cancelPendingResumeTrackRestore() {
@@ -7383,6 +9787,10 @@ class MapFragment : Fragment() {
             TrackingService.trackLengthM = calcTrackKm(savedPoints) * 1000.0
             cachedTrackSegments = null
             cachedTrackPointCount = 0
+            cachedTrackGeoJson = null
+            lastAppliedTrackGeoJson = null
+            lastAppliedTrackSourceIdentity = 0
+            lastTrackExtrapolatedUpdateMs = 0L
             Log.d("TrackDebug", "Restored live track from tmp GPX: ${savedPoints.size} points")
         } catch (e: Exception) {
             Log.w("TrackDebug", "Failed to restore live track from tmp GPX: ${e.message}")
@@ -7443,15 +9851,14 @@ class MapFragment : Fragment() {
     /** Inertia snap to GPS: quick overshoot → bounce back. No zoom-out step. */
     private fun getSafeFollowZoom(fallback: Double = 15.0): Double {
         if (startupLockedZoom > 0 && startupZoomLockUntilMs > System.currentTimeMillis()) {
-            return startupLockedZoom.coerceIn(10.0, 20.0)
+            return clampUserZoom(startupLockedZoom)
         }
         val currentZoom = mapboxMap?.cameraPosition?.zoom ?: -1.0
         if (currentZoom >= 8.0) return currentZoom
         val savedZoom = lastSavedCamera?.zoom
             ?: lastGoodCamera?.zoom
             ?: loadCameraFromPrefs()?.zoom
-            ?: fallback
-        return savedZoom.coerceIn(10.0, 20.0)
+        return sanitizeFollowZoom(savedZoom, fallback)
     }
 
     private fun flyToGps(targetZoom: Double? = null) {
@@ -7546,6 +9953,7 @@ class MapFragment : Fragment() {
     }
 
     private fun playApproachSound() {
+        if (playCustomCheckpointSound(PREF_SOUND_APPROACH_URI)) return
         // 2 loud high-pitched beeps on ALARM stream — distinct from taken sound
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
         for (i in 0 until 2) {
@@ -7560,6 +9968,7 @@ class MapFragment : Fragment() {
     }
 
     private fun playWaypointTakenSound() {
+        if (playCustomCheckpointSound(PREF_SOUND_TAKEN_URI)) return
         // 4 loud rapid beeps on ALARM stream (bypasses silent mode, max volume)
         val beepMs = 180L
         val pauseMs = 120L
@@ -7572,6 +9981,43 @@ class MapFragment : Fragment() {
                     handler.postDelayed({ tg.release() }, beepMs + 50)
                 } catch (e: Exception) { }
             }, i * (beepMs + pauseMs))
+        }
+    }
+
+    fun previewCheckpointSound(prefUriKey: String) {
+        if (playCustomCheckpointSound(prefUriKey)) return
+        when (prefUriKey) {
+            PREF_SOUND_TAKEN_URI -> playWaypointTakenSound()
+            else -> playApproachSound()
+        }
+    }
+
+    private fun playCustomCheckpointSound(prefUriKey: String): Boolean {
+        val ctx = context ?: return false
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val uriRaw = prefs.getString(prefUriKey, null)?.trim().orEmpty()
+        if (uriRaw.isBlank()) return false
+        return try {
+            val player = android.media.MediaPlayer().apply {
+                setAudioStreamType(android.media.AudioManager.STREAM_ALARM)
+                setDataSource(ctx, android.net.Uri.parse(uriRaw))
+                setOnPreparedListener { it.start() }
+                setOnCompletionListener {
+                    customCheckpointPlayers.remove(it)
+                    it.release()
+                }
+                setOnErrorListener { mp, _, _ ->
+                    customCheckpointPlayers.remove(mp)
+                    mp.release()
+                    true
+                }
+                prepareAsync()
+            }
+            customCheckpointPlayers.add(player)
+            true
+        } catch (e: Exception) {
+            Log.w("MapFragment", "Custom checkpoint sound failed: ${e.message}")
+            false
         }
     }
 
@@ -7878,6 +10324,7 @@ class MapFragment : Fragment() {
     private fun showLayerPicker() {
         val dialog = BottomSheetDialog(requireContext(), R.style.BottomSheetTheme)
         val view = layoutInflater.inflate(R.layout.bottom_sheet_layers, null)
+        val palette = currentModalPalette()
         dialog.setContentView(view)
         // Show at 2/3 screen height
         dialog.behavior.peekHeight = (resources.displayMetrics.heightPixels * 2 / 3)
@@ -7893,7 +10340,7 @@ class MapFragment : Fragment() {
             baseGroup.addView(RadioButton(requireContext()).apply {
                 text = source.label; tag = key
                 isChecked = key == currentTileKey
-                setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                setTextColor(palette.textPrimary); textSize = 13f
                 setPadding(16, 14, 16, 14); id = View.generateViewId()
             })
         }
@@ -7910,10 +10357,10 @@ class MapFragment : Fragment() {
         val hidePrefs = ctxHide.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         offlineGroup.addView(android.widget.CheckBox(ctxHide).apply {
             text = "Скрыть онлайн-базу"
-            setTextColor(0xFFFFEB3B.toInt()); textSize = 12f
+            setTextColor(palette.warning); textSize = 12f
             setPadding(16, 8, 16, 8)
             isChecked = hidePrefs.getBoolean(PREF_HIDE_ONLINE_BASE, false)
-            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFFEB3B.toInt())
+            buttonTintList = android.content.res.ColorStateList.valueOf(palette.warning)
             setOnCheckedChangeListener { _, checked ->
                 hidePrefs.edit().putBoolean(PREF_HIDE_ONLINE_BASE, checked).apply()
                 loadTileStyle(currentTileKey, currentOverlayKeys)
@@ -7921,7 +10368,7 @@ class MapFragment : Fragment() {
         })
         if (offlineMaps.isEmpty()) {
             offlineGroup.addView(android.widget.TextView(requireContext()).apply {
-                text = "Не загружено"; setTextColor(0xFF888888.toInt()); textSize = 12f
+                text = "Не загружено"; setTextColor(palette.textMuted); textSize = 12f
                 setPadding(16, 14, 16, 14)
             })
         } else {
@@ -7933,9 +10380,9 @@ class MapFragment : Fragment() {
                 val cb = android.widget.CheckBox(requireContext()).apply {
                     text = info.name; tag = info.key
                     isChecked = info.key in currentOverlayKeys
-                    setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                    setTextColor(palette.textPrimary); textSize = 13f
                     setPadding(16, 14, 16, 14); id = View.generateViewId()
-                    buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+                    buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
                     setOnCheckedChangeListener { _, checked ->
                         val area = areas.find { a -> info.name.startsWith(a.name) }
                         if (checked) {
@@ -7964,7 +10411,7 @@ class MapFragment : Fragment() {
                 if (area != null) {
                     offlineGroup.addView(android.widget.TextView(requireContext()).apply {
                         text = "   ⚙️ Слои (${area.enabledOverlays().size}/${area.overlays.size})"
-                        setTextColor(0xFF888888.toInt()); textSize = 11f
+                        setTextColor(palette.textMuted); textSize = 11f
                         setPadding((40 * dp).toInt(), 0, 16, (4 * dp).toInt())
                         setOnClickListener {
                             dialog.dismiss()
@@ -7982,9 +10429,9 @@ class MapFragment : Fragment() {
             overlayContainer.addView(android.widget.CheckBox(requireContext()).apply {
                 text = source.label; tag = key
                 isChecked = key in currentOverlayKeys
-                setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                setTextColor(palette.textPrimary); textSize = 13f
                 setPadding(16, 14, 16, 14); id = View.generateViewId()
-                buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+                buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
                 setOnCheckedChangeListener { _, checked ->
                     if (checked) currentOverlayKeys.add(key) else currentOverlayKeys.remove(key)
                     loadTileStyle(currentTileKey, currentOverlayKeys)
@@ -7997,7 +10444,7 @@ class MapFragment : Fragment() {
             val ctx = context ?: return@setOnClickListener
             btn.isEnabled = false
             (btn as android.widget.TextView).text = "⟳ Обновление..."
-            btn.setTextColor(0xFF888888.toInt())
+            btn.setTextColor(palette.textMuted)
             TileCatalogManager.fetchCatalog(ctx) { catalog ->
                 if (!isAdded || _binding == null) return@fetchCatalog
                 if (catalog != null) {
@@ -8007,7 +10454,7 @@ class MapFragment : Fragment() {
                     loadTileStyle(currentTileKey, currentOverlayKeys)
                 } else {
                     btn.text = "⟳ Обновить каталог"
-                    btn.setTextColor(0xFFFF6F00.toInt())
+                    btn.setTextColor(palette.accent)
                     btn.isEnabled = true
                     Toast.makeText(ctx, "Не удалось обновить каталог", Toast.LENGTH_SHORT).show()
                 }
@@ -8015,6 +10462,7 @@ class MapFragment : Fragment() {
         }
 
         dialog.show()
+        prepareModalSheet(dialog, view)
     }
 
     /** Simple triangle navigation arrow: tip up, white border, solid fill.
@@ -8116,19 +10564,65 @@ class MapFragment : Fragment() {
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.IO) {
-                    // Check if user is a beta tester by email
-                    val email = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getString("sync_email", null)
-                    var updateUrl = UpdateManager.UPDATE_URL
-                    if (!email.isNullOrBlank()) {
+                    fun readJson(vararg urls: String): JSONObject {
+                        var lastError: Exception? = null
+                        for (candidate in urls) {
+                            try {
+                                return JSONObject(URL(candidate).readText())
+                            } catch (e: Exception) {
+                                lastError = e
+                            }
+                        }
+                        throw lastError ?: IllegalStateException("No update URLs provided")
+                    }
+
+                    val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    val email = sequenceOf(
+                        prefs?.getString("sync_email", null),
+                        prefs?.getString("backup_email", null)
+                    ).mapNotNull { it?.trim()?.lowercase()?.takeIf(String::isNotEmpty) }
+                        .firstOrNull()
+                    val plan = context?.let { LicenseManager.getPlan(it) }?.trim()?.lowercase()
+                    var route = "stable"
+                    var json = readJson(UpdateManager.UPDATE_URL)
+
+                    if (plan == "beta") {
+                        json = readJson(UpdateManager.BETA_UPDATE_URL, UpdateManager.LEGACY_BETA_UPDATE_URL)
+                        route = "beta-plan"
+                    } else if (!email.isNullOrBlank()) {
                         try {
                             val encodedEmail = java.net.URLEncoder.encode(email, "UTF-8")
-                            val channelJson = JSONObject(URL("$SYNC_BASE_URL/api/update-channel?email=$encodedEmail").readText())
-                            if (channelJson.optString("channel") == "beta") {
-                                updateUrl = UpdateManager.BETA_UPDATE_URL
+                            val channelJson = readJson(
+                                "${UpdateManager.UPDATE_CHANNEL_URL}?email=$encodedEmail",
+                                "${UpdateManager.LEGACY_UPDATE_CHANNEL_URL}?email=$encodedEmail"
+                            )
+                            if (channelJson.optString("channel").trim().lowercase() == "beta") {
+                                json = readJson(UpdateManager.BETA_UPDATE_URL, UpdateManager.LEGACY_BETA_UPDATE_URL)
+                                route = "beta-email"
                             }
-                        } catch (_: Exception) { /* fallback to stable */ }
+                        } catch (e: Exception) {
+                            Log.d("RaceNavUpdate", "Channel lookup failed for $email: ${e.message}")
+                        }
                     }
-                    JSONObject(URL(updateUrl).readText())
+
+                    if (route == "stable") {
+                        val stableVersion = json.optString("versionName", json.optString("version", ""))
+                        if (UpdateManager.isNewer(current, stableVersion)) {
+                            try {
+                                val betaJson = readJson(UpdateManager.BETA_UPDATE_URL, UpdateManager.LEGACY_BETA_UPDATE_URL)
+                                val betaVersion = betaJson.optString("versionName", betaJson.optString("version", ""))
+                                if (UpdateManager.isNewer(betaVersion, current)) {
+                                    json = betaJson
+                                    route = "beta-installed"
+                                }
+                            } catch (e: Exception) {
+                                Log.d("RaceNavUpdate", "Beta fallback lookup failed: ${e.message}")
+                            }
+                        }
+                    }
+
+                    Log.d("RaceNavUpdate", "Update route=$route email=${email ?: ""} current=$current latest=${json.optString("versionName", json.optString("version", ""))}")
+                    json
                 }
                 val latestVersion = json.optString("versionName", json.optString("version", ""))
                 val apkUrl = json.optString("apkUrl", json.optString("url", ""))
@@ -8142,95 +10636,159 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Pull waypoints/tracks from TND Sync server and load them into map */
+    private fun readSyncJson(conn: java.net.HttpURLConnection): JSONObject {
+        return try {
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                .orEmpty()
+            if (code !in 200..299) {
+                val serverError = runCatching { JSONObject(body).optString("error", "") }.getOrNull().orEmpty()
+                val message = serverError.ifBlank { if (body.isNotBlank()) body else "HTTP $code" }
+                throw Exception(message)
+            }
+            JSONObject(if (body.isBlank()) "{}" else body)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** Pull points, tracks and routes from TND Sync server and load them into Android structures. */
     fun syncPull(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
         val ctx = context ?: run { onResult(false, "Контекст недоступен"); return }
         if (!LicenseManager.hasFullAccess(ctx)) { onResult(false, "Требуется лицензия"); return }
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null)?.trim().orEmpty()
+        val useModernSync = email.isNotEmpty()
+
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.IO) {
-                    val conn = java.net.URL("$SYNC_BASE_URL/api/state").openConnection() as java.net.HttpURLConnection
+                    val path = if (useModernSync) "/api/sync/pull" else "/api/state"
+                    val conn = java.net.URL("$SYNC_BASE_URL$path").openConnection() as java.net.HttpURLConnection
                     conn.requestMethod = "GET"
-                    conn.setRequestProperty("X-Api-Key", apiKey)
-                    conn.setRequestProperty("X-Client-Id", "android")
                     conn.connectTimeout = 10000
                     conn.readTimeout = 10000
-                    if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
-                    JSONObject(conn.inputStream.bufferedReader().readText())
+                    if (useModernSync) {
+                        conn.setRequestProperty("X-Sync-Email", email)
+                        conn.setRequestProperty("X-Sync-Key", apiKey)
+                    } else {
+                        conn.setRequestProperty("X-Api-Key", apiKey)
+                        conn.setRequestProperty("X-Client-Id", "android")
+                    }
+                    readSyncJson(conn)
                 }
-                val syncWaypoints = mutableListOf<Waypoint>()
+
+                val syncUserPoints = mutableListOf<UserPoint>()
                 val wptArray = json.optJSONArray("waypoints")
                 if (wptArray != null) {
                     for (i in 0 until wptArray.length()) {
                         val w = wptArray.getJSONObject(i)
-                        syncWaypoints.add(Waypoint(
-                            lat = w.getDouble("lat"),
-                            lon = w.getDouble("lng"),
-                            name = w.optString("name", "WP${i + 1}"),
-                            index = i,
-                            description = w.optString("desc", "")
+                        syncUserPoints.add(UserPoint(
+                            name = w.optString("name", "Точка ${i + 1}"),
+                            position = LatLng(w.optDouble("lat"), w.optDouble("lng")),
+                            color = w.optString("color", "#1565C0"),
+                            symbol = w.optString("icon", w.optString("symbol", "")),
+                            proximity = w.optDouble("radius", w.optDouble("proximity", 0.0))
                         ))
                     }
                 }
+
                 val syncTrackPts = mutableListOf<Pair<Double, Double>>()
                 val tracksArray = json.optJSONArray("tracks")
                 if (tracksArray != null) {
                     for (i in 0 until tracksArray.length()) {
                         val t = tracksArray.getJSONObject(i)
-                        val pts = t.optJSONArray("points")
-                        if (pts != null) {
-                            for (j in 0 until pts.length()) {
-                                val p = pts.getJSONObject(j)
-                                syncTrackPts.add(Pair(p.getDouble("lat"), p.getDouble("lng")))
-                            }
+                        val pts = t.optJSONArray("points") ?: continue
+                        if (syncTrackPts.isNotEmpty()) syncTrackPts.add(Pair(Double.NaN, Double.NaN))
+                        for (j in 0 until pts.length()) {
+                            val p = pts.getJSONObject(j)
+                            val lat = p.optDouble("lat", Double.NaN)
+                            val lng = p.optDouble("lng", Double.NaN)
+                            if (!lat.isNaN() && !lng.isNaN()) syncTrackPts.add(Pair(lat, lng))
                         }
                     }
                 }
-                // Routes — if no tracks, use routes as track polyline + extract labeled points as waypoints
+
+                val syncRouteWaypoints = mutableListOf<Waypoint>()
                 var syncRoutesCount = 0
+                var importedRouteName: String? = null
                 val routesArray = json.optJSONArray("routes")
                 if (routesArray != null && routesArray.length() > 0) {
                     syncRoutesCount = routesArray.length()
-                    for (i in 0 until routesArray.length()) {
-                        val r = routesArray.getJSONObject(i)
-                        val pts = r.optJSONArray("points") ?: continue
-                        val labels = r.optJSONArray("labels")
-                        for (j in 0 until pts.length()) {
-                            val p = pts.getJSONObject(j)
-                            if (syncTrackPts.isEmpty() || i > 0) {
-                                // Only add to track if no tracks already, or appending subsequent routes
-                                syncTrackPts.add(Pair(p.getDouble("lat"), p.getDouble("lng")))
-                            }
-                            // If waypoints not loaded from waypoints[], use labeled route points
-                            val label = labels?.optString(j, "")?.takeIf { it.isNotBlank() }
-                            if (label != null && syncWaypoints.isEmpty()) {
-                                syncWaypoints.add(Waypoint(
-                                    lat = p.getDouble("lat"),
-                                    lon = p.getDouble("lng"),
+                    val firstRoute = routesArray.optJSONObject(0)
+                    if (firstRoute != null) {
+                        importedRouteName = firstRoute.optString("name", "Маршрут синхронизации").ifBlank { "Маршрут синхронизации" }
+                        val pts = firstRoute.optJSONArray("points")
+                        val labels = firstRoute.optJSONArray("labels")
+                        if (pts != null) {
+                            for (j in 0 until pts.length()) {
+                                val p = pts.getJSONObject(j)
+                                val label = labels?.optString(j)?.takeIf { it.isNotBlank() } ?: "WP${j + 1}"
+                                syncRouteWaypoints.add(Waypoint(
+                                    lat = p.optDouble("lat"),
+                                    lon = p.optDouble("lng"),
                                     name = label,
-                                    index = syncWaypoints.size,
-                                    description = r.optString("name", "")
+                                    index = j + 1,
+                                    description = importedRouteName ?: "",
+                                    color = firstRoute.optString("color", "")
                                 ))
                             }
                         }
                     }
                 }
+
                 withContext(Dispatchers.Main) {
-                    val ctx = context ?: return@withContext
-                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    if (syncWaypoints.isNotEmpty()) {
-                        loadWaypoints(syncWaypoints)
-                        prefs.edit().putString(PREF_LOADED_WP_NAME, "WP: синхронизация (${syncWaypoints.size})").apply()
+                    userMarkers.clear()
+                    userMarkers.addAll(syncUserPoints)
+                    updateUserMarkersOnMap()
+                    updateUserMarkerRadiusCircles()
+                    saveUserPoints()
+
+                    if (syncRouteWaypoints.isNotEmpty()) {
+                        loadWaypoints(syncRouteWaypoints)
+                        prefs.edit()
+                            .putString(PREF_ROUTE_NAME, importedRouteName ?: "Маршрут синхронизации")
+                            .putString(PREF_LOADED_WP_NAME, "Маршрут: ${syncRouteWaypoints.size} WP")
+                            .apply()
+                    } else {
+                        waypoints.clear()
+                        activeWpIndex = 0
+                        wpBitmapCache.clear()
+                        updateWaypointsOnMap()
+                        updateRouteLineOnMap()
+                        updateRadiusCircles()
+                        updateNavLine()
+                        updateWaypointNavBar()
+                        saveWaypointsToPrefs()
+                        prefs.edit().remove(PREF_ROUTE_NAME).remove(PREF_LOADED_WP_NAME).apply()
                     }
+
+                    loadTrack(syncTrackPts)
                     if (syncTrackPts.isNotEmpty()) {
-                        loadTrack(syncTrackPts)
-                        prefs.edit().putString(PREF_LOADED_TRACK_NAME, "Трек: синхронизация (${syncTrackPts.size} точек)").apply()
+                        val realTrackPoints = syncTrackPts.count { !it.first.isNaN() && !it.second.isNaN() }
+                        val trackLabel = if ((tracksArray?.length() ?: 0) > 1) {
+                            "Синхр. треки: ${tracksArray?.length()} (${realTrackPoints} точек)"
+                        } else {
+                            "Синхр. трек (${realTrackPoints} точек)"
+                        }
+                        prefs.edit().putString(PREF_LOADED_TRACK_NAME, trackLabel).apply()
+                    } else {
+                        prefs.edit().remove(PREF_LOADED_TRACK_NAME).apply()
                     }
+
                     val msg = buildString {
-                        if (syncWaypoints.isNotEmpty()) append("${syncWaypoints.size} WP")
-                        if (syncWaypoints.isNotEmpty() && syncTrackPts.isNotEmpty()) append(", ")
-                        if (syncTrackPts.isNotEmpty()) append("трек (${syncTrackPts.size} точек)")
-                        if (syncRoutesCount > 0 && syncWaypoints.isEmpty() && syncTrackPts.isEmpty()) append("$syncRoutesCount маршрутов")
+                        if (syncUserPoints.isNotEmpty()) append("${syncUserPoints.size} точек")
+                        if (syncTrackPts.isNotEmpty()) {
+                            if (isNotEmpty()) append(", ")
+                            append("трек (${syncTrackPts.count { !it.first.isNaN() && !it.second.isNaN() }} точек)")
+                        }
+                        if (syncRoutesCount > 0) {
+                            if (isNotEmpty()) append(", ")
+                            if (syncRoutesCount == 1) append("1 маршрут")
+                            else append("$syncRoutesCount маршрутов (загружен первый)")
+                        }
                         if (isEmpty()) append("нет данных")
                     }
                     onResult(true, "Получено: $msg")
@@ -8243,48 +10801,194 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Push current recording track to TND Sync server */
+    /** Push Android points, tracks and current route to TND Sync server. */
     fun syncPush(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
         val ctx = context ?: run { onResult(false, "Контекст недоступен"); return }
         if (!LicenseManager.hasFullAccess(ctx)) { onResult(false, "Требуется лицензия"); return }
-        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
-        if (pts.isEmpty()) {
-            onResult(false, "Нет активного трека для отправки")
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null)?.trim().orEmpty()
+        val useModernSync = email.isNotEmpty()
+
+        val loadedTrackSnapshot = loadedTrackPoints.toList()
+        val recordingSnapshot = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+        val userPointsSnapshot = userMarkers.toList()
+        val routeSnapshot = waypoints.toList()
+
+        val hasSyncData = userPointsSnapshot.isNotEmpty() ||
+            routeSnapshot.isNotEmpty() ||
+            loadedTrackSnapshot.any { it != SEGMENT_BREAK } ||
+            recordingSnapshot.any { !it.first.isNaN() && !it.second.isNaN() }
+        if (!hasSyncData) {
+            onResult(false, "Нет точек, треков или маршрута для отправки")
             return
         }
+
         lifecycleScope.launch {
             try {
-                val pointsArray = JSONArray()
-                pts.forEach { (lat, lon) ->
-                    pointsArray.put(JSONObject().put("lat", lat).put("lng", lon))
+                val payload = withContext(Dispatchers.Default) {
+                    fun buildTrackObject(id: Int, name: String, color: String, width: Int, points: List<Pair<Double, Double>>): JSONObject {
+                        val pointsArray = JSONArray()
+                        points.forEach { (lat, lng) ->
+                            pointsArray.put(JSONObject().put("lat", lat).put("lng", lng))
+                        }
+                        return JSONObject()
+                            .put("id", id)
+                            .put("name", name)
+                            .put("color", color)
+                            .put("width", width)
+                            .put("pointSize", 0)
+                            .put("points", pointsArray)
+                            .put("pointsData", JSONArray())
+                            .put("visible", true)
+                            .put("source", "android")
+                    }
+
+                    fun appendSegments(
+                        target: JSONArray,
+                        baseName: String,
+                        color: String,
+                        width: Int,
+                        segments: List<List<Pair<Double, Double>>>,
+                        startId: Int
+                    ): Int {
+                        var nextId = startId
+                        val normalized = segments.filter { it.size >= 2 }
+                        normalized.forEachIndexed { index, segment ->
+                            val suffix = if (normalized.size > 1) " ${index + 1}/${normalized.size}" else ""
+                            target.put(buildTrackObject(nextId++, baseName + suffix, color, width, segment))
+                        }
+                        return nextId
+                    }
+
+                    val tracksArray = JSONArray()
+                    var nextTrackId = 1
+
+                    val loadedSegments = mutableListOf<MutableList<Pair<Double, Double>>>()
+                    var currentLoaded = mutableListOf<Pair<Double, Double>>()
+                    loadedTrackSnapshot.forEach { point ->
+                        if (point == SEGMENT_BREAK) {
+                            if (currentLoaded.isNotEmpty()) loadedSegments.add(currentLoaded)
+                            currentLoaded = mutableListOf()
+                        } else {
+                            currentLoaded.add(Pair(point.latitude, point.longitude))
+                        }
+                    }
+                    if (currentLoaded.isNotEmpty()) loadedSegments.add(currentLoaded)
+                    nextTrackId = appendSegments(
+                        target = tracksArray,
+                        baseName = prefs.getString(PREF_LOADED_TRACK_NAME, "Android трек") ?: "Android трек",
+                        color = prefs.getString(PREF_LOADED_TRACK_COLOR, DEFAULT_LOADED_TRACK_COLOR) ?: DEFAULT_LOADED_TRACK_COLOR,
+                        width = prefs.getFloat(PREF_LOADED_TRACK_WIDTH, DEFAULT_LOADED_TRACK_WIDTH).toInt().coerceAtLeast(1),
+                        segments = loadedSegments,
+                        startId = nextTrackId
+                    )
+
+                    val recordingSegments = mutableListOf<MutableList<Pair<Double, Double>>>()
+                    var currentRecording = mutableListOf<Pair<Double, Double>>()
+                    recordingSnapshot.forEach { (lat, lng) ->
+                        if (lat.isNaN() || lng.isNaN()) {
+                            if (currentRecording.isNotEmpty()) recordingSegments.add(currentRecording)
+                            currentRecording = mutableListOf()
+                        } else {
+                            currentRecording.add(Pair(lat, lng))
+                        }
+                    }
+                    if (currentRecording.isNotEmpty()) recordingSegments.add(currentRecording)
+                    appendSegments(
+                        target = tracksArray,
+                        baseName = "Текущий Android трек",
+                        color = prefs.getString(PREF_TRACK_COLOR, DEFAULT_TRACK_COLOR) ?: DEFAULT_TRACK_COLOR,
+                        width = prefs.getFloat(PREF_TRACK_WIDTH, DEFAULT_TRACK_WIDTH).toInt().coerceAtLeast(1),
+                        segments = recordingSegments,
+                        startId = nextTrackId
+                    )
+
+                    val syncWaypoints = JSONArray()
+                    userPointsSnapshot.forEachIndexed { index, point ->
+                        syncWaypoints.put(JSONObject()
+                            .put("lat", point.position.latitude)
+                            .put("lng", point.position.longitude)
+                            .put("name", point.name)
+                            .put("desc", "")
+                            .put("icon", point.symbol)
+                            .put("color", point.color)
+                            .put("radius", point.proximity)
+                            .put("num", index + 1)
+                            .put("setId", 1)
+                            .put("source", "android"))
+                    }
+
+                    val waypointSets = JSONArray()
+                    waypointSets.put(JSONObject().put("id", 1).put("name", "Android points").put("visible", true))
+
+                    val routesArray = JSONArray()
+                    if (routeSnapshot.isNotEmpty()) {
+                        val routePoints = JSONArray()
+                        val routeLabels = JSONArray()
+                        routeSnapshot.forEach { wp ->
+                            routePoints.put(JSONObject().put("lat", wp.lat).put("lng", wp.lon))
+                            routeLabels.put(wp.name)
+                        }
+                        routesArray.put(JSONObject()
+                            .put("id", 1)
+                            .put("name", prefs.getString(PREF_ROUTE_NAME, "Android маршрут") ?: "Android маршрут")
+                            .put("color", "#4a8adf")
+                            .put("points", routePoints)
+                            .put("labels", routeLabels)
+                            .put("source", "android"))
+                    }
+
+                    JSONObject()
+                        .put("version", 1)
+                        .put("waypoints", syncWaypoints)
+                        .put("tracks", tracksArray)
+                        .put("routes", routesArray)
+                        .put("waypointSets", waypointSets)
+                        .put("activeSetId", 1)
+                        .put("counters", JSONObject()
+                            .put("wpCounter", userPointsSnapshot.size + 1)
+                            .put("trackIdCounter", tracksArray.length() + 1)
+                            .put("routeIdCounter", routesArray.length() + 1)
+                            .put("waypointSetIdCounter", 2))
                 }
-                val trackObj = JSONObject()
-                    .put("id", 1).put("name", "Android трек")
-                    .put("color", "#FF2200").put("width", 4)
-                    .put("pointSize", 0).put("points", pointsArray)
-                    .put("pointsData", JSONArray()).put("visible", true)
-                val body = JSONObject()
-                    .put("version", 1)
-                    .put("waypoints", JSONArray())
-                    .put("tracks", JSONArray().put(trackObj))
-                    .put("routes", JSONArray())
-                    .put("waypointSets", JSONArray())
-                    .put("counters", JSONObject())
+
                 withContext(Dispatchers.IO) {
-                    val conn = java.net.URL("$SYNC_BASE_URL/api/state").openConnection() as java.net.HttpURLConnection
-                    conn.requestMethod = "PUT"
+                    val path = if (useModernSync) "/api/sync/push" else "/api/state"
+                    val method = if (useModernSync) "POST" else "PUT"
+                    val conn = java.net.URL("$SYNC_BASE_URL$path").openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = method
                     conn.setRequestProperty("Content-Type", "application/json")
-                    conn.setRequestProperty("X-Api-Key", apiKey)
-                    conn.setRequestProperty("X-Client-Id", "android")
                     conn.connectTimeout = 10000
                     conn.readTimeout = 10000
                     conn.doOutput = true
-                    val bodyBytes = body.toString().toByteArray(Charsets.UTF_8)
-                    conn.outputStream.write(bodyBytes)
-                    if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+                    if (useModernSync) {
+                        conn.setRequestProperty("X-Sync-Email", email)
+                        conn.setRequestProperty("X-Sync-Key", apiKey)
+                    } else {
+                        conn.setRequestProperty("X-Api-Key", apiKey)
+                        conn.setRequestProperty("X-Client-Id", "android")
+                    }
+
+                    val body = if (useModernSync) {
+                        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                        fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                        JSONObject()
+                            .put("data", payload)
+                            .put("deviceId", LicenseManager.getShortDeviceId(ctx))
+                            .put("deviceType", "android")
+                            .put("timestamp", fmt.format(java.util.Date()))
+                    } else {
+                        payload
+                    }
+
+                    conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                    readSyncJson(conn)
                 }
+
                 withContext(Dispatchers.Main) {
-                    onResult(true, "Отправлено ${pts.size} точек")
+                    val trackObjects = payload.optJSONArray("tracks")?.length() ?: 0
+                    val routeObjects = payload.optJSONArray("routes")?.length() ?: 0
+                    onResult(true, "Отправлено: ${userPointsSnapshot.size} точек, $trackObjects треков, $routeObjects маршрутов")
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -8325,12 +11029,14 @@ class MapFragment : Fragment() {
         }
         // Check group-share inbox for new shared files
         checkGroupShareInbox()
+        startMonitoringMessagesPolling()
         // Retry email registration if saved locally but not yet synced to server
         retryEmailRegistration()
         applyWidgetPrefs()
         applyUiScale()
         applyWidgetFontScale()
         applyTopBarPrefs()
+        refreshMonitoringMessagesUi()
         // Apply tilt gesture preference (user may have changed it in Settings)
         applyTiltPref()
         // Регистрируем приёмник GPS от сервиса
@@ -8345,26 +11051,8 @@ class MapFragment : Fragment() {
         }
         // ACTION_BATTERY_CHANGED — sticky broadcast, не требует exported флага
         context?.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        // StateFlow collector — works even when broadcast is blocked (Vivo/Android 16)
-        viewLifecycleOwner.lifecycleScope.launch {
-            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                TrackingService.locationFlow.collect { update ->
-                    if (update != null) {
-                        handleLocationUpdate(update)
-                    }
-                }
-            }
-        }
         // Start GNSS satellite monitoring for quality/jamming detection
         context?.let { GnssStatusMonitor.start(it) }
-        // GPS quality dot collector
-        viewLifecycleOwner.lifecycleScope.launch {
-            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                GnssStatusMonitor.gnssInfo.collect { info ->
-                    updateGpsDot(info)
-                }
-            }
-        }
         // Update top bar server dot based on TraccarService + user pref
         val showServerDot = TraccarService.isRunning &&
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_BTN_SERVER_DOT, false) == true
@@ -8435,9 +11123,23 @@ class MapFragment : Fragment() {
             mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
             mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
         }
+        if (isDraggingDownloadPoint || downloadPointDragRunnable != null) {
+            isDraggingDownloadPoint = false
+            downloadDragPointIndex = -1
+            downloadPointDragRunnable?.let { emergencyHandler.removeCallbacks(it) }; downloadPointDragRunnable = null
+            mapboxMap?.uiSettings?.isScrollGesturesEnabled = true
+            mapboxMap?.uiSettings?.isZoomGesturesEnabled = true
+        }
         cancelPendingResumeTrackRestore()
         stopMagnetometer()
         stopCameraLoop()
+        stopMonitoringMessagesPolling()
+        hideIncomingMessagePreview(immediate = true)
+        customCheckpointPlayers.toList().forEach {
+            try { it.stop() } catch (_: Exception) {}
+            try { it.release() } catch (_: Exception) {}
+        }
+        customCheckpointPlayers.clear()
         GnssStatusMonitor.stop()
         _binding?.mapView?.onPause()
         try { context?.unregisterReceiver(locationReceiver) } catch (_: Exception) {}
@@ -8478,13 +11180,16 @@ class MapFragment : Fragment() {
     override fun onLowMemory() { super.onLowMemory(); _binding?.mapView?.onLowMemory() }
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        val isLandscape = newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        _binding?.bottomBar?.let { bar ->
-            val px = (if (isLandscape) 44 else 68) * resources.displayMetrics.density
-            bar.layoutParams.height = px.toInt()
-            bar.requestLayout()
-        }
         applyCrosshairPrefs()
+        _binding?.root?.requestApplyInsets()
+        _binding?.root?.post {
+            applyWidgetPrefs()
+            applyUiScale()
+            applyWidgetFontScale()
+            _binding?.bottomBar?.requestLayout()
+            _binding?.bottomBar?.invalidate()
+            refreshGpsDistanceRings()
+        }
     }
 
     // ==================== DOWNLOAD MODE ====================
@@ -8513,13 +11218,16 @@ class MapFragment : Fragment() {
 
     private fun showPolygonControls() {
         val picker = polygonPicker ?: return
-        val text = "Точек: ${picker.points.size} / ${PolygonAreaPicker.MAX_POINTS}" +
-            if (picker.canFinish()) " • Нажмите Готово" else ""
+        val areaSuffix = if (picker.points.size >= PolygonAreaPicker.MIN_POINTS) {
+            val areaKm2 = picker.previewAreaKm2()
+            if (areaKm2 > 0.0) " • ${String.format("%.0f", areaKm2)} км²" else ""
+        } else ""
+        val text = "Точек: ${picker.points.size} / ${PolygonAreaPicker.MAX_POINTS}$areaSuffix • Удерживайте точку для перемещения" +
+            if (picker.canFinish()) " • Готово" else ""
 
         val existing = polygonSnackbar
         if (existing != null && existing.isShown) {
-            // Update text of existing snackbar
-            existing.setText(text)
+            updatePolygonSnackbar(existing, picker, text)
             return
         }
         // Create new snackbar
@@ -8528,9 +11236,68 @@ class MapFragment : Fragment() {
             com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
         )
         snackbar.setAction("Готово") { finishPolygonSelection() }
-        snackbar.view.setBackgroundColor(0xFF1A1A2E.toInt())
+        updatePolygonSnackbar(snackbar, picker, text)
         polygonSnackbar = snackbar
         snackbar.show()
+    }
+
+    private fun updatePolygonSnackbar(
+        snackbar: com.google.android.material.snackbar.Snackbar,
+        picker: PolygonAreaPicker,
+        text: String
+    ) {
+        snackbar.setText(text)
+        val snackView = snackbar.view
+        snackView.setBackgroundColor(0xFF1A1A2E.toInt())
+
+        val textView = snackView.findViewById<android.widget.TextView>(com.google.android.material.R.id.snackbar_text)
+        textView?.setTextColor(0xFFFFFFFF.toInt())
+        textView?.maxLines = 4
+
+        val doneView = snackView.findViewById<android.widget.TextView>(com.google.android.material.R.id.snackbar_action)
+        doneView?.apply {
+            setTextColor(0xFFFFB74D.toInt())
+            isEnabled = picker.canFinish()
+            alpha = if (picker.canFinish()) 1f else 0.45f
+        }
+
+        val content = doneView?.parent as? android.view.ViewGroup ?: return
+        var undoView = content.findViewWithTag<android.widget.TextView>("polygon_undo_action")
+        if (undoView == null) {
+            undoView = androidx.appcompat.widget.AppCompatTextView(content.context).apply {
+                tag = "polygon_undo_action"
+                setText("Отменить")
+                isClickable = true
+                isFocusable = true
+                gravity = android.view.Gravity.CENTER
+                setPadding(24, 0, 24, 0)
+                setTextColor(0xFFFFF59D.toInt())
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setOnClickListener {
+                    undoPolygonPoint()
+                }
+            }
+            val actionIndex = doneView?.let { content.indexOfChild(it) } ?: content.childCount
+            content.addView(
+                undoView,
+                actionIndex.coerceAtLeast(0),
+                android.widget.LinearLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        undoView.isEnabled = picker.points.isNotEmpty()
+        undoView.alpha = if (picker.points.isNotEmpty()) 1f else 0.45f
+    }
+
+    private fun undoPolygonPoint() {
+        val picker = polygonPicker ?: return
+        if (!picker.removeLastPoint()) return
+        showPolygonControls()
+        if (picker.points.isEmpty()) {
+            showHint("Все точки удалены")
+        }
     }
 
     fun stopDownloadMode() {
@@ -8551,7 +11318,7 @@ class MapFragment : Fragment() {
         }
         val area = picker.finish()
         if (area == null) {
-            Toast.makeText(ctx, "Точки на одной линии — расставьте шире", Toast.LENGTH_LONG).show()
+            Toast.makeText(ctx, "Полигон некорректный — проверьте порядок точек и отсутствие самопересечений", Toast.LENGTH_LONG).show()
             return
         }
         isDownloadSelecting = false
@@ -8564,7 +11331,6 @@ class MapFragment : Fragment() {
             .forEach { (key, src) -> sources[key] = SourceInfo(src.label, true, src.maxZoom) }
 
         LayerSelectorBottomSheet(ctx, area, sources, onCancel = { stopDownloadMode() }) { config ->
-            // TODO Sprint 2: enqueue download task
             Toast.makeText(ctx, "Загрузка ${config.allLayers.size} слоёв, z${config.minZoom}-z${config.maxZoom}...", Toast.LENGTH_LONG).show()
             val polygonPairsForEstimate = area.polygon.map { Pair(it.latitude, it.longitude) }
             lifecycleScope.launch {
@@ -8572,7 +11338,7 @@ class MapFragment : Fragment() {
             Log.i("TileDownload", "Download: ${estimate.totalTiles} tiles, ${estimate.formatSize()}, area=${String.format("%.0f", area.areaKm2)}km²")
 
             // Build download task with proper file naming
-            val mapsDir = getRaceNavDir(ctx, "maps").absolutePath
+            val mapsDir = MapStorageManager.getMapsDir(ctx).absolutePath
             val mapName = config.name
             val baseLabel = tileSources[config.selectedBase]?.label ?: config.selectedBase
             val layers = mutableListOf<LayerDownload>()
@@ -8601,28 +11367,12 @@ class MapFragment : Fragment() {
                 }.toMutableList(),
                 minZoom = config.minZoom, maxZoom = config.maxZoom,
                 areaKm2 = area.areaKm2,
-                createdAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+                createdAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).format(java.util.Date()),
+                bounds = area.boundingBox,
+                polygon = polygonPairs
             )
             OfflineAreasManager.saveArea(ctx, offlineArea)
-            TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
-            TileDownloadManager.onProgressUpdate = { progress -> updateDownloadIndicator(progress) }
-            TileDownloadManager.onComplete = { onDownloadComplete() }
-            TileDownloadManager.startDownload(ctx, task)
-            _binding?.downloadIndicator?.visibility = View.VISIBLE
-            _binding?.downloadIndicator?.setOnClickListener {
-                androidx.appcompat.app.AlertDialog.Builder(ctx)
-                    .setTitle("Отменить загрузку?")
-                    .setMessage("Загружено ${TileDownloadManager.downloaded.get()} / ${TileDownloadManager.totalTiles.get()} тайлов")
-                    .setPositiveButton("Отменить") { _, _ ->
-                        TileDownloadManager.stopDownload()
-                        // Clean up incomplete area from registry
-                        OfflineAreasManager.deleteArea(ctx, offlineArea.id)
-                        _binding?.downloadIndicator?.visibility = View.GONE
-                        Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("Продолжить", null)
-                    .show()
-            }
+            if (!startTileDownload(ctx, task, offlineArea.id)) return@launch
             polygonPicker?.stop()
             polygonPicker = null
             polygonSnackbar?.dismiss()
@@ -8634,6 +11384,11 @@ class MapFragment : Fragment() {
     private fun handleDownloadTap(latLng: LatLng) {
         val picker = polygonPicker
         if (picker != null && picker.isActive) {
+            val tapPoint = mapboxMap?.projection?.toScreenLocation(latLng)
+            if (tapPoint != null && picker.findNearestPointIndex(tapPoint, 28f * resources.displayMetrics.density) >= 0) {
+                showHint("Удерживайте вершину для перемещения")
+                return
+            }
             // Polygon mode — add point
             if (picker.addPoint(latLng)) {
                 showHint("Точек: ${picker.points.size} / ${PolygonAreaPicker.MAX_POINTS}" +
@@ -8662,6 +11417,11 @@ class MapFragment : Fragment() {
             drawDownloadRect(bounds)
             showDownloadConfirmation(bounds)
         }
+    }
+
+    private fun polygonDragMovePoint(index: Int, latLng: LatLng): Boolean {
+        val picker = polygonPicker ?: return false
+        return picker.movePoint(index, latLng)
     }
 
     private fun showDownloadConfirmation(bounds: BoundsRect) {
@@ -8983,11 +11743,7 @@ class MapFragment : Fragment() {
 
         btnDownload.setOnClickListener {
             val mapName = nameEdit.text.toString().ifBlank { "Карта" }
-            val docsDir = android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOCUMENTS
-            )
-            val mapsDir = java.io.File(docsDir, "RaceNav/maps")
-            mapsDir.mkdirs()
+            val mapsDir = MapStorageManager.getMapsDir(ctx)
 
             // Build layers list: base first, then selected overlays
             val layers = mutableListOf<LayerDownload>()
@@ -9008,18 +11764,7 @@ class MapFragment : Fragment() {
 
             val task = DownloadTask(mapName, layers, bounds, null, minZoom, maxZoom)
 
-            // Provide tile source info to download manager
-            TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
-            TileDownloadManager.onProgressUpdate = { progress ->
-                updateDownloadIndicator(progress)
-            }
-            TileDownloadManager.onComplete = {
-                onDownloadComplete()
-            }
-            TileDownloadManager.startDownload(ctx, task)
-
-            // Show indicator
-            _binding?.downloadIndicator?.visibility = View.VISIBLE
+            if (!startTileDownload(ctx, task)) return@setOnClickListener
 
             removeDownloadRect()
             dialog.dismiss()
@@ -9036,28 +11781,51 @@ class MapFragment : Fragment() {
 
     private fun updateDownloadIndicator(progress: DownloadProgress) {
         val b = _binding ?: return
-        b.dlProgressText.text = "${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+        val counters = buildString {
+            append("${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})")
+            if (progress.failedTiles > 0) append(" • err ${progress.failedTiles}")
+            if (progress.skippedTiles > 0) append(" • skip ${progress.skippedTiles}")
+        }
+        b.dlProgressText.text = counters
         if (!progress.isRunning) {
-            if (progress.error != null) {
-                b.dlProgressText.text = "Ошибка"
-            } else {
-                b.dlProgressText.text = "Готово!"
+            b.dlProgressText.text = when {
+                progress.isPaused -> "Пауза"
+                progress.wasCancelled -> "Остановлено"
+                progress.error != null -> "Ошибка"
+                progress.isPartial -> "Частично"
+                else -> "Готово!"
             }
         }
     }
 
     private fun onDownloadComplete() {
         val b = _binding ?: return
+        val progress = TileDownloadManager.getProgress()
+        val task = TileDownloadManager.lastTask
+        val areaId = TileDownloadManager.currentAreaId
         context?.let { ctx ->
-            val task = TileDownloadManager.lastTask
-            DiagnosticsCollector.logEvent(ctx, "DL complete: ${task?.name ?: "?"}")
-            // Mark area as complete in registry
-            val areas = OfflineAreasManager.loadAreas(ctx)
-            areas.find { it.name == task?.name && it.status == "downloading" }?.let {
-                OfflineAreasManager.markComplete(ctx, it.id)
+            DiagnosticsCollector.logEvent(ctx, "DL complete: ${task?.name ?: "?"} ok=${progress.successfulTiles} fail=${progress.failedTiles} skip=${progress.skippedTiles} pause=${progress.isPaused} cancel=${progress.wasCancelled}")
+            areaId?.let {
+                when {
+                    progress.isPaused -> OfflineAreasManager.markPaused(ctx, it)
+                    progress.wasCancelled -> Unit
+                    progress.error != null || progress.isPartial -> OfflineAreasManager.markPartial(ctx, it)
+                    else -> OfflineAreasManager.markComplete(ctx, it)
+                }
             }
         }
-        b.dlProgressText.text = "✅ Готово!"
+        syncOfflineAreaSources(areaId)
+        b.dlProgressText.text = when {
+            progress.isPaused -> "⏸ Пауза"
+            progress.wasCancelled -> "⏹ Остановлено"
+            progress.error != null -> "❌ Ошибка"
+            progress.isPartial -> "⚠ Частично"
+            else -> "✅ Готово!"
+        }
+        if (progress.isPaused || progress.error != null || progress.isPartial) {
+            b.downloadIndicator.visibility = View.VISIBLE
+            return
+        }
         b.dlProgress.visibility = View.GONE
         // Auto-hide after 3 seconds
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
@@ -9065,12 +11833,16 @@ class MapFragment : Fragment() {
             b.dlProgress.visibility = View.VISIBLE
         }, 3000)
 
+        if (progress.wasCancelled) {
+            TileDownloadManager.currentAreaId = null
+            return
+        }
+
         // Register downloaded maps using OfflineAreasManager
-        val task = TileDownloadManager.lastTask
         if (task != null && task.layers.isNotEmpty()) {
             val baseLayer = task.layers.first()
             val baseFile = java.io.File(baseLayer.outputPath)
-            if (baseFile.exists() && baseFile.length() > 0) {
+            if (baseFile.exists() && countTilesInMbtiles(baseFile) > 0) {
                 // Register base map as offline tile source (for MapLibre)
                 val area = context?.let { OfflineAreasManager.loadAreas(it).find { a -> a.name == task.name } }
                 val displayName = area?.let { "${it.name} (${it.layersDescription()})" }
@@ -9081,13 +11853,18 @@ class MapFragment : Fragment() {
                     // Register overlays as separate offline sources (for layer toggling)
                     task.layers.drop(1).forEach { ovLayer ->
                         val ovFile = java.io.File(ovLayer.outputPath)
-                        if (ovFile.exists() && ovFile.length() > 0) {
+                        if (ovFile.exists() && countTilesInMbtiles(ovFile) > 0) {
                             addOfflineMap(ovFile.absolutePath, "${task.name}_слой_${ovLayer.layerLabel}")
                             Log.d("TileDownload", "Registered overlay: ${ovLayer.layerLabel}")
                         }
                     }
                 }
-                Toast.makeText(context, "Загружено: $displayName", Toast.LENGTH_LONG).show()
+                val toastText = if (progress.error != null || progress.isPartial) {
+                    "Частично загружено: $displayName"
+                } else {
+                    "Загружено: $displayName"
+                }
+                Toast.makeText(context, toastText, Toast.LENGTH_LONG).show()
             } else {
                 Log.w("TileDownload", "Base layer file missing or empty: ${baseLayer.outputPath}")
                 val ctx2 = context
@@ -9098,6 +11875,87 @@ class MapFragment : Fragment() {
             }
         } else {
             Toast.makeText(context, "Загрузка завершена", Toast.LENGTH_SHORT).show()
+        }
+        TileDownloadManager.currentAreaId = null
+    }
+
+    private fun startTileDownload(
+        ctx: Context,
+        task: DownloadTask,
+        areaId: String? = null,
+        cleanupOnFailure: Boolean = true
+    ): Boolean {
+        val diskError = TileDownloadManager.checkDiskSpace(ctx, task)
+        if (diskError != null) {
+            if (cleanupOnFailure && areaId != null) OfflineAreasManager.deleteArea(ctx, areaId)
+            Toast.makeText(ctx, diskError, Toast.LENGTH_LONG).show()
+            return false
+        }
+        TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
+        TileDownloadManager.onProgressUpdate = { progress -> updateDownloadIndicator(progress) }
+        TileDownloadManager.onComplete = { onDownloadComplete() }
+        val started = TileDownloadManager.startDownload(ctx, task)
+        if (!started) {
+            if (cleanupOnFailure && areaId != null) OfflineAreasManager.deleteArea(ctx, areaId)
+            Toast.makeText(ctx, "Загрузка уже выполняется", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        TileDownloadManager.currentAreaId = areaId
+        if (areaId != null) {
+            OfflineAreasManager.markDownloading(ctx, areaId)
+        }
+        _binding?.downloadIndicator?.visibility = View.VISIBLE
+        return true
+    }
+
+    private fun resumeTileDownload(ctx: Context) {
+        val areaId = TileDownloadManager.currentAreaId
+        if (areaId != null && restartOfflineAreaDownload(areaId, forceRedownload = false)) return
+
+        val task = TileDownloadManager.lastTask ?: run {
+            Toast.makeText(ctx, "Нет сохранённой загрузки для продолжения", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startTileDownload(ctx, task, null, cleanupOnFailure = false)
+    }
+
+    private fun cancelCurrentDownload(ctx: Context, task: DownloadTask) {
+        TileDownloadManager.stopDownload()
+        val area = TileDownloadManager.currentAreaId?.let { OfflineAreasManager.getAreaById(ctx, it) }
+            ?: OfflineAreasManager.loadAreas(ctx).find { it.name == task.name }
+        if (area != null) {
+            OfflineAreasManager.deleteArea(ctx, area.id) { name ->
+                removeOfflineMapByName(name)
+            }
+        } else {
+            cleanupDownloadTaskFiles(task)
+        }
+        TileDownloadManager.currentAreaId = null
+        _binding?.downloadIndicator?.visibility = View.GONE
+        Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun cleanupDownloadTaskFiles(task: DownloadTask) {
+        task.layers.forEach { layer ->
+            try { java.io.File(layer.outputPath).delete() } catch (_: Exception) {}
+        }
+    }
+
+    private fun countTilesInMbtiles(file: java.io.File): Int {
+        if (!file.exists() || file.length() <= 0L) return 0
+        return try {
+            val db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                file.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+            )
+            try {
+                db.rawQuery("SELECT 1 FROM tiles LIMIT 1", null).use { c ->
+                    if (c.moveToFirst()) 1 else 0
+                }
+            } finally {
+                db.close()
+            }
+        } catch (_: Exception) {
+            0
         }
     }
 
@@ -9125,7 +11983,7 @@ class MapFragment : Fragment() {
             String.format("%.1f МБ", progress.bytesDownloaded / (1024.0 * 1024.0))
         else "${progress.bytesDownloaded / 1024} КБ"
         root.addView(android.widget.TextView(ctx).apply {
-            text = "Прогресс: ${progress.downloadedTiles}/${progress.totalTiles} (${progress.percent}%)  •  $bytesStr"
+            text = "Прогресс: ${progress.downloadedTiles}/${progress.totalTiles} (${progress.percent}%)  •  ok ${progress.successfulTiles}  •  err ${progress.failedTiles}  •  skip ${progress.skippedTiles}  •  $bytesStr"
             setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
             setPadding(0, 0, 0, (12 * dp).toInt())
         })
@@ -9152,16 +12010,18 @@ class MapFragment : Fragment() {
                 maxOf(progress.downloadedTiles - idx * tilesPerLayer, 0),
                 tilesPerLayer
             )
-            val isCurrent = layer.layerLabel == progress.currentLayer
+            val isCurrent = layer.layerLabel == progress.currentLayer && (progress.isRunning || progress.isPaused)
             val isDone = layerDownloaded >= tilesPerLayer
             if (isDone) completedLayers++
             val icon = when {
                 isDone -> "✅"
+                isCurrent && progress.isPaused -> "⏸"
                 isCurrent -> "⏳"
                 else -> "⏸"
             }
             val statusText = when {
                 isDone -> "готово"
+                isCurrent && progress.isPaused -> "пауза"
                 isCurrent -> "$layerDownloaded/$tilesPerLayer"
                 else -> "ожидание"
             }
@@ -9196,14 +12056,26 @@ class MapFragment : Fragment() {
 
         val dlg = androidx.appcompat.app.AlertDialog.Builder(ctx, androidx.appcompat.R.style.Theme_AppCompat_Dialog)
             .setView(root)
-        if (progress.isRunning) {
-            dlg.setNegativeButton("⏹ Остановить") { _, _ ->
-                TileDownloadManager.stopDownload()
-                _binding?.downloadIndicator?.visibility = View.GONE
-                Toast.makeText(ctx, "Загрузка остановлена", Toast.LENGTH_SHORT).show()
+        when {
+            progress.isRunning -> {
+                dlg.setPositiveButton("⏸ Пауза") { _, _ ->
+                    TileDownloadManager.pauseDownload()
+                    Toast.makeText(ctx, "Загрузка поставлена на паузу", Toast.LENGTH_SHORT).show()
+                }
+                dlg.setNegativeButton("⏹ Отменить") { _, _ ->
+                    cancelCurrentDownload(ctx, task)
+                }
+            }
+            progress.isPaused || progress.error != null || progress.isPartial -> {
+                dlg.setPositiveButton("▶ Продолжить") { _, _ ->
+                    resumeTileDownload(ctx)
+                }
+                dlg.setNegativeButton("⏹ Отменить") { _, _ ->
+                    cancelCurrentDownload(ctx, task)
+                }
             }
         }
-        dlg.setPositiveButton("Свернуть", null)
+        dlg.setNeutralButton("Свернуть", null)
         dlg.show()
     }
 
@@ -9216,15 +12088,23 @@ class MapFragment : Fragment() {
         val b = _binding ?: return
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         val scale = prefs.getInt(PREF_UI_SCALE, 5).coerceIn(1, 10)
+        val bottomBarHeightScale = readBottomBarHeightScale(prefs)
         val dm = resources.displayMetrics
         val density = dm.density
 
         // Bottom bar height: scale 1=48dp, 5=68dp, 10=96dp
-        val barHeightDp = (scale * 5.3f + 42.7f)  // 1->48, 5->69.2, 10->95.7
+        val baseBarHeightDp = (scale * 5.3f + 42.7f)  // 1->48, 5->69.2, 10->95.7
+        val heightMultiplier = if (bottomBarHeightScale <= 5) {
+            0.6f + (bottomBarHeightScale - 1) * 0.1f
+        } else {
+            1.0f + (bottomBarHeightScale - 5) * 0.2f
+        }
+        val barHeightDp = baseBarHeightDp * heightMultiplier
         val params = b.bottomBar.layoutParams
         params.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
         b.bottomBar.minimumHeight = (barHeightDp * density).toInt()
         b.bottomBar.layoutParams = params
+        applyBottomBarAppearance()
 
         // Top bar button sizes: scale 1=32dp, 5=44dp, 10=60dp
         val btnSizeDp = (scale * 3.1f + 28.9f)  // 1->32, 5->44.4, 10->59.9
@@ -9241,7 +12121,7 @@ class MapFragment : Fragment() {
             }
         }
         val rightButtons = listOf(
-            b.btnLayers, b.btnRec, b.btnLock, b.btnMapSwitch, b.btnSettings
+            b.btnLayers, b.btnRec, b.btnLock, b.btnMapSwitch, b.btnMessages, b.btnSettings
         )
         for (btn in rightButtons) {
             btn?.layoutParams?.let { lp ->
@@ -9260,22 +12140,56 @@ class MapFragment : Fragment() {
             // Legacy: pref was stored as String in older version
             prefs.getString(PREF_WIDGET_FONT_SCALE, "5")?.toIntOrNull() ?: 5
         }.coerceIn(1, 10)
-        val dm = resources.displayMetrics
-        // Scale 1=12dp values/6dp labels, 5=20dp/10dp, 10=28dp/14dp
-        val valueSizePx = (scale * 2f + 10f) * dm.density
-        val labelSizePx = (scale * 1f + 5f) * dm.density
         val bar = b.bottomBar
+
+        fun applyWeight(textView: android.widget.TextView, isValue: Boolean) {
+            val minWeight = if (isValue) 580 else 440
+            val baseWeight = if (isValue) 720 else 540
+            val weight = (baseWeight + (scale - 5) * if (isValue) 30 else 20).coerceIn(minWeight, 900)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                textView.typeface = android.graphics.Typeface.create(
+                    textView.typeface ?: android.graphics.Typeface.DEFAULT,
+                    weight,
+                    false
+                )
+            } else {
+                textView.setTypeface(
+                    textView.typeface,
+                    if (weight >= 650) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+                )
+                textView.paint.isFakeBoldText = !isValue && weight >= 560
+            }
+        }
+
         for (i in 0 until bar.childCount) {
             val container = bar.getChildAt(i)
             if (container is android.view.ViewGroup) {
                 for (j in 0 until container.childCount) {
                     val child = container.getChildAt(j)
                     if (child is android.widget.TextView) {
-                        if (child.typeface?.isBold == true) {
-                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, valueSizePx)
+                        val isValue = isBottomBarValueTextView(child)
+                        if (isValue) {
+                            val maxSp = when (child.id) {
+                                R.id.widgetChrono, R.id.widgetTime -> (scale * 1.65f + 8.5f).coerceIn(11f, 26f)
+                                else -> (scale * 2f + 10f).coerceIn(12f, 34f)
+                            }
+                            val minSp = (maxSp * 0.52f).coerceAtLeast(10f)
+                            TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+                                child,
+                                minSp.toInt(),
+                                maxSp.toInt(),
+                                1,
+                                android.util.TypedValue.COMPLEX_UNIT_SP
+                            )
+                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, maxSp)
                         } else {
-                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, labelSizePx)
+                            val maxSp = (scale * 0.9f + 5.5f).coerceIn(7f, 16f)
+                            child.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, maxSp)
                         }
+                        if (child.id == R.id.widgetNextCpName) {
+                            child.maxWidth = ((52 + scale * 12) * resources.displayMetrics.density).toInt()
+                        }
+                        applyWeight(child, isValue)
                     }
                 }
             }
@@ -9306,13 +12220,10 @@ class MapFragment : Fragment() {
     }
 
     private fun moveCameraSmooth(frameTimeNanos: Long) {
-        if (flyAnimationActive || userDragged || followMode == FollowMode.FREE) {
-            lastRenderFrameNanos = 0L
-            return
-        }
         val map = mapboxMap ?: return
         if (lastGpsTimeNanos == 0L) return
         if (lastGpsLat == 0.0 && lastGpsLon == 0.0) return
+        val shouldMoveCamera = !flyAnimationActive && !userDragged && followMode != FollowMode.FREE
 
         // Move continuously between GPS fixes so follow-mode does not feel like 1 Hz stepping.
         val interpDuration = if (prevGpsTimeNanos > 0 && lastGpsTimeNanos > prevGpsTimeNanos) {
@@ -9324,14 +12235,22 @@ class MapFragment : Fragment() {
         val dLon = lastGpsLon - prevGpsLon
 
         val speedKmh = lastGpsSpeedKmh
+        val accuracyM = lastGpsAccuracyM.takeUnless { it.isNaN() }?.toDouble()?.coerceIn(1.0, 50.0) ?: 10.0
+        val stepDistanceM = if (prevGpsTimeNanos > 0L && (prevGpsLat != 0.0 || prevGpsLon != 0.0)) {
+            distanceM(LatLng(prevGpsLat, prevGpsLon), LatLng(lastGpsLat, lastGpsLon))
+        } else {
+            0.0
+        }
+        val smoothing = currentGpsSmoothingLevel()
         val startupWarmupActive = startupWarmupUntilMs > System.currentTimeMillis()
         val startupZoomLockActive = startupLockedZoom > 0 && startupZoomLockUntilMs > System.currentTimeMillis()
         var targetLat = lastGpsLat
         var targetLon = lastGpsLon
         if (!startupWarmupActive && !bearingFrozen && speedKmh >= courseUnfreezeSpeedKmh && interpDuration > 0L) {
             val leadFraction = (ageNanos.toDouble() / interpDuration.toDouble()).coerceIn(0.0, 1.0)
-            targetLat += dLat * leadFraction
-            targetLon += dLon * leadFraction
+            val predictionFactor = renderPredictionFactor(speedKmh, accuracyM, stepDistanceM, smoothing)
+            targetLat += dLat * leadFraction * predictionFactor
+            targetLon += dLon * leadFraction * predictionFactor
         }
         if (renderCamLat.isNaN() || renderCamLon.isNaN()) {
             renderCamLat = targetLat
@@ -9341,12 +12260,25 @@ class MapFragment : Fragment() {
                 frameTimeNanos - lastRenderFrameNanos
             } else 16_666_667L
             val frameScale = (frameDeltaNanos.toDouble() / 16_666_667.0).coerceIn(0.5, 2.0)
-            val baseAlpha = renderPositionAlpha(speedKmh)
+            val stationary = bearingFrozen || speedKmh < courseFreezeSpeedKmh
+            val baseAlpha = renderPositionAlpha(speedKmh, accuracyM, stepDistanceM, smoothing, stationary)
             val alpha = 1.0 - Math.pow(1.0 - baseAlpha, frameScale)
             renderCamLat = lerp(renderCamLat, targetLat, alpha)
             renderCamLon = lerp(renderCamLon, targetLon, alpha)
         }
         lastRenderFrameNanos = frameTimeNanos
+
+        // Arrow, rings and track tip use the same smoothed render position in every mode.
+        updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
+        maybeRefreshAccuracyCircleForCamera()
+        maybeRefreshGpsDistanceRingsForCamera()
+        if (TrackingService.trackPoints.size >= 2) {
+            updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
+        }
+
+        if (!shouldMoveCamera) {
+            return
+        }
 
         val target = LatLng(renderCamLat, renderCamLon)
         val currentCam = map.cameraPosition
@@ -9362,8 +12294,7 @@ class MapFragment : Fragment() {
         if (baseCam.zoom < 3.0) return
 
         // 3D tilt
-        val mapTiltAllowed = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.getBoolean(PREF_MAP_TILT_ENABLED, false) ?: false
-        val targetTilt = if (mapTiltAllowed && tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
+        val targetTilt = if (tilt3dEnabled && followMode == FollowMode.FOLLOW_COURSE)
             (speedKmh.coerceIn(0.0, 60.0) / 60.0 * 45.0) else 0.0
         smoothedTilt += (targetTilt - smoothedTilt) * 0.05
 
@@ -9413,11 +12344,6 @@ class MapFragment : Fragment() {
         val nextCam = builder.build()
         if (nextCam.zoom >= minStableFollowZoom) lastGoodCamera = sanitizeCameraPosition(nextCam)
         map.moveCamera(CameraUpdateFactory.newCameraPosition(nextCam))
-        // Arrow, track tip, and camera all use same renderCam position
-        updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
-        if (TrackingService.trackPoints.size >= 2) {
-            updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
-        }
     }
 
     override fun onDestroyView() {
@@ -9435,6 +12361,13 @@ class MapFragment : Fragment() {
         emergencyRunnable = null
         _binding?.lockFlashBorder?.animate()?.cancel()
         liveUsersPoller?.stop(); liveUsersPoller = null
+        stopMonitoringMessagesPolling()
+        hideIncomingMessagePreview(immediate = true)
+        customCheckpointPlayers.toList().forEach {
+            try { it.stop() } catch (_: Exception) {}
+            try { it.release() } catch (_: Exception) {}
+        }
+        customCheckpointPlayers.clear()
         stopChronoTicker(); stopTimeTicker()
         tileServer?.cleanup(); tileServer = null
         _binding?.mapView?.onDestroy(); _binding = null

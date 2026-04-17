@@ -30,7 +30,17 @@ object GroupShareApi {
     private fun url(path: String = "") = BackupManager.BACKUP_SERVER.trimEnd('/') + BASE + path
 
     data class ShareResult(val ok: Boolean, val shareId: String? = null, val deliveredCount: Int = 0, val error: String? = null)
-    data class InboxEntry(val shareId: String, val type: String, val name: String, val senderName: String, val timestamp: String, val size: Int)
+    data class InboxEntry(
+        val shareId: String,
+        val type: String,
+        val name: String,
+        val senderName: String,
+        val senderUniqueId: String? = null,
+        val groupId: String? = null,
+        val groupName: String? = null,
+        val timestamp: String,
+        val size: Int
+    )
 
     /** Send GPX content to a favorites group. Blocking. */
     fun sendToGroup(email: String, syncKey: String, groupId: String, name: String, gpxData: String, type: String = "gpx"): ShareResult {
@@ -87,6 +97,9 @@ object GroupShareApi {
                         type = s.optString("type", "gpx"),
                         name = s.optString("name", "?"),
                         senderName = s.optString("senderName", "?"),
+                        senderUniqueId = s.optString("senderUniqueId", "").ifBlank { null },
+                        groupId = s.optString("groupId", "").ifBlank { null },
+                        groupName = s.optString("groupName", "").ifBlank { null },
                         timestamp = s.optString("timestamp", ""),
                         size = s.optInt("size", 0)
                     )

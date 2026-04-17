@@ -3,5 +3,6 @@
     <external-cache-path name="downloads" path="." />
     <files-path name="internal_downloads" path="." />
     <external-files-path name="tracks" path="tracks/" />
+    <external-files-path name="offline_maps_external" path="RaceNav/maps/" />
     <external-path name="racenav_documents" path="Documents/RaceNav/" />
 </paths>

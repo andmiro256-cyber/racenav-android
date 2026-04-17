@@ -53,7 +53,9 @@ object OfflineAreasManager {
         val maxZoom: Int,
         val areaKm2: Double,
         val createdAt: String,
-        var status: String = "downloading"  // "downloading" | "complete"
+        val bounds: BoundsRect? = null,
+        val polygon: List<Pair<Double, Double>>? = null,
+        var status: String = "downloading"  // "downloading" | "paused" | "complete" | "partial"
     ) {
         /** Display string: "Google Sat + Топо + Wiki" */
         fun layersDescription(): String {
@@ -64,6 +66,8 @@ object OfflineAreasManager {
 
         /** Enabled overlays only */
         fun enabledOverlays(): List<OfflineOverlay> = overlays.filter { it.enabled }
+
+        fun hasStoredGeometry(): Boolean = bounds != null
     }
 
     // ── File naming ──
@@ -82,7 +86,7 @@ object OfflineAreasManager {
     }
 
     private fun ensureUnique(context: Context, fileName: String): String {
-        val dir = MapFragment.getRaceNavDir(context, "maps")
+        val dir = MapStorageManager.getMapsDir(context)
         if (!File(dir, fileName).exists()) return fileName
         val name = fileName.substringBeforeLast(".")
         val ext = fileName.substringAfterLast(".")
@@ -94,7 +98,7 @@ object OfflineAreasManager {
     // ── Registry ──
 
     private fun getAreasFile(context: Context): File {
-        val dir = MapFragment.getRaceNavDir(context, "maps")
+        val dir = MapStorageManager.getMapsDir(context)
         return File(dir, AREAS_FILE)
     }
 
@@ -125,7 +129,7 @@ object OfflineAreasManager {
     fun deleteArea(context: Context, areaId: String, onRemoveOfflineMap: ((String) -> Unit)? = null) {
         val areas = loadAreas(context).toMutableList()
         val area = areas.find { it.id == areaId } ?: return
-        val mapsDir = MapFragment.getRaceNavDir(context, "maps")
+        val mapsDir = MapStorageManager.getMapsDir(context)
         // Remove from runtime — pass display names matching offlineMaps registration
         val namesToRemove = mutableListOf<String>()
         // Base map was registered with display name containing area name
@@ -150,25 +154,44 @@ object OfflineAreasManager {
 
     @Synchronized
     fun markComplete(context: Context, areaId: String) {
-        val areas = loadAreas(context).toMutableList()
-        areas.find { it.id == areaId }?.status = "complete"
-        saveAll(context, areas)
+        updateStatus(context, areaId, "complete")
     }
 
-    /** Remove areas stuck in "downloading" (cleanup on startup) */
+    @Synchronized
+    fun markPartial(context: Context, areaId: String) {
+        updateStatus(context, areaId, "partial")
+    }
+
+    @Synchronized
+    fun markPaused(context: Context, areaId: String) {
+        updateStatus(context, areaId, "paused")
+    }
+
+    @Synchronized
+    fun markDownloading(context: Context, areaId: String) {
+        updateStatus(context, areaId, "downloading")
+    }
+
     @Synchronized
     fun cleanupIncomplete(context: Context) {
         val areas = loadAreas(context).toMutableList()
         val incomplete = areas.filter { it.status == "downloading" }
         if (incomplete.isEmpty()) return
-        val mapsDir = MapFragment.getRaceNavDir(context, "maps")
-        incomplete.forEach { a ->
-            File(mapsDir, a.baseFile).delete()
-            a.overlays.forEach { File(mapsDir, it.file).delete() }
+        var salvaged = 0
+        var removed = 0
+        incomplete.forEach { area ->
+            val files = getAreaFiles(context, area)
+            if (files.any(::hasAnyTiles)) {
+                area.status = "partial"
+                salvaged++
+            } else {
+                files.forEach { it.delete() }
+                areas.removeAll { it.id == area.id }
+                removed++
+            }
         }
-        areas.removeAll { it.status == "downloading" }
         saveAll(context, areas)
-        Log.i(TAG, "Cleaned ${incomplete.size} incomplete downloads")
+        Log.i(TAG, "Recovered incomplete downloads: partial=$salvaged removed=$removed")
     }
 
     fun getAreaById(context: Context, id: String): OfflineArea? =
@@ -177,6 +200,18 @@ object OfflineAreasManager {
     /** Find area by base file name (for tile server lookup) */
     fun findAreaByBaseFile(context: Context, fileName: String): OfflineArea? =
         loadAreas(context).find { it.baseFile == fileName }
+
+    fun buildDownloadTask(context: Context, area: OfflineArea): DownloadTask? {
+        val bounds = area.bounds ?: return null
+        val mapsDir = MapStorageManager.getMapsDir(context)
+        val layers = mutableListOf(
+            LayerDownload(area.baseKey, area.baseLabel, File(mapsDir, area.baseFile).absolutePath)
+        )
+        area.overlays.forEach { overlay ->
+            layers += LayerDownload(overlay.key, overlay.label, File(mapsDir, overlay.file).absolutePath)
+        }
+        return DownloadTask(area.name, layers, bounds, area.polygon, area.minZoom, area.maxZoom)
+    }
 
     // ── Serialization ──
 
@@ -209,6 +244,21 @@ object OfflineAreasManager {
         put("areaKm2", a.areaKm2)
         put("createdAt", a.createdAt)
         put("status", a.status)
+        a.bounds?.let { bounds ->
+            put("bounds", JSONObject().apply {
+                put("north", bounds.north)
+                put("south", bounds.south)
+                put("east", bounds.east)
+                put("west", bounds.west)
+            })
+        }
+        a.polygon?.takeIf { it.isNotEmpty() }?.let { polygon ->
+            put("polygon", JSONArray().apply {
+                polygon.forEach { (lat, lon) ->
+                    put(JSONArray().put(lat).put(lon))
+                }
+            })
+        }
         put("overlays", JSONArray().apply {
             a.overlays.forEach { ov ->
                 put(JSONObject().apply {
@@ -235,6 +285,22 @@ object OfflineAreasManager {
                 ))
             }
         }
+        val bounds = j.optJSONObject("bounds")?.let { b ->
+            BoundsRect(
+                north = b.optDouble("north"),
+                south = b.optDouble("south"),
+                east = b.optDouble("east"),
+                west = b.optDouble("west")
+            )
+        }
+        val polygon = j.optJSONArray("polygon")?.let { arr ->
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val point = arr.optJSONArray(i) ?: continue
+                    add(point.optDouble(0) to point.optDouble(1))
+                }
+            }.takeIf { it.isNotEmpty() }
+        }
         return OfflineArea(
             id = j.getString("id"),
             name = j.getString("name"),
@@ -246,7 +312,39 @@ object OfflineAreasManager {
             maxZoom = j.optInt("maxZoom", 15),
             areaKm2 = j.optDouble("areaKm2", 0.0),
             createdAt = j.optString("createdAt", ""),
+            bounds = bounds,
+            polygon = polygon,
             status = j.optString("status", "complete")
         )
+    }
+
+    private fun updateStatus(context: Context, areaId: String, status: String) {
+        val areas = loadAreas(context).toMutableList()
+        areas.find { it.id == areaId }?.status = status
+        saveAll(context, areas)
+    }
+
+    private fun getAreaFiles(context: Context, area: OfflineArea): List<File> {
+        val mapsDir = MapStorageManager.getMapsDir(context)
+        return buildList {
+            add(File(mapsDir, area.baseFile))
+            area.overlays.forEach { add(File(mapsDir, it.file)) }
+        }
+    }
+
+    private fun hasAnyTiles(file: File): Boolean {
+        if (!file.exists() || file.length() <= 0L) return false
+        return try {
+            val db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                file.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+            )
+            try {
+                db.rawQuery("SELECT 1 FROM tiles LIMIT 1", null).use { it.moveToFirst() }
+            } finally {
+                db.close()
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 }

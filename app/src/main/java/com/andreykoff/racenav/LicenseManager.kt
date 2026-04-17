@@ -30,7 +30,7 @@ object LicenseManager {
     private const val KEY_LAST_CHECK = "last_license_check"      // timestamp ms
     private const val LICENSE_API = "http://87.120.84.254/api/license"
 
-    const val TRIAL_DAYS = 20
+    const val TRIAL_DAYS = 7
     private const val CONTACT_TELEGRAM = "https://t.me/Andreykoff"
     private const val CONTACT_EMAIL = "snowwolf888@gmail.com"
 
@@ -311,18 +311,36 @@ object LicenseManager {
         // Don't downgrade paid license to beta
         if (isActivated(context) && getPlan(context) in listOf("full", "license")) return
         try {
-            val email = context.getSharedPreferences("racenav_prefs", Context.MODE_PRIVATE)
-                .getString("sync_email", null) ?: return
-            val url = java.net.URL("http://87.120.84.254/api/update-channel?email=${java.net.URLEncoder.encode(email, "UTF-8")}")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 5_000
-            conn.readTimeout = 5_000
-            val response = try {
-                if (conn.responseCode !in 200..299) return
-                conn.inputStream.bufferedReader().readText()
-            } finally { conn.disconnect() }
-            val json = org.json.JSONObject(response)
-            if (json.optString("channel") == "beta") {
+            val prefs = context.getSharedPreferences("racenav_prefs", Context.MODE_PRIVATE)
+            val email = sequenceOf(
+                prefs.getString("sync_email", null),
+                prefs.getString("backup_email", null)
+            ).mapNotNull { it?.trim()?.lowercase()?.takeIf(String::isNotEmpty) }
+                .firstOrNull() ?: return
+            val encodedEmail = java.net.URLEncoder.encode(email, "UTF-8")
+            val channelUrls = listOf(
+                "${UpdateManager.UPDATE_CHANNEL_URL}?email=$encodedEmail",
+                "${UpdateManager.LEGACY_UPDATE_CHANNEL_URL}?email=$encodedEmail"
+            )
+            var isBetaTester = false
+            for (channelUrl in channelUrls) {
+                try {
+                    val url = java.net.URL(channelUrl)
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 5_000
+                    conn.readTimeout = 5_000
+                    val response = try {
+                        if (conn.responseCode !in 200..299) continue
+                        conn.inputStream.bufferedReader().readText()
+                    } finally { conn.disconnect() }
+                    val json = org.json.JSONObject(response)
+                    if (json.optString("channel").trim().lowercase() == "beta") {
+                        isBetaTester = true
+                        break
+                    }
+                } catch (_: Exception) { }
+            }
+            if (isBetaTester) {
                 getPrefs(context).edit()
                     .putBoolean(KEY_ACTIVATED, true)
                     .putString(KEY_LICENSE_STATUS, "active")
@@ -352,21 +370,30 @@ object LicenseManager {
 
             val json = org.json.JSONObject(response)
             val prefs = getPrefs(context)
+            val currentPlan = getPlan(context)?.trim()?.lowercase()
+            val serverLicenseStatus = json.optString("license", "trial").trim().lowercase().ifEmpty { "trial" }
+            val serverPlan = json.optString("plan", "").trim().lowercase().ifEmpty { null }
+            val effectivePlan = when {
+                serverPlan in listOf("full", "license", "beta") -> serverPlan
+                currentPlan == "beta" -> "beta"
+                else -> serverPlan
+            }
+            val effectiveLicenseStatus = if (effectivePlan == "beta") "active" else serverLicenseStatus
             prefs.edit()
-                .putString(KEY_LICENSE_STATUS, json.optString("license", "trial"))
+                .putString(KEY_LICENSE_STATUS, effectiveLicenseStatus)
                 .putString(KEY_LICENSE_UNTIL, json.optString("license_until", ""))
                 .putString(KEY_SERVER_STATUS, json.optString("server", "none"))
                 .putString(KEY_SERVER_UNTIL, json.optString("server_until", ""))
-                .putString(KEY_PLAN, json.optString("plan", ""))
+                .putString(KEY_PLAN, effectivePlan)
                 .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
                 .apply()
 
             // If server says "active", mark as activated locally too
-            if (json.optString("license") == "active") {
+            if (serverLicenseStatus == "active" || effectivePlan == "beta") {
                 prefs.edit().putBoolean(KEY_ACTIVATED, true).apply()
             }
 
-            return json.optString("license") != "expired"
+            return effectiveLicenseStatus != "expired"
         } catch (e: Exception) {
             // No network -- use cached status
             return canUseCached(context)

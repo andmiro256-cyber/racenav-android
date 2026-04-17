@@ -2,11 +2,17 @@
 <resources>
     <style name="Theme.RaceNav" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/primary</item>
-        <item name="colorPrimaryDark">@color/black</item>
+        <item name="colorPrimaryDark">@color/primary_variant</item>
+        <item name="colorSecondary">@color/primary</item>
         <item name="colorAccent">@color/primary</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="colorOnPrimary">@color/white</item>
         <item name="android:windowBackground">@color/background</item>
-        <item name="android:statusBarColor">@color/black</item>
-        <item name="android:navigationBarColor">@color/black</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:statusBarColor">@color/surface_top</item>
+        <item name="android:navigationBarColor">@color/surface_top</item>
     </style>
 
     <style name="BottomSheetTheme" parent="Theme.MaterialComponents.BottomSheetDialog">

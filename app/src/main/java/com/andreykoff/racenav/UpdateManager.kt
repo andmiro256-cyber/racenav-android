@@ -15,8 +15,13 @@ import java.net.URL
 
 object UpdateManager {
 
-    const val UPDATE_URL = "https://trophynav.ru/updates/latest.json"
-    const val BETA_UPDATE_URL = "http://87.120.84.254/api/update/beta"
+    const val UPDATE_BASE_URL = "https://trophynav.ru"
+    const val LEGACY_UPDATE_BASE_URL = "http://87.120.84.254"
+    const val UPDATE_URL = "$UPDATE_BASE_URL/updates/latest.json"
+    const val BETA_UPDATE_URL = "$UPDATE_BASE_URL/api/update/beta"
+    const val UPDATE_CHANNEL_URL = "$UPDATE_BASE_URL/api/update-channel"
+    const val LEGACY_BETA_UPDATE_URL = "$LEGACY_UPDATE_BASE_URL/api/update/beta"
+    const val LEGACY_UPDATE_CHANNEL_URL = "$LEGACY_UPDATE_BASE_URL/api/update-channel"
 
     // Pending APK path for retry after permission grant
     var pendingApkFile: File? = null
@@ -81,25 +86,68 @@ object UpdateManager {
         }
     }
 
-    private val SUFFIX_REGEX = Regex("-.*")
-
     fun isNewer(remote: String, local: String): Boolean {
         if (remote.isBlank() || local.isBlank()) return false
-        val rClean = remote.removePrefix("v")
-        val lClean = local.removePrefix("v")
-        val r = rClean.split(".").map { it.replace(SUFFIX_REGEX, "").toIntOrNull() ?: 0 }
-        val l = lClean.split(".").map { it.replace(SUFFIX_REGEX, "").toIntOrNull() ?: 0 }
-        val maxLen = maxOf(r.size, l.size)
+        val remoteVersion = parseVersion(remote)
+        val localVersion = parseVersion(local)
+
+        val maxLen = maxOf(remoteVersion.base.size, localVersion.base.size)
         for (i in 0 until maxLen) {
-            val rv = r.getOrElse(i) { 0 }
-            val lv = l.getOrElse(i) { 0 }
+            val rv = remoteVersion.base.getOrElse(i) { 0 }
+            val lv = localVersion.base.getOrElse(i) { 0 }
             if (rv > lv) return true
             if (rv < lv) return false
         }
-        // Same numeric version: stable (no suffix) is newer than prerelease (has suffix)
-        val remoteIsPrerelease = rClean.contains("-")
-        val localIsPrerelease = lClean.contains("-")
-        return !remoteIsPrerelease && localIsPrerelease
+
+        val remotePre = remoteVersion.prerelease
+        val localPre = localVersion.prerelease
+        if (remotePre == null && localPre == null) return false
+        if (remotePre == null) return true
+        if (localPre == null) return false
+
+        if (remotePre.rank != localPre.rank) return remotePre.rank > localPre.rank
+        if (remotePre.number != localPre.number) return remotePre.number > localPre.number
+        return remotePre.raw > localPre.raw
+    }
+
+    private data class ParsedVersion(
+        val base: List<Int>,
+        val prerelease: ParsedPrerelease?
+    )
+
+    private data class ParsedPrerelease(
+        val raw: String,
+        val rank: Int,
+        val number: Int
+    )
+
+    private fun parseVersion(raw: String): ParsedVersion {
+        val normalized = raw.removePrefix("v").trim().lowercase()
+        val basePart = normalized.substringBefore('-')
+        val suffixPart = normalized.substringAfter('-', "").trim()
+        val base = basePart.split('.').map { it.toIntOrNull() ?: 0 }
+        return ParsedVersion(
+            base = base,
+            prerelease = suffixPart.takeIf { it.isNotBlank() }?.let(::parsePrerelease)
+        )
+    }
+
+    private fun parsePrerelease(raw: String): ParsedPrerelease {
+        val compact = raw.replace(".", "").trim()
+        val match = Regex("([a-z]+)(\\d+)?").matchEntire(compact)
+        val label = match?.groupValues?.getOrNull(1).orEmpty()
+        val number = match?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 0
+        val rank = when (label) {
+            "alpha" -> 0
+            "beta" -> 1
+            "rc" -> 2
+            else -> 1
+        }
+        return ParsedPrerelease(
+            raw = compact,
+            rank = rank,
+            number = number
+        )
     }
 
     private fun installApk(context: Context, apkFile: File) {

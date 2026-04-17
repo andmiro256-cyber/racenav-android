@@ -1,6 +1,8 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import android.content.Intent
+import android.graphics.drawable.ColorDrawable
 import android.util.Log
 import androidx.lifecycle.lifecycleScope
 import okhttp3.MediaType.Companion.toMediaType
@@ -74,6 +76,7 @@ import android.widget.ImageButton
 import android.widget.ProgressBar
 import com.andreykoff.racenav.MapFragment.Companion.PREF_ORIENTATION
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -94,6 +97,18 @@ data class LoadedDataset(
 
 class SettingsFragment : Fragment() {
 
+    private data class SettingsPalette(
+        val background: Int,
+        val surface: Int,
+        val surfaceTop: Int,
+        val surfaceOverlay: Int,
+        val textPrimary: Int,
+        val textSecondary: Int,
+        val textMuted: Int,
+        val textHint: Int,
+        val accent: Int
+    )
+
     private companion object {
         const val PREF_DATASETS_JSON = "loaded_datasets_json"
         const val MAX_DATASETS = 10
@@ -106,6 +121,38 @@ class SettingsFragment : Fragment() {
     private val offlineMapPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> if (uri != null) loadOfflineMap(uri) }
+
+    private var monitoringSoundTargetPrefKey: String? = null
+    private var monitoringSoundTargetNameKey: String? = null
+    private var customApproachSoundValueView: TextView? = null
+    private var customTakenSoundValueView: TextView? = null
+    private val monitoringSoundPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        val prefKey = monitoringSoundTargetPrefKey
+        val nameKey = monitoringSoundTargetNameKey
+        monitoringSoundTargetPrefKey = null
+        monitoringSoundTargetNameKey = null
+        if (uri == null || prefKey == null || nameKey == null || !isAdded) return@registerForActivityResult
+        val ctx = requireContext()
+        try {
+            ctx.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+        }
+        val soundName = queryDisplayName(uri) ?: (uri.lastPathSegment ?: "custom_sound")
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(prefKey, uri.toString())
+            .putString(nameKey, soundName)
+            .apply()
+        when (nameKey) {
+            MapFragment.PREF_SOUND_APPROACH_NAME -> customApproachSoundValueView?.text = soundName
+            MapFragment.PREF_SOUND_TAKEN_NAME -> customTakenSoundValueView?.text = soundName
+        }
+        Toast.makeText(ctx, "Звук выбран: $soundName", Toast.LENGTH_SHORT).show()
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         return inflater.inflate(R.layout.fragment_settings, container, false)
@@ -122,6 +169,9 @@ class SettingsFragment : Fragment() {
 
         // Tab switching — show/hide settings sections
         setupTabs(view)
+        view.post {
+            if (isAdded) applySettingsTheme(view)
+        }
 
         // Fix status bar overlap for settings toolbar
         ViewCompat.setOnApplyWindowInsetsListener(view.findViewById(R.id.statusBarSpacer)) { v, insets ->
@@ -135,6 +185,35 @@ class SettingsFragment : Fragment() {
 
         view.findViewById<View>(R.id.btnBack).setOnClickListener {
             parentFragmentManager.popBackStack()
+        }
+
+        fun appThemeLabel(value: String): String = when (value) {
+            AppThemeHelper.MODE_LIGHT -> "Светлая"
+            AppThemeHelper.MODE_DARK -> "Тёмная"
+            else -> "Как в системе"
+        }
+
+        val txtAppTheme = view.findViewById<TextView>(R.id.txtAppTheme)
+        var appThemeMode = AppThemeHelper.getThemeMode(requireContext())
+        txtAppTheme?.text = appThemeLabel(appThemeMode)
+        view.findViewById<View>(R.id.rowAppTheme)?.setOnClickListener {
+            val options = arrayOf("Как в системе", "Светлая", "Тёмная")
+            val values = arrayOf(AppThemeHelper.MODE_SYSTEM, AppThemeHelper.MODE_LIGHT, AppThemeHelper.MODE_DARK)
+            val selectedIndex = values.indexOf(appThemeMode).coerceAtLeast(0)
+            AlertDialog.Builder(requireContext())
+                .setTitle("Тема приложения")
+                .setSingleChoiceItems(options, selectedIndex) { dlg, which ->
+                    val selected = values[which]
+                    if (selected != appThemeMode) {
+                        appThemeMode = selected
+                        txtAppTheme?.text = appThemeLabel(appThemeMode)
+                        AppThemeHelper.setThemeMode(requireContext(), selected)
+                        activity?.recreate()
+                    }
+                    dlg.dismiss()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
         }
 
         // Fullscreen
@@ -602,6 +681,121 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        fun normalizeGpsDistanceRings(raw: String?): String {
+            val normalized = raw.orEmpty()
+                .split(",")
+                .mapNotNull { it.trim().toIntOrNull() }
+                .filter { it in 10..50_000 }
+                .distinct()
+                .sorted()
+                .take(5)
+                .joinToString(",")
+            return if (normalized.isNotBlank()) normalized else MapFragment.DEFAULT_GPS_DISTANCE_RINGS_RADII
+        }
+
+        fun formatGpsDistanceRings(raw: String?): String {
+            return normalizeGpsDistanceRings(raw)
+                .split(",")
+                .mapNotNull { it.toIntOrNull() }
+                .joinToString(", ") { "${it}м" }
+        }
+
+        val switchGpsDistanceRings = view.findViewById<SwitchCompat>(R.id.switchGpsDistanceRings)
+        val rowGpsDistanceRingsRadii = view.findViewById<View>(R.id.rowGpsDistanceRingsRadii)
+        val rowGpsDistanceRingsColor = view.findViewById<View>(R.id.rowGpsDistanceRingsColor)
+        val rowGpsDistanceRingsWidth = view.findViewById<View>(R.id.rowGpsDistanceRingsWidth)
+        val txtGpsDistanceRingsRadii = view.findViewById<TextView>(R.id.txtGpsDistanceRingsRadii)
+        val viewGpsDistanceRingsColor = view.findViewById<View>(R.id.viewGpsDistanceRingsColor)
+        val txtGpsDistanceRingsWidth = view.findViewById<TextView>(R.id.txtGpsDistanceRingsWidth)
+
+        fun syncGpsDistanceRingsUi() {
+            val visible = prefs.getBoolean(MapFragment.PREF_GPS_DISTANCE_RINGS_VISIBLE, false)
+            switchGpsDistanceRings.isChecked = visible
+            txtGpsDistanceRingsRadii.text = formatGpsDistanceRings(
+                prefs.getString(MapFragment.PREF_GPS_DISTANCE_RINGS_RADII, MapFragment.DEFAULT_GPS_DISTANCE_RINGS_RADII)
+            )
+            val ringColor = prefs.getString(
+                MapFragment.PREF_GPS_DISTANCE_RINGS_COLOR,
+                MapFragment.DEFAULT_GPS_DISTANCE_RINGS_COLOR
+            ) ?: MapFragment.DEFAULT_GPS_DISTANCE_RINGS_COLOR
+            val ringWidth = prefs.getFloat(
+                MapFragment.PREF_GPS_DISTANCE_RINGS_WIDTH,
+                MapFragment.DEFAULT_GPS_DISTANCE_RINGS_WIDTH
+            ).toInt().coerceIn(1, 8)
+            viewGpsDistanceRingsColor.setBackgroundColor(android.graphics.Color.parseColor(ringColor))
+            txtGpsDistanceRingsWidth.text = ringWidth.toString()
+            val rows = listOf(rowGpsDistanceRingsRadii, rowGpsDistanceRingsColor, rowGpsDistanceRingsWidth)
+            rows.forEach { it.alpha = if (visible) 1f else 0.55f }
+        }
+
+        syncGpsDistanceRingsUi()
+        switchGpsDistanceRings.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(MapFragment.PREF_GPS_DISTANCE_RINGS_VISIBLE, checked).apply()
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                ?.setGpsDistanceRingsVisible(checked)
+            listOf(rowGpsDistanceRingsRadii, rowGpsDistanceRingsColor, rowGpsDistanceRingsWidth)
+                .forEach { it.alpha = if (checked) 1f else 0.55f }
+        }
+        rowGpsDistanceRingsRadii.setOnClickListener {
+            val input = android.widget.EditText(requireContext()).apply {
+                setText(
+                    prefs.getString(
+                        MapFragment.PREF_GPS_DISTANCE_RINGS_RADII,
+                        MapFragment.DEFAULT_GPS_DISTANCE_RINGS_RADII
+                    ) ?: MapFragment.DEFAULT_GPS_DISTANCE_RINGS_RADII
+                )
+                hint = "100,250,500"
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
+                setSelection(text?.length ?: 0)
+            }
+            androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle("Радиусы кругов")
+                .setMessage("Введите радиусы в метрах через запятую, до 5 значений.")
+                .setView(input)
+                .setPositiveButton("Сохранить") { _, _ ->
+                    val normalized = normalizeGpsDistanceRings(input.text?.toString())
+                    prefs.edit().putString(MapFragment.PREF_GPS_DISTANCE_RINGS_RADII, normalized).apply()
+                    txtGpsDistanceRingsRadii.text = formatGpsDistanceRings(normalized)
+                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                        ?.refreshGpsDistanceRings()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+        rowGpsDistanceRingsColor.setOnClickListener {
+            showColorPicker(
+                prefs.getString(
+                    MapFragment.PREF_GPS_DISTANCE_RINGS_COLOR,
+                    MapFragment.DEFAULT_GPS_DISTANCE_RINGS_COLOR
+                ) ?: MapFragment.DEFAULT_GPS_DISTANCE_RINGS_COLOR
+            ) { color ->
+                viewGpsDistanceRingsColor.setBackgroundColor(android.graphics.Color.parseColor(color))
+                prefs.edit().putString(MapFragment.PREF_GPS_DISTANCE_RINGS_COLOR, color).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsDistanceRings()
+            }
+        }
+        var gpsDistanceRingsWidth = prefs.getFloat(
+            MapFragment.PREF_GPS_DISTANCE_RINGS_WIDTH,
+            MapFragment.DEFAULT_GPS_DISTANCE_RINGS_WIDTH
+        ).toInt().coerceIn(1, 8)
+        txtGpsDistanceRingsWidth.text = gpsDistanceRingsWidth.toString()
+        view.findViewById<ImageButton>(R.id.btnGpsDistanceRingsWidthMinus)?.setOnClickListener {
+            if (gpsDistanceRingsWidth > 1) {
+                gpsDistanceRingsWidth--
+                txtGpsDistanceRingsWidth.text = gpsDistanceRingsWidth.toString()
+                prefs.edit().putFloat(MapFragment.PREF_GPS_DISTANCE_RINGS_WIDTH, gpsDistanceRingsWidth.toFloat()).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsDistanceRings()
+            }
+        }
+        view.findViewById<ImageButton>(R.id.btnGpsDistanceRingsWidthPlus)?.setOnClickListener {
+            if (gpsDistanceRingsWidth < 8) {
+                gpsDistanceRingsWidth++
+                txtGpsDistanceRingsWidth.text = gpsDistanceRingsWidth.toString()
+                prefs.edit().putFloat(MapFragment.PREF_GPS_DISTANCE_RINGS_WIDTH, gpsDistanceRingsWidth.toFloat()).apply()
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.refreshGpsDistanceRings()
+            }
+        }
+
         // Widgets — dynamic ordered list with enable toggles and up/down reorder buttons
         buildWidgetOrderUI(view, prefs)
 
@@ -624,6 +818,53 @@ class SettingsFragment : Fragment() {
                 prefs.edit().putInt(MapFragment.PREF_WIDGET_FONT_SCALE, fontScale).apply()
                 parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()?.applyWidgetFontScale()
             }
+        }
+
+        fun bottomBarThemeLabel(value: String): String = when (value) {
+            "light" -> "Светлая"
+            else -> "Тёмная"
+        }
+
+        val mapFragmentRef = {
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        }
+
+        val txtBottomBarHeight = view.findViewById<TextView>(R.id.txtBottomBarHeight)
+        val seekBottomBarHeight = view.findViewById<SeekBar>(R.id.seekBottomBarHeight)
+        val bottomBarHeight = MapFragment.readBottomBarHeightScale(prefs)
+        txtBottomBarHeight?.text = "${bottomBarHeight * 20}%"
+        seekBottomBarHeight?.max = 9
+        seekBottomBarHeight?.progress = bottomBarHeight - 1
+        seekBottomBarHeight?.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val value = progress + 1
+                prefs.edit().putInt(MapFragment.PREF_BOTTOM_BAR_HEIGHT, value).putBoolean(MapFragment.PREF_BOTTOM_BAR_HEIGHT_MIGRATED, true).apply()
+                txtBottomBarHeight?.text = "${value * 20}%"
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                mapFragmentRef()?.applyUiScale()
+            }
+        })
+
+        val txtBottomBarTheme = view.findViewById<TextView>(R.id.txtBottomBarTheme)
+        var bottomBarTheme = prefs.getString(MapFragment.PREF_BOTTOM_BAR_THEME, "dark") ?: "dark"
+        txtBottomBarTheme?.text = bottomBarThemeLabel(bottomBarTheme)
+        view.findViewById<View>(R.id.rowBottomBarTheme)?.setOnClickListener {
+            val options = arrayOf("Тёмная", "Светлая")
+            val values = arrayOf("dark", "light")
+            val selectedIndex = values.indexOf(bottomBarTheme).coerceAtLeast(0)
+            AlertDialog.Builder(requireContext())
+                .setTitle("Тон нижней панели")
+                .setSingleChoiceItems(options, selectedIndex) { dlg, which ->
+                    bottomBarTheme = values[which]
+                    txtBottomBarTheme?.text = bottomBarThemeLabel(bottomBarTheme)
+                    prefs.edit().putString(MapFragment.PREF_BOTTOM_BAR_THEME, bottomBarTheme).apply()
+                    mapFragmentRef()?.applyBottomBarAppearance()
+                    dlg.dismiss()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
         }
 
         // ── Navigation compass settings (programmatic) ──
@@ -991,6 +1232,7 @@ class SettingsFragment : Fragment() {
                 approachRadius--
                 txtApproachRadius.text = approachRadius.toString()
                 prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, approachRadius).apply()
+                mapFragRef()?.updateRadiusCircles()
             }
         }
         view.findViewById<ImageButton>(R.id.btnApproachRadiusPlus).setOnClickListener {
@@ -998,6 +1240,7 @@ class SettingsFragment : Fragment() {
                 approachRadius++
                 txtApproachRadius.text = approachRadius.toString()
                 prefs.edit().putInt(PREF_WP_APPROACH_RADIUS, approachRadius).apply()
+                mapFragRef()?.updateRadiusCircles()
             }
         }
 
@@ -1010,6 +1253,7 @@ class SettingsFragment : Fragment() {
                 takenRadius--
                 txtTakenRadius.text = takenRadius.toString()
                 prefs.edit().putInt(MapFragment.PREF_WP_TAKEN_RADIUS, takenRadius).apply()
+                mapFragRef()?.updateRadiusCircles()
             }
         }
         view.findViewById<ImageButton>(R.id.btnTakenRadiusPlus).setOnClickListener {
@@ -1017,6 +1261,16 @@ class SettingsFragment : Fragment() {
                 takenRadius++
                 txtTakenRadius.text = takenRadius.toString()
                 prefs.edit().putInt(MapFragment.PREF_WP_TAKEN_RADIUS, takenRadius).apply()
+                mapFragRef()?.updateRadiusCircles()
+            }
+        }
+
+        val switchDistanceRings = view.findViewById<SwitchCompat>(R.id.switchDistanceRings)
+        switchDistanceRings.isChecked = prefs.getBoolean(MapFragment.PREF_DISTANCE_RINGS_VISIBLE, true)
+        switchDistanceRings.setOnCheckedChangeListener { _, checked ->
+            mapFragRef()?.setDistanceRingsVisible(checked)
+            if (mapFragRef() == null) {
+                prefs.edit().putBoolean(MapFragment.PREF_DISTANCE_RINGS_VISIBLE, checked).apply()
             }
         }
 
@@ -1140,6 +1394,101 @@ class SettingsFragment : Fragment() {
         switchTaken.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(MapFragment.PREF_SOUND_TAKEN, checked).apply()
         }
+        val soundTakenRow = switchTaken.parent as? ViewGroup
+        val soundRowsParent = soundTakenRow?.parent as? ViewGroup
+        if (soundRowsParent != null && soundTakenRow != null) {
+            val density = resources.displayMetrics.density
+            fun makeCustomSoundRow(title: String): Pair<LinearLayout, TextView> {
+                val row = LinearLayout(requireContext()).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setPadding((16 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+                }
+                row.addView(TextView(requireContext()).apply {
+                    text = title
+                    setTextColor(0xFFFFFFFF.toInt())
+                    textSize = 14f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                val value = TextView(requireContext()).apply {
+                    setTextColor(0xFFFF6F00.toInt())
+                    textSize = 13f
+                    gravity = android.view.Gravity.END
+                }
+                row.addView(value)
+                row.addView(TextView(requireContext()).apply {
+                    text = "  ›"
+                    setTextColor(0xFF888888.toInt())
+                    textSize = 15f
+                })
+                return row to value
+            }
+            fun refreshCustomSoundValue(valueView: TextView, nameKey: String) {
+                valueView.text = prefs.getString(nameKey, null)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Стандартный"
+            }
+            fun openSoundPicker(prefUriKey: String, prefNameKey: String, title: String, valueView: TextView) {
+                val ctx = requireContext()
+                val options = arrayOf("Выбрать файл", "Тест", "Сбросить")
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle(title)
+                    .setItems(options) { _, which ->
+                        when (which) {
+                            0 -> {
+                                monitoringSoundTargetPrefKey = prefUriKey
+                                monitoringSoundTargetNameKey = prefNameKey
+                                monitoringSoundPicker.launch(arrayOf("audio/*"))
+                            }
+                            1 -> {
+                                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                                    ?.previewCheckpointSound(prefUriKey)
+                                    ?: Toast.makeText(ctx, "Откройте карту и попробуйте снова", Toast.LENGTH_SHORT).show()
+                            }
+                            2 -> {
+                                prefs.edit()
+                                    .remove(prefUriKey)
+                                    .remove(prefNameKey)
+                                    .apply()
+                                refreshCustomSoundValue(valueView, prefNameKey)
+                                when (prefNameKey) {
+                                    MapFragment.PREF_SOUND_APPROACH_NAME -> customApproachSoundValueView?.text = valueView.text
+                                    MapFragment.PREF_SOUND_TAKEN_NAME -> customTakenSoundValueView?.text = valueView.text
+                                }
+                                Toast.makeText(ctx, "Сброшено на стандартный звук", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+            val (approachSoundRow, approachValue) = makeCustomSoundRow("Свой звук входа в зону КП beta")
+            val (takenSoundRow, takenValue) = makeCustomSoundRow("Свой звук взятия КП beta")
+            customApproachSoundValueView = approachValue
+            customTakenSoundValueView = takenValue
+            refreshCustomSoundValue(approachValue, MapFragment.PREF_SOUND_APPROACH_NAME)
+            refreshCustomSoundValue(takenValue, MapFragment.PREF_SOUND_TAKEN_NAME)
+            approachSoundRow.setOnClickListener {
+                openSoundPicker(
+                    MapFragment.PREF_SOUND_APPROACH_URI,
+                    MapFragment.PREF_SOUND_APPROACH_NAME,
+                    "Звук входа в зону КП",
+                    approachValue
+                )
+            }
+            takenSoundRow.setOnClickListener {
+                openSoundPicker(
+                    MapFragment.PREF_SOUND_TAKEN_URI,
+                    MapFragment.PREF_SOUND_TAKEN_NAME,
+                    "Звук взятия КП",
+                    takenValue
+                )
+            }
+            val insertIdx = soundRowsParent.indexOfChild(soundTakenRow) + 1
+            soundRowsParent.addView(approachSoundRow, insertIdx)
+            soundRowsParent.addView(takenSoundRow, insertIdx + 1)
+        }
 
         // Hints toggle
         val switchHints = view.findViewById<android.widget.Switch>(R.id.switchHints)
@@ -1197,7 +1546,78 @@ class SettingsFragment : Fragment() {
         }
 
         // Offline maps — dynamic list
+        refreshDownloadedAreasUI(view)
         refreshOfflineMapsUI(view)
+        val rowOfflineMapStorage = view.findViewById<View>(R.id.rowOfflineMapStorage)
+        val txtOfflineMapStorage = view.findViewById<TextView>(R.id.txtOfflineMapStorage)
+        val txtOfflineMapStoragePath = view.findViewById<TextView>(R.id.txtOfflineMapStoragePath)
+
+        fun updateOfflineMapStorageUi() {
+            val option = MapStorageManager.getCurrentOption(requireContext())
+            txtOfflineMapStorage.text = option.label
+            txtOfflineMapStoragePath.text = option.dir.absolutePath
+        }
+
+        updateOfflineMapStorageUi()
+        rowOfflineMapStorage.setOnClickListener {
+            val ctx = requireContext()
+            val options = MapStorageManager.getAvailableOptions(ctx)
+            val currentId = MapStorageManager.getCurrentOption(ctx).id
+            var selectedIndex = options.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+            val labels = options.map { "${it.label}\n${it.dir.absolutePath}" }.toTypedArray()
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("Хранилище карт")
+                .setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                    selectedIndex = which
+                }
+                .setPositiveButton("Выбрать") { _, _ ->
+                    val selected = options.getOrNull(selectedIndex) ?: return@setPositiveButton
+                    if (selected.id == currentId) return@setPositiveButton
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle("Перенести карты?")
+                        .setMessage("Оффлайн-карты будут перенесены в новое хранилище:\n${selected.dir.absolutePath}")
+                        .setPositiveButton("Перенести") { _, _ ->
+                            val progress = androidx.appcompat.app.AlertDialog.Builder(ctx)
+                                .setTitle("Перенос карт")
+                                .setView(android.widget.ProgressBar(ctx).apply { isIndeterminate = true })
+                                .setCancelable(false)
+                                .create()
+                            progress.show()
+                            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                                ?.prepareOfflineMapsForMigration()
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                try {
+                                    val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        MapStorageManager.migrateToTarget(ctx, selected.id)
+                                    }
+                                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                                        ?.reloadOfflineMapsFromStorage()
+                                    refreshDownloadedAreasUI(view)
+                                    refreshOfflineMapsUI(view)
+                                    updateOfflineMapStorageUi()
+                                    Toast.makeText(
+                                        ctx,
+                                        "Карты перенесены: ${result.movedFiles} файлов",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } catch (e: Exception) {
+                                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                                        ?.reloadOfflineMapsFromStorage()
+                                    refreshDownloadedAreasUI(view)
+                                    refreshOfflineMapsUI(view)
+                                    updateOfflineMapStorageUi()
+                                    Toast.makeText(ctx, "Не удалось перенести карты: ${e.message}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    progress.dismiss()
+                                }
+                            }
+                        }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
         view.findViewById<View>(R.id.btnLoadOfflineMap).setOnClickListener {
             offlineMapPicker.launch(arrayOf("*/*", "application/octet-stream"))
         }
@@ -1443,18 +1863,33 @@ class SettingsFragment : Fragment() {
             }
             val email = editSyncEmail.text.toString().trim()
             if (email.isEmpty()) { onKey(null); return }
+            val syncCtx = requireContext()
             prefs.edit().putString("sync_email", email).putString("backup_email", email).apply()
-            // Lookup key by email from server
+            // Re-register email on server to resolve or refresh sync key.
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val key = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        val url = java.net.URL("${MapFragment.SYNC_BASE_URL}/api/sync/by-email/$email")
+                        val url = java.net.URL("${MapFragment.SYNC_BASE_URL}/api/email/register")
                         val conn = url.openConnection() as java.net.HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty("Content-Type", "application/json")
+                        conn.doOutput = true
                         conn.connectTimeout = 10000; conn.readTimeout = 10000
                         try {
+                            val deviceId = LicenseManager.getShortDeviceId(syncCtx)
+                            val model = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+                            val hwFp = LicenseManager.getHardwareFingerprint(syncCtx)
+                            val payload = org.json.JSONObject().apply {
+                                put("email", email)
+                                put("deviceId", deviceId)
+                                put("deviceType", "android")
+                                put("model", model)
+                                put("hwFingerprint", hwFp)
+                            }
+                            conn.outputStream.write(payload.toString().toByteArray())
                             if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
                             val json = org.json.JSONObject(conn.inputStream.bufferedReader().readText())
-                            json.optString("apiKey", "")
+                            json.optString("syncKey", "")
                         } finally {
                             conn.disconnect()
                         }
@@ -1758,8 +2193,10 @@ class SettingsFragment : Fragment() {
             Toast.makeText(context, "LiveUsers: ${if (checked) "ON" else "OFF"}, mapFrag=${mapFrag != null}", Toast.LENGTH_SHORT).show()
             if (checked) {
                 mapFrag?.startLiveUsersPoller()
+                mapFrag?.startMonitoringMessagesPolling()
             } else {
                 mapFrag?.stopLiveUsersPoller()
+                mapFrag?.stopMonitoringMessagesPolling()
             }
         }
 
@@ -1813,6 +2250,90 @@ class SettingsFragment : Fragment() {
             groupsRow.addView(groupsChevron)
             parentVg.addView(groupsRow, idx + 1)
 
+            val statusRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding((32 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                isClickable = true
+                setBackgroundResource(android.R.drawable.list_selector_background)
+            }
+            val statusLabel = TextView(requireContext()).apply {
+                text = "Мой статус beta"
+                setTextColor(0xFFCCCCCC.toInt())
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val statusValue = TextView(requireContext()).apply {
+                setTextColor(0xFFFF6F00.toInt())
+                textSize = 13f
+                gravity = android.view.Gravity.END
+            }
+            val statusChevron = TextView(requireContext()).apply {
+                text = "  ›"
+                setTextColor(0xFF888888.toInt())
+                textSize = 15f
+            }
+            statusRow.addView(statusLabel)
+            statusRow.addView(statusValue)
+            statusRow.addView(statusChevron)
+            parentVg.addView(statusRow, idx + 2)
+
+            val messagesRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding((32 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                isClickable = true
+                setBackgroundResource(android.R.drawable.list_selector_background)
+            }
+            val messagesLabel = TextView(requireContext()).apply {
+                text = "Сообщения beta"
+                setTextColor(0xFFCCCCCC.toInt())
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val messagesValue = TextView(requireContext()).apply {
+                setTextColor(0xFFFF6F00.toInt())
+                textSize = 13f
+                gravity = android.view.Gravity.END
+            }
+            val messagesChevron = TextView(requireContext()).apply {
+                text = "  ›"
+                setTextColor(0xFF888888.toInt())
+                textSize = 15f
+            }
+            messagesRow.addView(messagesLabel)
+            messagesRow.addView(messagesValue)
+            messagesRow.addView(messagesChevron)
+            parentVg.addView(messagesRow, idx + 3)
+
+            val cacheRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding((32 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                isClickable = true
+                setBackgroundResource(android.R.drawable.list_selector_background)
+            }
+            val cacheLabel = TextView(requireContext()).apply {
+                text = "Кеш вложений beta"
+                setTextColor(0xFFCCCCCC.toInt())
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val cacheValue = TextView(requireContext()).apply {
+                setTextColor(0xFFFF6F00.toInt())
+                textSize = 13f
+                gravity = android.view.Gravity.END
+            }
+            val cacheChevron = TextView(requireContext()).apply {
+                text = "  ›"
+                setTextColor(0xFF888888.toInt())
+                textSize = 15f
+            }
+            cacheRow.addView(cacheLabel)
+            cacheRow.addView(cacheValue)
+            cacheRow.addView(cacheChevron)
+            parentVg.addView(cacheRow, idx + 4)
+
             fun refreshGroupsValueLabel() {
                 val ctx = context ?: return
                 val activeId = FavoritesGroupsRepository.getActiveGroupId(ctx)
@@ -1824,7 +2345,25 @@ class SettingsFragment : Fragment() {
                     if (g != null) "${g.name} (${g.members.size})" else "Все участники"
                 }
             }
+            fun refreshMonitoringStatusLabel() {
+                val ctx = context ?: return
+                statusValue.text = MonitoringRepository.getMyStatus(ctx).displayLabel
+            }
+            fun refreshMonitoringMessagesLabel() {
+                val ctx = context ?: return
+                val unread = MonitoringRepository.getUnreadCount(ctx)
+                messagesValue.text = if (unread > 0) "Новых: $unread" else "История"
+            }
+            fun refreshMonitoringCacheLabel() {
+                val ctx = context ?: return
+                val limitMb = MonitoringRepository.getAttachmentCacheLimitMb(ctx)
+                val usage = MonitoringRepository.getAttachmentCacheUsageBytes(ctx)
+                cacheValue.text = "${MonitoringRepository.formatCacheSize(usage)} / ${limitMb} МБ"
+            }
             refreshGroupsValueLabel()
+            refreshMonitoringStatusLabel()
+            refreshMonitoringMessagesLabel()
+            refreshMonitoringCacheLabel()
 
             groupsRow.setOnClickListener {
                 val ctx = requireContext()
@@ -1854,12 +2393,52 @@ class SettingsFragment : Fragment() {
                     .setNegativeButton("Отмена", null)
                     .show()
             }
+            statusRow.setOnClickListener {
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?.openMonitoringStatusPicker()
+                    ?: Toast.makeText(requireContext(), "Откройте карту и попробуйте снова", Toast.LENGTH_SHORT).show()
+            }
+            messagesRow.setOnClickListener {
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?.openMonitoringMessagesCenter()
+                    ?: Toast.makeText(requireContext(), "Откройте карту и попробуйте снова", Toast.LENGTH_SHORT).show()
+            }
+            cacheRow.setOnClickListener {
+                val ctx = requireContext()
+                val options = listOf(50, 100, 250, 500, 1024)
+                var selectedIndex = options.indexOf(MonitoringRepository.getAttachmentCacheLimitMb(ctx)).let {
+                    if (it >= 0) it else options.indexOf(100)
+                }.coerceAtLeast(0)
+                val labels = options.map { "$it МБ" }.toTypedArray()
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle("Кеш вложений мониторинга")
+                    .setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                        selectedIndex = which
+                    }
+                    .setPositiveButton("Сохранить") { _, _ ->
+                        MonitoringRepository.setAttachmentCacheLimitMb(ctx, options[selectedIndex])
+                        refreshMonitoringCacheLabel()
+                    }
+                    .setNeutralButton("Очистить кеш") { _, _ ->
+                        MonitoringRepository.clearAttachmentCache(ctx)
+                        refreshMonitoringCacheLabel()
+                        Toast.makeText(ctx, "Кеш вложений очищен", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
 
             // Keep label fresh when active group / groups list changes from another screen
             val favPrefListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
                 if (key == MapFragment.PREF_LIVE_USERS_ACTIVE_GROUP_ID ||
                     key == MapFragment.PREF_LIVE_USERS_FAVORITES_CACHE) {
                     refreshGroupsValueLabel()
+                }
+                if (key == MonitoringRepository.PREF_MONITORING_STATUS_CODE) {
+                    refreshMonitoringStatusLabel()
+                }
+                if (key == MonitoringRepository.PREF_MONITORING_UNREAD_COUNT) {
+                    refreshMonitoringMessagesLabel()
                 }
             }
             favoritesLabelPrefListener = favPrefListener
@@ -1929,6 +2508,7 @@ class SettingsFragment : Fragment() {
                     }
                 } else onlineDevices
                 sorted.forEach { d ->
+                    val monitoringStatus = MonitoringPresenceStatus.fromCode(d.monitorStatusCode)
                     val dist = if (gps != null) {
                         val R = 6371000.0
                         val dLat = Math.toRadians(d.lat - gps.latitude)
@@ -1954,7 +2534,7 @@ class SettingsFragment : Fragment() {
                     }
                     row.addView(dot)
                     row.addView(TextView(requireContext()).apply {
-                        text = "${d.name} — $distStr"
+                        text = "${monitoringStatus.emoji} ${d.name} — $distStr"
                         setTextColor(0xFFCCCCCC.toInt())
                         textSize = 13f
                     })
@@ -2517,6 +3097,92 @@ class SettingsFragment : Fragment() {
     private var liveUsersRunnable: Runnable? = null
     private var currentSettingsTab = "main"
     private var scrollContentRef: android.view.ViewGroup? = null
+    private var settingsTabs: Map<String, TextView?> = emptyMap()
+
+    private fun themedColor(colorRes: Int): Int = ContextCompat.getColor(requireContext(), colorRes)
+
+    private fun settingsPalette(): SettingsPalette = SettingsPalette(
+        background = themedColor(R.color.background),
+        surface = themedColor(R.color.surface),
+        surfaceTop = themedColor(R.color.surface_top),
+        surfaceOverlay = themedColor(R.color.surface_overlay),
+        textPrimary = themedColor(R.color.text_primary),
+        textSecondary = themedColor(R.color.text_secondary),
+        textMuted = themedColor(R.color.text_muted),
+        textHint = themedColor(R.color.text_hint),
+        accent = themedColor(R.color.primary)
+    )
+
+    private fun remapBackgroundColor(current: Int, palette: SettingsPalette): Int? = when (current) {
+        0xFF121212.toInt() -> palette.background
+        0xFF111111.toInt(),
+        0xFF1A1A1A.toInt() -> palette.surfaceTop
+        0xFF1E1E1E.toInt(),
+        0xFF242424.toInt(),
+        0xFF2A2A2A.toInt(),
+        0xFF333333.toInt(),
+        0xFF444444.toInt() -> palette.surface
+        0xFF1A1A2E.toInt(),
+        0xFF2A2A3E.toInt() -> palette.surfaceOverlay
+        else -> null
+    }
+
+    private fun remapTextColor(current: Int, palette: SettingsPalette): Int? = when (current) {
+        0xFFFFFFFF.toInt() -> palette.textPrimary
+        0xFFCCCCCC.toInt(),
+        0xFFDDDDDD.toInt(),
+        0xFFAAAAAA.toInt() -> palette.textSecondary
+        0xFF999999.toInt(),
+        0xFF888888.toInt(),
+        0xFF777777.toInt(),
+        0xFF666666.toInt(),
+        0xFF555555.toInt() -> palette.textMuted
+        0xFFFF6F00.toInt() -> palette.accent
+        else -> null
+    }
+
+    private fun applySettingsTheme(view: View) {
+        if (!isAdded) return
+        val palette = settingsPalette()
+        view.setBackgroundColor(palette.background)
+        applySettingsThemeRecursive(view, palette)
+        applySettingsTabSelection()
+    }
+
+    private fun applySettingsThemeRecursive(view: View, palette: SettingsPalette) {
+        val colorDrawable = view.background as? ColorDrawable
+        remapBackgroundColor(colorDrawable?.color ?: Int.MIN_VALUE, palette)?.let { view.setBackgroundColor(it) }
+
+        when (view) {
+            is TextView -> {
+                remapTextColor(view.currentTextColor, palette)?.let(view::setTextColor)
+                remapTextColor(view.currentHintTextColor, palette)?.let(view::setHintTextColor)
+            }
+            is ImageButton -> {
+                val tintColor = view.imageTintList?.defaultColor
+                remapTextColor(tintColor ?: Int.MIN_VALUE, palette)?.let {
+                    view.imageTintList = android.content.res.ColorStateList.valueOf(it)
+                }
+            }
+        }
+
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                applySettingsThemeRecursive(view.getChildAt(i), palette)
+            }
+        }
+    }
+
+    private fun applySettingsTabSelection() {
+        val palette = settingsPalette()
+        settingsTabs.forEach { (key, tab) ->
+            tab?.setTextColor(if (key == currentSettingsTab) palette.accent else palette.textMuted)
+            tab?.setTypeface(
+                null,
+                if (key == currentSettingsTab) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+            )
+        }
+    }
 
     private fun setupTabs(view: View) {
         val tabs = mapOf(
@@ -2526,6 +3192,7 @@ class SettingsFragment : Fragment() {
             "network" to view.findViewById<TextView>(R.id.tabNetwork),
             "about" to view.findViewById<TextView>(R.id.tabAbout)
         )
+        settingsTabs = tabs
         scrollContentRef = view.findViewById<android.widget.ScrollView>(R.id.settingsScroll)
             ?.getChildAt(0) as? android.view.ViewGroup ?: return
 
@@ -2533,14 +3200,14 @@ class SettingsFragment : Fragment() {
             tv?.setOnClickListener {
                 currentSettingsTab = key
                 applyTabVisibility()
-                tabs.forEach { (k, t) ->
-                    t?.setTextColor(if (k == key) 0xFFFF6F00.toInt() else 0xFF888888.toInt())
-                    t?.setTypeface(null, if (k == key) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                }
+                applySettingsTabSelection()
             }
         }
         // Defer first apply to after all programmatic views are added
-        view.post { applyTabVisibility() }
+        view.post {
+            applyTabVisibility()
+            applySettingsTabSelection()
+        }
     }
 
     /** Scan all children, assign to tab by section headers, show/hide */
@@ -2822,10 +3489,11 @@ class SettingsFragment : Fragment() {
 
             "📁 Файлы и папки" to """
 • Приложение создаёт папку Documents/RaceNav/ с подпапками:
-  📂 maps/ — офлайн карты (.sqlitedb, .mbtiles)
+  📂 maps/ — треки/точки/маршруты и, при выборе этого хранилища, офлайн карты
   📂 tracks/ — записанные и сохранённые треки (.gpx)
   📂 points/ — экспортированные точки (.gpx, .wpt)
   📂 routes/ — маршруты (.gpx, .rte)
+• Папка офлайн-карт выбирается в Настройки → Карты → Хранилище карт
 • Вы можете вручную копировать файлы в эти папки
 • Загрузка файлов: Настройки → Файлы → 📂 Загрузить файл
 • Офлайн карты: Настройки → Карты → 📥 Загрузить карту
@@ -2998,6 +3666,7 @@ class SettingsFragment : Fragment() {
                 BtnInfo("map_switch", "Смена карты ⇄",    MapFragment.PREF_BTN_MAP_SWITCH, false),
                 BtnInfo("gps_dot",    "Качество GPS",     MapFragment.PREF_BTN_GPS_DOT, true),
                 BtnInfo("server_dot", "Статус сервера",   MapFragment.PREF_BTN_SERVER_DOT, false),
+                BtnInfo("messages",   "Сообщения",        MapFragment.PREF_BTN_MESSAGES,   true),
                 BtnInfo("settings",   "Настройки",        "btn_settings_always",           true),
             )
             val btnByKey = topButtons.associateBy { it.key }
@@ -3756,7 +4425,7 @@ class SettingsFragment : Fragment() {
         // Copy to app private storage with progress tracking
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val dest = java.io.File(requireContext().filesDir, "offline_map_${System.currentTimeMillis()}.$ext")
+                val dest = MapStorageManager.createManagedMapFile(requireContext(), name)
                 val total = requireContext().contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
                 var copied = 0L
                 val buffer = ByteArray(65536)
@@ -3798,18 +4467,202 @@ class SettingsFragment : Fragment() {
     private fun refreshOfflineMapsUI(view: View) {
         val container = view.findViewById<LinearLayout>(R.id.containerOfflineMaps)
         container.removeAllViews()
+        val ctx = requireContext()
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        mapFrag?.syncOfflineAreaSources()
         val maps = mapFrag?.getOfflineMaps() ?: emptyList()
-        if (maps.isEmpty()) {
+        val areas = OfflineAreasManager.loadAreas(ctx)
+        val palette = settingsPalette()
+        val successColor = themedColor(R.color.success)
+        val warningColor = themedColor(R.color.warning)
+        val errorColor = themedColor(R.color.error)
+        val density = resources.displayMetrics.density
+        val liveProgress = TileDownloadManager.getProgress()
+        val liveTaskName = TileDownloadManager.lastTask?.name
+
+        fun sectionTitle(text: String) {
             val tv = android.widget.TextView(requireContext()).apply {
-                text = "Нет загруженных карт"; setTextColor(0xFF888888.toInt())
-                textSize = 13f; setPadding(4, 8, 4, 8)
+                this.text = text
+                setTextColor(palette.textMuted)
+                textSize = 11f
+                letterSpacing = 0.06f
+                setPadding(4, 12, 4, 8)
             }
             container.addView(tv)
-        } else {
-            maps.forEach { info ->
+        }
+
+        fun chip(
+            label: String,
+            textColor: Int,
+            fillColor: Int,
+            onClick: () -> Unit
+        ): android.widget.TextView {
+            return androidx.appcompat.widget.AppCompatTextView(ctx).apply {
+                text = label
+                setTextColor(textColor)
+                textSize = 12f
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                gravity = android.view.Gravity.CENTER
+                setPadding((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (6 * density).toInt())
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = 10f * density
+                    setColor(fillColor)
+                }
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onClick() }
+            }
+        }
+
+        if (areas.isEmpty() && maps.isEmpty()) {
+            val tv = android.widget.TextView(requireContext()).apply {
+                text = "Нет загруженных карт"
+                setTextColor(palette.textMuted)
+                textSize = 13f
+                setPadding(4, 8, 4, 8)
+            }
+            container.addView(tv)
+            return
+        }
+
+        if (areas.isNotEmpty()) {
+            sectionTitle("ОБЛАСТИ")
+            areas.sortedByDescending { it.createdAt }.forEach { area ->
+                val card = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    setPadding((12 * density).toInt(), (12 * density).toInt(), (12 * density).toInt(), (12 * density).toInt())
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = 12f * density
+                        setColor(palette.surface)
+                        setStroke((1 * density).toInt().coerceAtLeast(1), ContextCompat.getColor(ctx, R.color.card_stroke))
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = (8 * density).toInt()
+                    }
+                }
+
+                val titleRow = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                val title = android.widget.TextView(ctx).apply {
+                    text = area.name
+                    setTextColor(palette.textPrimary)
+                    textSize = 15f
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                val statusLabel = when {
+                    liveTaskName == area.name && liveProgress.isRunning -> "Загрузка ${liveProgress.percent}%"
+                    liveTaskName == area.name && liveProgress.isPaused -> "Пауза ${liveProgress.percent}%"
+                    area.status == "partial" -> "Частично"
+                    area.status == "complete" -> "Готово"
+                    else -> "Подготовка"
+                }
+                val statusColor = when {
+                    liveTaskName == area.name && liveProgress.isRunning -> palette.accent
+                    liveTaskName == area.name && liveProgress.isPaused -> warningColor
+                    area.status == "partial" -> warningColor
+                    area.status == "complete" -> successColor
+                    else -> palette.textMuted
+                }
+                val status = android.widget.TextView(ctx).apply {
+                    text = statusLabel
+                    setTextColor(statusColor)
+                    textSize = 12f
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                }
+                titleRow.addView(title)
+                titleRow.addView(status)
+                card.addView(titleRow)
+
+                card.addView(android.widget.TextView(ctx).apply {
+                    text = "${area.layersDescription()} • z${area.minZoom}-${area.maxZoom} • ${String.format("%.0f", area.areaKm2)} км²"
+                    setTextColor(palette.textSecondary)
+                    textSize = 12.5f
+                    setPadding(0, (6 * density).toInt(), 0, 0)
+                })
+
+                card.addView(android.widget.TextView(ctx).apply {
+                    text = "Создано: ${area.createdAt.ifBlank { "без даты" }}"
+                    setTextColor(palette.textHint)
+                    textSize = 11f
+                    setPadding(0, (4 * density).toInt(), 0, 0)
+                })
+
+                val actions = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, (10 * density).toInt(), 0, 0)
+                }
+                actions.addView(chip("На карте", palette.textPrimary, palette.surfaceOverlay) {
+                    mapFrag?.focusOfflineArea(area.name)
+                })
+                when {
+                    liveTaskName == area.name && liveProgress.isRunning -> Unit
+                    liveTaskName == area.name && liveProgress.isPaused || area.status == "partial" || area.status == "paused" -> {
+                        actions.addView(chip("Продолжить", palette.textPrimary, palette.surfaceOverlay) {
+                            mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
+                            refreshOfflineMapsUI(view)
+                        }.apply {
+                            (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
+                        })
+                    }
+                    area.status == "complete" -> {
+                        actions.addView(chip("Обновить", palette.accent, palette.surfaceOverlay) {
+                            mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = true)
+                            refreshOfflineMapsUI(view)
+                        }.apply {
+                            (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
+                        })
+                    }
+                }
+                if (area.overlays.isNotEmpty()) {
+                    actions.addView(chip("Слои", palette.textPrimary, palette.surfaceOverlay) {
+                        mapFrag?.showOfflineLayersMenu(area.name)
+                    }.apply {
+                        (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
+                    })
+                }
+                actions.addView(chip("Удалить", errorColor, 0x22C62828, {
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle("Удалить область")
+                        .setMessage("Удалить оффлайн-область \"${area.name}\" вместе со слоями?")
+                        .setPositiveButton("Удалить") { _, _ ->
+                            OfflineAreasManager.deleteArea(ctx, area.id) { name ->
+                                mapFrag?.removeOfflineMapByName(name)
+                            }
+                            refreshOfflineMapsUI(view)
+                        }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                }).apply {
+                    (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
+                })
+                card.addView(actions)
+                container.addView(card)
+            }
+        }
+
+        val looseMaps = maps.filterNot { info ->
+            areas.any { area ->
+                (!info.name.contains("_слой_") && info.name.startsWith(area.name)) ||
+                    info.name.startsWith("${area.name}_слой_")
+            }
+        }
+
+        if (looseMaps.isNotEmpty()) {
+            sectionTitle("ОТДЕЛЬНЫЕ ФАЙЛЫ")
+            looseMaps.forEach { info ->
                 val row = layoutInflater.inflate(R.layout.item_offline_map, container, false)
                 row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).text = info.name
+                row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).setTextColor(palette.textSecondary)
                 // Add share button before remove button
                 val shareBtn = android.widget.ImageButton(requireContext()).apply {
                     layoutParams = android.widget.LinearLayout.LayoutParams(
@@ -3852,6 +4705,135 @@ class SettingsFragment : Fragment() {
                 container.addView(row)
             }
         }
+        if (isAdded) applySettingsTheme(view)
+    }
+
+    private fun refreshDownloadedAreasUI(view: View) {
+        val container = view.findViewById<LinearLayout>(R.id.containerDownloadedAreas)
+        container.removeAllViews()
+        val ctx = requireContext()
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        mapFrag?.syncOfflineAreaSources()
+        val progress = TileDownloadManager.getProgress()
+        val activeAreaId = TileDownloadManager.currentAreaId
+        val areas = OfflineAreasManager.loadAreas(ctx).sortedWith(
+            compareBy<OfflineAreasManager.OfflineArea> { statusPriority(it.status) }.thenByDescending { it.createdAt }
+        )
+
+        fun configureAction(viewRef: TextView, enabled: Boolean, text: String, onClick: (() -> Unit)? = null) {
+            viewRef.text = text
+            viewRef.isEnabled = enabled
+            viewRef.alpha = if (enabled) 1f else 0.45f
+            viewRef.setOnClickListener(if (enabled && onClick != null) View.OnClickListener { onClick() } else null)
+        }
+
+        if (areas.isEmpty()) {
+            container.addView(TextView(ctx).apply {
+                text = "Нет скачанных областей"
+                setTextColor(0xFF888888.toInt())
+                textSize = 13f
+                setPadding(4, 8, 4, 8)
+            })
+            if (isAdded) applySettingsTheme(view)
+            return
+        }
+
+        areas.forEach { area ->
+            val row = layoutInflater.inflate(R.layout.item_downloaded_area, container, false)
+            row.findViewById<TextView>(R.id.txtAreaName).text = area.name
+            row.findViewById<TextView>(R.id.txtAreaMeta).text =
+                "${area.layersDescription()} • z${area.minZoom}-${area.maxZoom} • ${String.format("%.0f", area.areaKm2)} км²"
+            row.findViewById<TextView>(R.id.txtAreaStatus).text =
+                "Статус: ${statusLabel(area.status)}${if (!area.hasStoredGeometry()) " • без данных для перезакачки" else ""}"
+
+            val btnOpen = row.findViewById<TextView>(R.id.btnAreaOpen)
+            val btnLayers = row.findViewById<TextView>(R.id.btnAreaLayers)
+            val btnResume = row.findViewById<TextView>(R.id.btnAreaResume)
+            val btnDelete = row.findViewById<TextView>(R.id.btnAreaDelete)
+            val canOpenOnMap = mapFrag?.hasOfflineAreaBase(area.name) == true
+            val hasOfflineOverlays = mapFrag?.hasOfflineAreaOverlays(area.name) == true
+
+            configureAction(btnOpen, canOpenOnMap, "Открыть") {
+                mapFrag?.focusOfflineArea(area.name)
+                parentFragmentManager.popBackStack()
+            }
+
+            configureAction(btnLayers, canOpenOnMap && area.overlays.isNotEmpty() && hasOfflineOverlays, "Слои") {
+                mapFrag?.showOfflineLayersMenu(area.name)
+            }
+
+            when {
+                activeAreaId == area.id && progress.isRunning -> {
+                    configureAction(btnResume, true, "Пауза") {
+                        TileDownloadManager.pauseDownload()
+                        OfflineAreasManager.markPaused(ctx, area.id)
+                        refreshDownloadedAreasUI(view)
+                    }
+                }
+                activeAreaId == area.id && progress.isPaused -> {
+                    configureAction(btnResume, area.hasStoredGeometry(), "Продолжить") {
+                        mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
+                        refreshDownloadedAreasUI(view)
+                    }
+                }
+                area.status == "complete" -> {
+                    configureAction(btnResume, area.hasStoredGeometry(), "Обновить") {
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Обновить область")
+                            .setMessage("Перекачать область \"${area.name}\" заново?")
+                            .setPositiveButton("Обновить") { _, _ ->
+                                mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = true)
+                                refreshDownloadedAreasUI(view)
+                                refreshOfflineMapsUI(view)
+                            }
+                            .setNegativeButton("Отмена", null)
+                            .show()
+                    }
+                }
+                else -> {
+                    configureAction(
+                        btnResume,
+                        area.hasStoredGeometry(),
+                        if (area.status == "paused") "Продолжить" else "Докачать"
+                    ) {
+                        mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
+                        refreshDownloadedAreasUI(view)
+                    }
+                }
+            }
+
+            configureAction(btnDelete, true, "Удалить") {
+                AlertDialog.Builder(ctx)
+                    .setTitle("Удалить область")
+                    .setMessage("Удалить область \"${area.name}\" и её файлы?")
+                    .setPositiveButton("Удалить") { _, _ ->
+                        mapFrag?.deleteOfflineArea(area.id)
+                        refreshDownloadedAreasUI(view)
+                        refreshOfflineMapsUI(view)
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+
+            container.addView(row)
+        }
+        if (isAdded) applySettingsTheme(view)
+    }
+
+    private fun statusPriority(status: String): Int = when (status) {
+        "downloading" -> 0
+        "paused" -> 1
+        "partial" -> 2
+        "complete" -> 3
+        else -> 4
+    }
+
+    private fun statusLabel(status: String): String = when (status) {
+        "downloading" -> "загрузка"
+        "paused" -> "пауза"
+        "partial" -> "частично"
+        "complete" -> "готово"
+        else -> status
     }
 
     private fun getFileName(uri: Uri): String {
@@ -4136,12 +5118,28 @@ class SettingsFragment : Fragment() {
         dialogBuilder.show()
     }
 
-
-
+    private fun queryDisplayName(uri: Uri): String? {
+        val ctx = context ?: return null
+        return try {
+            ctx.contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     override fun onDestroyView() {
         liveUsersHandler?.removeCallbacksAndMessages(null)
         liveUsersHandler = null
+        customApproachSoundValueView = null
+        customTakenSoundValueView = null
         favoritesLabelPrefListener?.let {
             context?.getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
                 ?.unregisterOnSharedPreferenceChangeListener(it)

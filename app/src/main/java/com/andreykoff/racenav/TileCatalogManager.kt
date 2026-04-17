@@ -1,6 +1,7 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -15,10 +16,6 @@ import java.util.concurrent.TimeUnit
 object TileCatalogManager {
 
     private const val TAG = "TileCatalog"
-    private val CATALOG_URLS = listOf(
-        "http://127.0.0.1:9222/api/tiles/catalog",    // ADB reverse (dev) or local proxy
-        "http://87.120.84.254/api/tiles/catalog"  // direct server
-    )
     private const val PREF_CATALOG_JSON = "tile_catalog_json"
     private const val PREF_CATALOG_VERSION = "tile_catalog_version"
 
@@ -37,7 +34,7 @@ object TileCatalogManager {
         val overlays: List<CatalogEntry>
     )
 
-    private const val PROXY_BASE = "http://87.120.84.254"
+    private const val PROXY_BASE = "https://trophynav.ru"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -47,6 +44,17 @@ object TileCatalogManager {
 
     fun buildProxyUrl(proxyPath: String): String {
         return "$PROXY_BASE$proxyPath"
+    }
+
+    private fun catalogUrls(context: Context): List<String> = buildList {
+        val isDebuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isDebuggable) {
+            add("http://127.0.0.1:9222/api/tiles/catalog")
+        }
+        add("https://trophynav.ru/api/tiles/catalog")
+        if (isDebuggable) {
+            add("http://87.120.84.254/api/tiles/catalog")
+        }
     }
 
     /** Load cached catalog from SharedPreferences (instant, no network). */
@@ -78,7 +86,7 @@ object TileCatalogManager {
         val appContext = context.applicationContext
         Thread {
             var catalog: Catalog? = null
-            for (url in CATALOG_URLS) {
+            for (url in catalogUrls(appContext)) {
                 try {
                     val request = Request.Builder()
                         .url(url)
