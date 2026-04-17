@@ -1,8 +1,19 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("com.google.gms.google-services")
-    id("com.google.firebase.crashlytics")
+}
+
+val hasGoogleServicesConfig = listOf(
+    "google-services.json",
+    "src/debug/google-services.json",
+    "src/release/google-services.json"
+).any { file(it).exists() }
+
+if (hasGoogleServicesConfig) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
+} else {
+    logger.lifecycle("google-services.json not found; building without Google Services and Crashlytics Gradle plugins")
 }
 
 android {
