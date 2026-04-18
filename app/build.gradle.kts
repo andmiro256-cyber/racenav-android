@@ -24,8 +24,8 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 379
-        versionName = "2.9.78"
+        versionCode = 380
+        versionName = "2.9.79"
     }
 
     signingConfigs {
