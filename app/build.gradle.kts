@@ -1,7 +1,27 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val keystoreProperties = Properties().apply {
+    val file = rootProject.file("keystore.properties.local")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+
+fun secretProperty(name: String): String? {
+    return keystoreProperties.getProperty(name)
+        ?: providers.gradleProperty(name).orNull
+        ?: System.getenv(name)
+}
+
+val releaseStoreFile = secretProperty("RACENAV_STORE_FILE") ?: "${rootProject.projectDir}/racenav.keystore"
+val releaseStorePassword = secretProperty("RACENAV_STORE_PASSWORD")
+val releaseKeyAlias = secretProperty("RACENAV_KEY_ALIAS") ?: "racenav"
+val releaseKeyPassword = secretProperty("RACENAV_KEY_PASSWORD")
 
 val hasGoogleServicesConfig = listOf(
     "google-services.json",
@@ -24,16 +44,16 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 380
-        versionName = "2.9.79"
+        versionCode = 381
+        versionName = "2.9.80"
     }
 
     signingConfigs {
         create("release") {
-            storeFile = file("${rootProject.projectDir}/racenav.keystore")
-            storePassword = "racenav123"
-            keyAlias = "racenav"
-            keyPassword = "racenav123"
+            storeFile = file(releaseStoreFile)
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
         }
     }
 

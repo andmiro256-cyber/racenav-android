@@ -467,7 +467,7 @@ class MapFragment : Fragment() {
         const val DEFAULT_WP_TAKEN_RADIUS = 20
         const val PREF_DISTANCE_RINGS_VISIBLE = "distance_rings_visible"
         const val PREF_SYNC_API_KEY = "sync_api_key"
-        const val SYNC_BASE_URL = "http://87.120.84.254"
+        const val SYNC_BASE_URL = "https://trophynav.ru"
 
         // Traccar live monitoring
         const val PREF_TRACCAR_ENABLED     = "traccar_enabled"      // bool, default false

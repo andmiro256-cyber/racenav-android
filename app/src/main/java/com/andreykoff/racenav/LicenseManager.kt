@@ -13,7 +13,6 @@ object LicenseManager {
 
     private const val PREFS_NAME = "racenav_license"
     private const val KEY_INSTALL_TIME = "install_time"
-    private const val KEY_LICENSE = "license_key"
     private const val KEY_ACTIVATED = "activated"
     private const val KEY_DEVICE_UUID = "device_uuid"
     // Backup in a separate prefs file to survive "Clear Data"
@@ -28,22 +27,14 @@ object LicenseManager {
     private const val KEY_SERVER_UNTIL = "server_until"           // ISO date string
     private const val KEY_PLAN = "license_plan"                   // "full"|"license"|null
     private const val KEY_LAST_CHECK = "last_license_check"      // timestamp ms
-    private const val LICENSE_API = "http://87.120.84.254/api/license"
+    private val LICENSE_API_URLS = listOf(
+        "${UpdateManager.UPDATE_BASE_URL}/api/license",
+        "${UpdateManager.LEGACY_UPDATE_BASE_URL}/api/license"
+    )
 
-    const val TRIAL_DAYS = 7
+    const val TRIAL_DAYS = 14
     private const val CONTACT_TELEGRAM = "https://t.me/Andreykoff"
     private const val CONTACT_EMAIL = "snowwolf888@gmail.com"
-
-    // Master keys — light obfuscation (not in plain text)
-    private val MK = arrayOf(
-        // TNAV-MASTER-2026-XRAY
-        byteArrayOf(84,78,65,86,45,77,65,83,84,69,82,45,50,48,50,54,45,88,82,65,89),
-        // TNAV-BETA-TEST-FREE
-        byteArrayOf(84,78,65,86,45,66,69,84,65,45,84,69,83,84,45,70,82,69,69)
-    )
-    private val MASTER_KEYS: Set<String> by lazy {
-        MK.map { String(it) }.toSet()
-    }
 
     fun getContactUrl(): String = CONTACT_TELEGRAM
     fun getContactEmail(): String = CONTACT_EMAIL
@@ -225,37 +216,6 @@ object LicenseManager {
         android.widget.Toast.makeText(context, "Требуется лицензия — info@trophynav.ru", android.widget.Toast.LENGTH_LONG).show()
     }
 
-    /**
-     * Validate and activate a license key.
-     * Key format: TNAV-XXXX-XXXX-XXXX
-     */
-    fun activate(context: Context, key: String): Boolean {
-        val trimmed = key.trim().uppercase()
-
-        // Check master keys
-        if (trimmed in MASTER_KEYS) {
-            saveActivation(context, trimmed)
-            return true
-        }
-
-        // Check device-specific key
-        val deviceId = getOrCreateDeviceId(context)
-        val expectedKey = generateKeyForDevice(deviceId)
-        if (trimmed == expectedKey) {
-            saveActivation(context, trimmed)
-            return true
-        }
-
-        return false
-    }
-
-    private fun saveActivation(context: Context, key: String) {
-        getPrefs(context).edit()
-            .putBoolean(KEY_ACTIVATED, true)
-            .putString(KEY_LICENSE, key)
-            .apply()
-    }
-
     /** Activate license from server response (email-based multi-device) */
     fun activateFromServer(context: Context, plan: String) {
         getPrefs(context).edit()
@@ -264,15 +224,6 @@ object LicenseManager {
             .putString(KEY_PLAN, plan.ifEmpty { null })
             .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
             .apply()
-    }
-
-    /** Generate a valid license key for a given device ID */
-    fun generateKeyForDevice(deviceId: String): String {
-        val input = "$deviceId:racenav-salt-2026"
-        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
-        val hex = digest.joinToString("") { "%02X".format(it) }
-        // Format: TNAV-XXXX-XXXX-XXXX (12 chars from hash)
-        return "TNAV-${hex.substring(0, 4)}-${hex.substring(4, 8)}-${hex.substring(8, 12)}"
     }
 
     /** Get device ID for display (short format for user) */
@@ -288,21 +239,21 @@ object LicenseManager {
         return getOrCreateDeviceId(context).replace("-", "").take(8).uppercase()
     }
 
-    /** Get raw device ID for key generation (internal) */
+    /** Get raw stable device ID for diagnostics/analytics. */
     fun getRawDeviceId(context: Context): String {
         return getOrCreateDeviceId(context)
-    }
-
-    /** Get stored license key */
-    fun getStoredKey(context: Context): String? {
-        return getPrefs(context).getString(KEY_LICENSE, null)
     }
 
     /** Deactivate (for testing) */
     fun deactivate(context: Context) {
         getPrefs(context).edit()
             .putBoolean(KEY_ACTIVATED, false)
-            .remove(KEY_LICENSE)
+            .remove(KEY_LICENSE_STATUS)
+            .remove(KEY_LICENSE_UNTIL)
+            .remove(KEY_SERVER_STATUS)
+            .remove(KEY_SERVER_UNTIL)
+            .remove(KEY_PLAN)
+            .remove(KEY_LAST_CHECK)
             .apply()
     }
 
@@ -356,16 +307,26 @@ object LicenseManager {
         val deviceId = getOrCreateDeviceId(context).replace("-", "").take(8).uppercase()
         android.util.Log.d("LicenseManager", "Checking license for deviceId: $deviceId")
         try {
-            val url = java.net.URL("$LICENSE_API/$deviceId")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            val response = try {
-                if (conn.responseCode !in 200..299) throw Exception("HTTP ${conn.responseCode}")
-                conn.inputStream.bufferedReader().readText()
-            } finally {
-                conn.disconnect()
+            var response: String? = null
+            var lastError: Exception? = null
+            for (baseUrl in LICENSE_API_URLS) {
+                try {
+                    val url = java.net.URL("$baseUrl/$deviceId")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 10_000
+                    conn.readTimeout = 10_000
+                    response = try {
+                        if (conn.responseCode !in 200..299) throw Exception("HTTP ${conn.responseCode}")
+                        conn.inputStream.bufferedReader().readText()
+                    } finally {
+                        conn.disconnect()
+                    }
+                    break
+                } catch (e: Exception) {
+                    lastError = e
+                }
             }
+            if (response == null) throw (lastError ?: Exception("License server unavailable"))
             android.util.Log.d("LicenseManager", "Server response: $response")
 
             val json = org.json.JSONObject(response)

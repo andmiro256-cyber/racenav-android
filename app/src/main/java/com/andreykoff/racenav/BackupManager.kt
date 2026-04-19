@@ -14,12 +14,23 @@ import java.net.URL
 
 object BackupManager {
 
-    const val BACKUP_SERVER = "http://87.120.84.254"
+    const val BACKUP_SERVER = "https://trophynav.ru"
     private const val TAG = "BackupManager"
 
-    // Keys excluded from backup (device-specific, should not be restored)
+    // Keys excluded from backup: device-specific ids, auth secrets, and cached license state.
     private val EXCLUDE_KEYS = setOf(
-        "traccar_device_id", "traccar_consent_given"
+        "traccar_device_id",
+        "traccar_consent_given",
+        "sync_api_key",
+        "license_key",
+        "activated",
+        "install_time",
+        "license_status",
+        "license_until",
+        "server_status",
+        "server_until",
+        "license_plan",
+        "last_license_check"
     )
 
     data class BackupResult(val ok: Boolean, val message: String)
