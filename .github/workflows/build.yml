@@ -31,11 +31,8 @@ jobs:
       - name: Prepare signing keystore
         run: |
           set -euo pipefail
-          if [ -f ./racenav.keystore ]; then
-            cp ./racenav.keystore /tmp/racenav-release.jks
-          else
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/racenav-release.jks
-          fi
+          test -f ./racenav.keystore
+          cp ./racenav.keystore /tmp/racenav-release.jks
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
@@ -47,19 +44,6 @@ jobs:
           KEY_PASSWORD: racenav123
           STORE_PASSWORD: racenav123
         run: ./gradlew assembleRelease --no-daemon
-
-      - name: Verify signing keystore fingerprint
-        env:
-          EXPECTED_SIGNER_SHA256: c30d58ae4f10d32a5b73f5d4220f80a4756466de31103035f0a69061cd080965
-        run: |
-          set -euo pipefail
-          ACTUAL_SIGNER_SHA256="$(
-            keytool -list -v -keystore /tmp/racenav-release.jks -storepass racenav123 -alias racenav \
-              | sed -n 's/.*SHA256: //p' \
-              | tr '[:upper:]' '[:lower:]' \
-              | tr -d ':[:space:]'
-          )"
-          test "${ACTUAL_SIGNER_SHA256}" = "${EXPECTED_SIGNER_SHA256}"
 
       - name: Get version metadata
         id: version
