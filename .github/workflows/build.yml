@@ -28,9 +28,14 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Decode keystore
+      - name: Prepare signing keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/racenav-release.jks
+          set -euo pipefail
+          if [ -f ./racenav.keystore ]; then
+            cp ./racenav.keystore /tmp/racenav-release.jks
+          else
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/racenav-release.jks
+          fi
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
@@ -42,6 +47,18 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify release signing certificate
+        env:
+          EXPECTED_SIGNER_SHA256: c30d58ae4f10d32a5b73f5d4220f80a4756466de31103035f0a69061cd080965
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "${SDK_ROOT}"
+          APKSIGNER="$(find "${SDK_ROOT}/build-tools" -name apksigner | sort -V | tail -n1)"
+          test -n "${APKSIGNER}"
+          "${APKSIGNER}" verify --print-certs app/build/outputs/apk/release/app-release.apk | tee /tmp/apk-certs.txt
+          grep -qi "Signer #1 certificate SHA-256 digest: ${EXPECTED_SIGNER_SHA256}" /tmp/apk-certs.txt
 
       - name: Get version metadata
         id: version
