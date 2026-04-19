@@ -48,17 +48,18 @@ jobs:
           STORE_PASSWORD: racenav123
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Verify release signing certificate
+      - name: Verify signing keystore fingerprint
         env:
           EXPECTED_SIGNER_SHA256: c30d58ae4f10d32a5b73f5d4220f80a4756466de31103035f0a69061cd080965
         run: |
           set -euo pipefail
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          test -n "${SDK_ROOT}"
-          APKSIGNER="$(find "${SDK_ROOT}/build-tools" -name apksigner | sort -V | tail -n1)"
-          test -n "${APKSIGNER}"
-          "${APKSIGNER}" verify --print-certs app/build/outputs/apk/release/app-release.apk | tee /tmp/apk-certs.txt
-          grep -qi "Signer #1 certificate SHA-256 digest: ${EXPECTED_SIGNER_SHA256}" /tmp/apk-certs.txt
+          ACTUAL_SIGNER_SHA256="$(
+            keytool -list -v -keystore /tmp/racenav-release.jks -storepass racenav123 -alias racenav \
+              | sed -n 's/.*SHA256: //p' \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -d ':[:space:]'
+          )"
+          test "${ACTUAL_SIGNER_SHA256}" = "${EXPECTED_SIGNER_SHA256}"
 
       - name: Get version metadata
         id: version
