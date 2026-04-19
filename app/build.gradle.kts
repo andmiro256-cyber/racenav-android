@@ -18,10 +18,16 @@ fun secretProperty(name: String): String? {
         ?: System.getenv(name)
 }
 
-val releaseStoreFile = secretProperty("RACENAV_STORE_FILE") ?: "${rootProject.projectDir}/racenav.keystore"
+val releaseStoreFile = secretProperty("RACENAV_STORE_FILE")
+    ?: secretProperty("KEYSTORE_PATH")
+    ?: "${rootProject.projectDir}/racenav.keystore"
 val releaseStorePassword = secretProperty("RACENAV_STORE_PASSWORD")
-val releaseKeyAlias = secretProperty("RACENAV_KEY_ALIAS") ?: "racenav"
+    ?: secretProperty("STORE_PASSWORD")
+val releaseKeyAlias = secretProperty("RACENAV_KEY_ALIAS")
+    ?: secretProperty("KEY_ALIAS")
+    ?: "racenav"
 val releaseKeyPassword = secretProperty("RACENAV_KEY_PASSWORD")
+    ?: secretProperty("KEY_PASSWORD")
 
 val hasGoogleServicesConfig = listOf(
     "google-services.json",
