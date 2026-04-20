@@ -135,47 +135,26 @@ class MainActivity : AppCompatActivity() {
                 val bytes = inputStream.readBytes()
                 inputStream.close()
 
-                when {
-                    fileName.endsWith(".gpx") || intent.type == "application/gpx+xml" -> {
-                        val result = GpxParser.parseGpxFull(bytes.inputStream())
-                        if (result.waypoints.isNotEmpty()) {
-                            mapFrag.loadWaypoints(result.waypoints)
-                            android.widget.Toast.makeText(this, "📍 Загружено ${result.waypoints.size} точек из GPX", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                        if (result.trackPoints.isNotEmpty()) {
-                            mapFrag.loadTrack(result.trackPoints)
-                            android.widget.Toast.makeText(this, "🛤 Загружен трек: ${result.trackPoints.size} точек", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    fileName.endsWith(".wpt") -> {
-                        val wpts = GpxParser.parseWpt(bytes.inputStream())
-                        if (wpts.isNotEmpty()) {
-                            mapFrag.loadWaypoints(wpts)
-                            android.widget.Toast.makeText(this, "📍 Загружено ${wpts.size} точек из WPT", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    fileName.endsWith(".rte") -> {
-                        val wpts = GpxParser.parseRteOzi(bytes.inputStream())
-                        if (wpts.isNotEmpty()) {
-                            mapFrag.loadWaypoints(wpts)
-                            android.widget.Toast.makeText(this, "📍 Загружен маршрут: ${wpts.size} точек из RTE", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    fileName.endsWith(".plt") -> {
-                        val wpts = GpxParser.parsePlt(bytes.inputStream())
-                        if (wpts.isNotEmpty()) {
-                            mapFrag.loadWaypoints(wpts)
-                            android.widget.Toast.makeText(this, "📍 Загружено ${wpts.size} точек из PLT", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    else -> {
-                        // Try GPX as fallback
-                        try {
-                            val result = GpxParser.parseGpxFull(bytes.inputStream())
-                            if (result.waypoints.isNotEmpty()) mapFrag.loadWaypoints(result.waypoints)
-                            if (result.trackPoints.isNotEmpty()) mapFrag.loadTrack(result.trackPoints)
-                        } catch (_: Exception) {}
-                    }
+                val parsed = NavigationFileImporter.parse(fileName, bytes)
+                if (parsed.hasPointSet) {
+                    mapFrag.loadPointSet(parsed.pointWaypoints, fileName.substringBeforeLast('.'))
+                    android.widget.Toast.makeText(this, "📍 Загружены точки: ${parsed.pointWaypoints.size}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                if (parsed.hasRoute) {
+                    mapFrag.loadRoute(parsed.routeWaypoints, parsed.routeName ?: fileName.substringBeforeLast('.'))
+                    android.widget.Toast.makeText(this, "🗺 Загружен маршрут: ${parsed.routeWaypoints.size} КП", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                if (parsed.hasTrack) {
+                    mapFrag.loadTrack(
+                        parsed.trackPoints,
+                        append = mapFrag.hasLoadedTrack(),
+                        name = parsed.trackName ?: fileName.substringBeforeLast('.')
+                    )
+                    val pointCount = parsed.trackPoints.count { !it.first.isNaN() && !it.second.isNaN() }
+                    android.widget.Toast.makeText(this, "🛤 Загружен трек: $pointCount точек", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                if (!parsed.hasAnything) {
+                    android.widget.Toast.makeText(this, "Файл пустой или формат не распознан", android.widget.Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 android.widget.Toast.makeText(this, "Ошибка открытия файла: ${e.message}", android.widget.Toast.LENGTH_LONG).show()

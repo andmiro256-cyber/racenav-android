@@ -15,9 +15,15 @@ data class Waypoint(
 )
 
 data class GpxResult(
-    val waypoints: List<Waypoint> = emptyList(),
-    val trackPoints: List<Pair<Double, Double>> = emptyList()
-)
+    val pointWaypoints: List<Waypoint> = emptyList(),
+    val routeWaypoints: List<Waypoint> = emptyList(),
+    val trackPoints: List<Pair<Double, Double>> = emptyList(),
+    val routeName: String? = null,
+    val trackName: String? = null
+) {
+    val waypoints: List<Waypoint>
+        get() = if (routeWaypoints.isNotEmpty()) routeWaypoints else pointWaypoints
+}
 
 object GpxParser {
 
@@ -30,9 +36,12 @@ object GpxParser {
         parser.setInput(inputStream, null)
 
         var eventType = parser.eventType
-        var inWpt = false; var inRtept = false; var inTrkpt = false; var inExtensions = false
+        var inWpt = false; var inRtept = false; var inExtensions = false
+        var inRoute = false; var inTrack = false
         var lat = 0.0; var lon = 0.0
         var name = ""; var desc = ""; var proximity = 0.0; var color = ""; var symbol = ""
+        var routeName = ""
+        var trackName = ""
 
         while (eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
             when (eventType) {
@@ -44,13 +53,21 @@ object GpxParser {
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                             name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
+                        "rte" -> inRoute = true
                         "rtept" -> {
                             inRtept = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                             name = ""; desc = ""; proximity = 0.0; color = ""; symbol = ""
                         }
-                        "trk", "trkseg" -> {
+                        "trk" -> {
+                            inTrack = true
+                            if (trackPoints.isNotEmpty() &&
+                                !(trackPoints.last().first.isNaN() && trackPoints.last().second.isNaN())) {
+                                trackPoints.add(Pair(Double.NaN, Double.NaN))
+                            }
+                        }
+                        "trkseg" -> {
                             // Insert NaN marker between tracks/segments (avoid double NaN)
                             if (trackPoints.isNotEmpty() &&
                                 !(trackPoints.last().first.isNaN() && trackPoints.last().second.isNaN())) {
@@ -58,21 +75,25 @@ object GpxParser {
                             }
                         }
                         "trkpt" -> {
-                            inTrkpt = true
                             lat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull() ?: 0.0
                             lon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull() ?: 0.0
                         }
                         "extensions" -> if (inWpt || inRtept) inExtensions = true
-                        "name" -> if (inWpt || inRtept) name = parser.nextText()
+                        "name" -> when {
+                            inWpt || inRtept -> name = parser.nextText()
+                            inRoute && routeName.isBlank() -> routeName = parser.nextText()
+                            inTrack && trackName.isBlank() -> trackName = parser.nextText()
+                        }
                         "desc", "cmt" -> if ((inWpt || inRtept) && desc.isEmpty()) desc = parser.nextText()
                         "proximity" -> if (inWpt || inRtept) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
                         "sym" -> if (inWpt || inRtept) symbol = parser.nextText()
-                        "color" -> if ((inWpt || inRtept) && inExtensions) color = parser.nextText()
+                        "color", "tn:color" -> if ((inWpt || inRtept) && inExtensions) color = parser.nextText()
                     }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
                     when (parser.name) {
                         "extensions" -> inExtensions = false
+                        "rte" -> inRoute = false
                         "wpt" -> {
                             if (lat != 0.0 || lon != 0.0) {
                                 wptList.add(Waypoint(
@@ -97,16 +118,20 @@ object GpxParser {
                         }
                         "trkpt" -> {
                             if (lat != 0.0 || lon != 0.0) trackPoints.add(Pair(lat, lon))
-                            inTrkpt = false
                         }
+                        "trk" -> inTrack = false
                     }
                 }
             }
             eventType = parser.next()
         }
-        // Prefer rtept (ordered route) over wpt if both exist with same coords
-        val waypoints = if (rteptList.isNotEmpty()) rteptList else wptList
-        return GpxResult(waypoints, trackPoints)
+        return GpxResult(
+            pointWaypoints = wptList,
+            routeWaypoints = rteptList,
+            trackPoints = trackPoints,
+            routeName = routeName.ifBlank { null },
+            trackName = trackName.ifBlank { null }
+        )
     }
 
     /** Parse GPX file — returns list of waypoints (wpt elements) */
@@ -179,7 +204,8 @@ object GpxParser {
                 val lat = parts[2].trim().toDoubleOrNull() ?: continue
                 val lon = parts[3].trim().toDoubleOrNull() ?: continue
                 if (lat == 0.0 && lon == 0.0) continue
-                val proximity = parts.getOrNull(14)?.trim()?.toDoubleOrNull() ?: 0.0
+                // Ozi WPT field 14 (1-based) = proximity distance, so zero-based index is 13.
+                val proximity = parts.getOrNull(13)?.trim()?.toDoubleOrNull() ?: 0.0
                 waypoints.add(Waypoint(
                     name = name.ifBlank { "WP%02d".format(waypoints.size + 1) },
                     lat = lat, lon = lon,
@@ -343,13 +369,14 @@ object GpxParser {
         for (line in lines) {
             if (!line.startsWith("W,") && !line.startsWith("W ,")) continue
             val parts = line.split(",")
-            if (parts.size < 5) continue
+            if (parts.size < 7) continue
             try {
-                val lat = parts[3].trim().toDoubleOrNull() ?: continue
-                val lon = parts[4].trim().toDoubleOrNull() ?: continue
+                // Ozi RTE waypoint record:
+                // 1=W, 2=route number, 3=record index, 4=wp number, 5=name, 6=lat, 7=lon
+                val lat = parts[5].trim().toDoubleOrNull() ?: continue
+                val lon = parts[6].trim().toDoubleOrNull() ?: continue
                 if (lat == 0.0 && lon == 0.0) continue
-                // Name is usually at index 10 or 8, try both
-                val name = (parts.getOrNull(10) ?: parts.getOrNull(8) ?: "").trim()
+                val name = parts.getOrNull(4)?.trim().orEmpty()
                     .ifBlank { "WP%02d".format(waypoints.size + 1) }
                 waypoints.add(Waypoint(
                     name = name, lat = lat, lon = lon,

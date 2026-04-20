@@ -1158,7 +1158,7 @@ class SettingsFragment : Fragment() {
 
         // Restore track row from prefs (only if track is actually in memory)
         var trackVisible = prefs.getBoolean(MapFragment.PREF_LOADED_TRACK_VISIBLE, true)
-        var wpVisible = prefs.getBoolean(MapFragment.PREF_LOADED_WP_VISIBLE, true)
+        var wpVisible = prefs.getBoolean(MapFragment.PREF_USER_POINTS_VISIBLE, true)
         val rowLoadedTrackStyle = view.findViewById<View>(R.id.rowLoadedTrackStyle)
         val trackActuallyLoaded = mapFrag?.hasLoadedTrack() == true
         if (trackActuallyLoaded) {
@@ -1181,14 +1181,15 @@ class SettingsFragment : Fragment() {
         btnToggleWp.setOnClickListener {
             wpVisible = !wpVisible
             btnToggleWp.setImageResource(if (wpVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
-            mapFrag?.setLoadedWpVisible(wpVisible)
+            mapFrag?.setUserPointsVisible(wpVisible)
         }
 
         // Route line toggle
         val rowRouteLine = view.findViewById<View>(R.id.rowRouteLine)
         val btnToggleRouteLine = view.findViewById<ImageButton>(R.id.btnToggleRouteLine)
         var routeLineVisible = prefs.getBoolean(MapFragment.PREF_ROUTE_LINE_VISIBLE, true)
-        if (prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null) != null) {
+        if (mapFrag?.hasLoadedWaypoints() == true ||
+            prefs.getString(MapFragment.PREF_SAVED_WAYPOINTS_JSON, null)?.isNotEmpty() == true) {
             rowRouteLine?.visibility = View.VISIBLE
             btnToggleRouteLine.setImageResource(if (routeLineVisible) R.drawable.ic_eye else R.drawable.ic_eye_off)
         }
@@ -1204,7 +1205,7 @@ class SettingsFragment : Fragment() {
             prefs.getString(MapFragment.PREF_SAVED_WAYPOINTS_JSON, null)?.isNotEmpty() == true
         val hasAnyPoints = hasWaypoints || mapFrag?.hasUserMarkers() == true
         if (hasWaypoints) rowNavButtons.visibility = View.VISIBLE
-        if (hasWaypoints) view.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
+        if (hasAnyPoints) view.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
         if (hasAnyPoints) view.findViewById<View>(R.id.rowWpRouteButtons)?.visibility = View.VISIBLE
 
         // Share waypoints
@@ -3949,15 +3950,21 @@ class SettingsFragment : Fragment() {
                     waypointCount = o.optInt("wpCount", 0),
                     trackPointCount = o.optInt("trackCount", 0),
                     loadedAt = o.optString("loadedAt", ""),
-                    filePath = o.optString("filePath", null).takeIf { it?.isNotBlank() == true },
-                    mapKey = o.optString("mapKey", null).takeIf { it?.isNotBlank() == true }
+                    filePath = o.optString("filePath").ifBlank { null },
+                    mapKey = o.optString("mapKey").ifBlank { null }
                 )
             }
         } catch (e: Exception) { emptyList() }
     }
 
-    private fun saveDatasetToList(name: String, wpCount: Int, trackCount: Int,
-                                   waypoints: List<Waypoint> = emptyList()) {
+    private fun saveDatasetToList(
+        name: String,
+        wpCount: Int,
+        trackCount: Int,
+        waypoints: List<Waypoint> = emptyList(),
+        rawBytes: ByteArray? = null,
+        originalExtension: String? = null
+    ) {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
         val existing = try {
@@ -3975,13 +3982,26 @@ class SettingsFragment : Fragment() {
         val id = System.currentTimeMillis().toString()
         val mapKey = prefs.getString(MapFragment.PREF_TILE_KEY, "osm") ?: "osm"
 
-        // Save waypoints to GPX file for later reloading
+        // Save original file bytes for later reloading when available.
         var filePath: String? = null
-        if (waypoints.isNotEmpty()) {
+        val safeStem = name.substringBeforeLast('.')
+            .ifBlank { name }
+            .take(40)
+            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+        if (rawBytes != null) {
             try {
                 val dir = ctx.getExternalFilesDir("datasets")
                 dir?.mkdirs()
-                val file = java.io.File(dir, "${id}_${name.take(40)}.gpx")
+                val ext = originalExtension?.ifBlank { null } ?: name.substringAfterLast('.', "gpx")
+                val file = java.io.File(dir, "${id}_${safeStem}.$ext")
+                file.writeBytes(rawBytes)
+                filePath = file.absolutePath
+            } catch (_: Exception) {}
+        } else if (waypoints.isNotEmpty()) {
+            try {
+                val dir = ctx.getExternalFilesDir("datasets")
+                dir?.mkdirs()
+                val file = java.io.File(dir, "${id}_${safeStem}.gpx")
                 file.writeText(GpxParser.writeWaypointsGpx(waypoints, name))
                 filePath = file.absolutePath
             } catch (_: Exception) {}
@@ -4017,8 +4037,7 @@ class SettingsFragment : Fragment() {
             if (o.getString("id") != dsId) {
                 filtered.put(o)
             } else {
-                // Delete saved GPX file if exists
-                val path = o.optString("filePath", null)
+                val path = o.optString("filePath").ifBlank { null }
                 if (!path.isNullOrBlank()) {
                     try { java.io.File(path).delete() } catch (_: Exception) {}
                 }
@@ -4181,6 +4200,82 @@ class SettingsFragment : Fragment() {
         dialog!!.show()
     }
 
+    private fun applyParsedImport(
+        fileName: String,
+        parsed: ParsedNavigationFile,
+        rawBytes: ByteArray? = null,
+        originalExtension: String? = null,
+        saveDataset: Boolean = true,
+        loadTrack: Boolean = parsed.hasTrack,
+        loadPointSet: Boolean = parsed.hasPointSet,
+        loadRoute: Boolean = parsed.hasRoute
+    ) {
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return
+        val rootView = view
+        val prefs = requireContext().getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+        val rowTrack = rootView?.findViewById<View>(R.id.rowLoadedTrack)
+        val rowWp = rootView?.findViewById<View>(R.id.rowLoadedWp)
+        val txtTrack = rootView?.findViewById<TextView>(R.id.txtLoadedTrack)
+        val txtWp = rootView?.findViewById<TextView>(R.id.txtLoadedWp)
+        val rowTrackStyle = rootView?.findViewById<View>(R.id.rowLoadedTrackStyle)
+        val rowRouteLine = rootView?.findViewById<View>(R.id.rowRouteLine)
+        val rowNavButtons = rootView?.findViewById<View>(R.id.rowNavButtons)
+        val rowShareWp = rootView?.findViewById<View>(R.id.rowShareWp)
+        val rowWpRouteButtons = rootView?.findViewById<View>(R.id.rowWpRouteButtons)
+
+        if (loadPointSet && parsed.pointWaypoints.isNotEmpty()) {
+            mapFrag.loadPointSet(parsed.pointWaypoints, fileName.substringBeforeLast('.'))
+            prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null)?.let { label ->
+                txtWp?.text = label
+                rowWp?.visibility = View.VISIBLE
+            }
+        }
+        if (loadRoute && parsed.routeWaypoints.isNotEmpty()) {
+            mapFrag.loadRoute(parsed.routeWaypoints, parsed.routeName ?: fileName.substringBeforeLast('.'))
+            rowRouteLine?.visibility = View.VISIBLE
+            rowNavButtons?.visibility = View.VISIBLE
+        }
+        if (loadTrack && parsed.trackPoints.isNotEmpty()) {
+            mapFrag.loadTrack(
+                parsed.trackPoints,
+                append = mapFrag.hasLoadedTrack(),
+                name = parsed.trackName ?: fileName.substringBeforeLast('.')
+            )
+            prefs.getString(MapFragment.PREF_LOADED_TRACK_NAME, null)?.let { label ->
+                txtTrack?.text = label
+                rowTrack?.visibility = View.VISIBLE
+                rowTrackStyle?.visibility = View.VISIBLE
+            }
+        }
+
+        val hasAnyPoints = mapFrag.hasUserMarkers() || mapFrag.hasLoadedWaypoints()
+        if (hasAnyPoints) {
+            rowShareWp?.visibility = View.VISIBLE
+            rowWpRouteButtons?.visibility = View.VISIBLE
+        }
+
+        if (saveDataset && rawBytes != null) {
+            val savedWpCount =
+                (if (loadPointSet) parsed.pointWaypoints.size else 0) +
+                (if (loadRoute) parsed.routeWaypoints.size else 0)
+            val savedTrackCount = if (loadTrack) parsed.trackPoints.count {
+                !it.first.isNaN() && !it.second.isNaN()
+            } else 0
+            saveDatasetToList(
+                name = fileName,
+                wpCount = savedWpCount,
+                trackCount = savedTrackCount,
+                waypoints = when {
+                    loadRoute && parsed.routeWaypoints.isNotEmpty() -> parsed.routeWaypoints
+                    loadPointSet && parsed.pointWaypoints.isNotEmpty() -> parsed.pointWaypoints
+                    else -> emptyList()
+                },
+                rawBytes = rawBytes,
+                originalExtension = originalExtension
+            )
+        }
+    }
+
     private fun loadDatasetFromFile(ds: LoadedDataset) {
         val ctx = requireContext()
         val file = java.io.File(ds.filePath ?: return)
@@ -4188,30 +4283,29 @@ class SettingsFragment : Fragment() {
             android.widget.Toast.makeText(ctx, "Файл не найден", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
-        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-        val rowWp = view?.findViewById<android.view.View>(R.id.rowLoadedWp)
-        val txtWp = view?.findViewById<android.widget.TextView>(R.id.txtLoadedWp)
-        val filePrefs = ctx.getSharedPreferences(MapFragment.PREFS_NAME, android.content.Context.MODE_PRIVATE)
-
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             try {
-                val result = GpxParser.parseGpxFull(file.inputStream())
-                val wpts = result.waypoints
+                val bytes = file.readBytes()
+                val parsed = NavigationFileImporter.parse(ds.name, bytes)
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    if (wpts.isNotEmpty()) {
-                        mapFrag?.loadWaypoints(wpts)
-                        val label = "WP: ${ds.name} (${wpts.size} точек)"
-                        txtWp?.text = label; rowWp?.visibility = android.view.View.VISIBLE
-                        filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                        filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, ds.name).apply()
-                        view?.findViewById<android.view.View>(R.id.rowNavButtons)?.visibility = android.view.View.VISIBLE
-                        view?.findViewById<android.view.View>(R.id.rowShareWp)?.visibility = android.view.View.VISIBLE
-                        if (!ds.mapKey.isNullOrBlank()) mapFrag?.switchMap(ds.mapKey)
-                        android.widget.Toast.makeText(ctx,
-                            "✅ ${ds.name}: ${wpts.size} WP загружено", android.widget.Toast.LENGTH_SHORT).show()
-                    } else {
+                    if (!parsed.hasAnything) {
                         android.widget.Toast.makeText(ctx, "Файл пустой", android.widget.Toast.LENGTH_SHORT).show()
+                        return@withContext
                     }
+                    applyParsedImport(
+                        fileName = ds.name,
+                        parsed = parsed,
+                        rawBytes = null,
+                        originalExtension = ds.name.substringAfterLast('.', ""),
+                        saveDataset = false
+                    )
+                    if (!ds.mapKey.isNullOrBlank()) {
+                        parentFragmentManager.fragments
+                            .filterIsInstance<MapFragment>()
+                            .firstOrNull()
+                            ?.switchMap(ds.mapKey)
+                    }
+                    android.widget.Toast.makeText(ctx, "✅ ${ds.name} загружен", android.widget.Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -4224,175 +4318,45 @@ class SettingsFragment : Fragment() {
     private fun loadFile(uri: Uri) {
         val name = getFileName(uri)
         val ext = name.substringAfterLast('.', "").lowercase()
-        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-        val rowTrack = view?.findViewById<View>(R.id.rowLoadedTrack)
-        val rowWp    = view?.findViewById<View>(R.id.rowLoadedWp)
-        val txtTrack = view?.findViewById<TextView>(R.id.txtLoadedTrack)
-        val txtWp    = view?.findViewById<TextView>(R.id.txtLoadedWp)
-        val txtErr   = view?.findViewById<TextView>(R.id.txtLoadedFile)
-        val filePrefs = requireContext().getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+        val txtErr = view?.findViewById<TextView>(R.id.txtLoadedFile)
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val bytes = requireContext().contentResolver.openInputStream(uri)?.readBytes()
                     ?: throw Exception("Не удалось открыть файл")
-
-                when (ext) {
-                    "gpx" -> {
-                        val result = GpxParser.parseGpxFull(bytes.inputStream())
-                        val hasTrack = result.trackPoints.isNotEmpty()
-                        val hasWaypoints = result.waypoints.isNotEmpty()
-
-                        if (!hasTrack && !hasWaypoints) {
-                            withContext(Dispatchers.Main) {
-                                txtErr?.text = "Файл пустой: $name"
-                                txtErr?.visibility = View.VISIBLE
-                            }
-                            return@launch
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            showGpxImportDialog(
-                                fileName = name,
-                                trackPointCount = result.trackPoints.size,
-                                waypoints = result.waypoints,
-                                onConfirm = { loadTrack, loadWps ->
-                                    if (loadTrack && result.trackPoints.isNotEmpty()) {
-                                        mapFrag?.loadTrack(result.trackPoints)
-                                        val label = "Трек: $name (${result.trackPoints.size} точек)"
-                                        txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
-                                        view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
-                                        filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
-                                    }
-                                    if (loadWps && result.waypoints.isNotEmpty()) {
-                                        mapFrag?.loadWaypoints(result.waypoints)
-                                        val label = "WP: $name (${result.waypoints.size} точек)"
-                                        txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                        filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                        filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                        view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                        view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
-                                    }
-                                    saveDatasetToList(
-                                        name,
-                                        if (loadWps) result.waypoints.size else 0,
-                                        if (loadTrack) result.trackPoints.size else 0,
-                                        if (loadWps) result.waypoints else emptyList()
-                                    )
-                                }
-                            )
-                        }
+                val parsed = NavigationFileImporter.parse(name, bytes)
+                withContext(Dispatchers.Main) {
+                    if (!parsed.hasAnything) {
+                        txtErr?.text = "Файл пустой: $name"
+                        txtErr?.visibility = View.VISIBLE
+                        return@withContext
                     }
-                    "rte" -> {
-                        // Try GPX XML first, fallback to OziExplorer RTE format
-                        val result = try { GpxParser.parseGpxFull(bytes.inputStream()) } catch (e: Exception) { null }
-                        val wpts = if (result != null && (result.waypoints.isNotEmpty() || result.trackPoints.isNotEmpty())) {
-                            // GPX-format RTE
-                            withContext(Dispatchers.Main) {
-                                showGpxImportDialog(
+                    val sectionCount = listOf(parsed.hasPointSet, parsed.hasRoute, parsed.hasTrack).count { it }
+                    if (sectionCount > 1) {
+                        showGpxImportDialog(
+                            fileName = name,
+                            trackPointCount = parsed.trackPoints.count { !it.first.isNaN() && !it.second.isNaN() },
+                            pointWaypoints = parsed.pointWaypoints,
+                            routeWaypoints = parsed.routeWaypoints,
+                            onConfirm = { loadTrack, loadPoints, loadRoute ->
+                                applyParsedImport(
                                     fileName = name,
-                                    trackPointCount = result.trackPoints.size,
-                                    waypoints = result.waypoints,
-                                    onConfirm = { loadTrack, loadWps ->
-                                        if (loadTrack && result.trackPoints.isNotEmpty()) {
-                                            mapFrag?.loadTrack(result.trackPoints)
-                                            val label = "Трек: $name (${result.trackPoints.size} точек)"
-                                            txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
-                                            view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
-                                            filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
-                                        }
-                                        if (loadWps && result.waypoints.isNotEmpty()) {
-                                            mapFrag?.loadWaypoints(result.waypoints)
-                                            val label = "WP: $name (${result.waypoints.size} точек)"
-                                            txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                            filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                            filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                            view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                            view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
-                                        }
-                                        saveDatasetToList(
-                                            name,
-                                            if (loadWps) result.waypoints.size else 0,
-                                            if (loadTrack) result.trackPoints.size else 0,
-                                            if (loadWps) result.waypoints else emptyList()
-                                        )
-                                    }
+                                    parsed = parsed,
+                                    rawBytes = bytes,
+                                    originalExtension = ext,
+                                    loadTrack = loadTrack,
+                                    loadPointSet = loadPoints,
+                                    loadRoute = loadRoute
                                 )
                             }
-                            null
-                        } else {
-                            // Try OziExplorer format
-                            GpxParser.parseRteOzi(bytes.inputStream())
-                        }
-                        if (wpts != null) {
-                            withContext(Dispatchers.Main) {
-                                if (wpts.isNotEmpty()) {
-                                    mapFrag?.loadWaypoints(wpts)
-                                    val label = "WP: $name (${wpts.size} точек)"
-                                    txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                    filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                    filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                    view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                    view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
-                                    saveDatasetToList(name, wpts.size, 0, wpts)
-                                    // Show summary of loaded waypoints
-                                    if (wpts.size <= 30) {
-                                        val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
-                                        android.app.AlertDialog.Builder(requireContext())
-                                            .setTitle("Загружено WP: ${wpts.size}")
-                                            .setMessage(names)
-                                            .setPositiveButton("OK", null)
-                                            .show()
-                                    }
-                                } else {
-                                    txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
-                                }
-                            }
-                        }
-                    }
-                    "wpt" -> {
-                        val wpts = GpxParser.parseWpt(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (wpts.isNotEmpty()) {
-                                mapFrag?.loadWaypoints(wpts)
-                                val label = "WP: $name (${wpts.size} точек)"
-                                txtWp?.text = label; rowWp?.visibility = View.VISIBLE
-                                filePrefs.edit().putString(MapFragment.PREF_LOADED_WP_NAME, label).apply()
-                                filePrefs.edit().putString(MapFragment.PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                view?.findViewById<View>(R.id.rowNavButtons)?.visibility = View.VISIBLE
-                                view?.findViewById<View>(R.id.rowShareWp)?.visibility = View.VISIBLE
-                                saveDatasetToList(name, wpts.size, 0, wpts)
-                                // Show summary of loaded waypoints
-                                if (wpts.size <= 30) {
-                                    val names = wpts.joinToString("\n") { "${it.index}. ${it.name}" }
-                                    android.app.AlertDialog.Builder(requireContext())
-                                        .setTitle("Загружено WP: ${wpts.size}")
-                                        .setMessage(names)
-                                        .setPositiveButton("OK", null)
-                                        .show()
-                                }
-                            } else {
-                                txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
-                            }
-                        }
-                    }
-                    "plt" -> {
-                        val pts = GpxParser.parsePltTrack(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (pts.isNotEmpty()) {
-                                mapFrag?.loadTrack(pts)
-                                val label = "Трек: $name (${pts.size} точек)"
-                                txtTrack?.text = label; rowTrack?.visibility = View.VISIBLE
-                                view?.findViewById<View>(R.id.rowLoadedTrackStyle)?.visibility = View.VISIBLE
-                                filePrefs.edit().putString(MapFragment.PREF_LOADED_TRACK_NAME, label).apply()
-                                saveDatasetToList(name, 0, pts.size)
-                            } else {
-                                txtErr?.text = "Файл пустой: $name"; txtErr?.visibility = View.VISIBLE
-                            }
-                        }
-                    }
-                    else -> withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Формат не поддерживается: .$ext", Toast.LENGTH_SHORT).show()
+                        )
+                    } else {
+                        applyParsedImport(
+                            fileName = name,
+                            parsed = parsed,
+                            rawBytes = bytes,
+                            originalExtension = ext
+                        )
                     }
                 }
             } catch (e: Exception) {
@@ -4849,19 +4813,26 @@ class SettingsFragment : Fragment() {
     private fun showGpxImportDialog(
         fileName: String,
         trackPointCount: Int,
-        waypoints: List<Waypoint>,
-        onConfirm: (loadTrack: Boolean, loadWaypoints: Boolean) -> Unit
+        pointWaypoints: List<Waypoint>,
+        routeWaypoints: List<Waypoint>,
+        onConfirm: (loadTrack: Boolean, loadPoints: Boolean, loadRoute: Boolean) -> Unit
     ) {
         val hasTrack = trackPointCount > 0
-        val hasWaypoints = waypoints.isNotEmpty()
+        val hasPoints = pointWaypoints.isNotEmpty()
+        val hasRoute = routeWaypoints.isNotEmpty()
 
         // Build message showing what's in the file
         val sb = StringBuilder()
         if (hasTrack) sb.appendLine("📍 Трек: $trackPointCount точек")
-        if (hasWaypoints) {
-            sb.appendLine("🚩 WP: ${waypoints.size} точек")
-            waypoints.take(10).forEach { sb.appendLine("  ${it.index}. ${it.name}") }
-            if (waypoints.size > 10) sb.appendLine("  ... и ещё ${waypoints.size - 10}")
+        if (hasPoints) {
+            sb.appendLine("📌 Точки: ${pointWaypoints.size}")
+            pointWaypoints.take(8).forEach { sb.appendLine("  ${it.index}. ${it.name}") }
+            if (pointWaypoints.size > 8) sb.appendLine("  ... и ещё ${pointWaypoints.size - 8}")
+        }
+        if (hasRoute) {
+            sb.appendLine("🗺 Маршрут: ${routeWaypoints.size} КП")
+            routeWaypoints.take(8).forEach { sb.appendLine("  ${it.index}. ${it.name}") }
+            if (routeWaypoints.size > 8) sb.appendLine("  ... и ещё ${routeWaypoints.size - 8}")
         }
 
         val dialogView = android.widget.LinearLayout(requireContext()).apply {
@@ -4874,13 +4845,18 @@ class SettingsFragment : Fragment() {
             isChecked = hasTrack
             isEnabled = hasTrack
         }
-        val cbWaypoints = android.widget.CheckBox(requireContext()).apply {
-            text = "Загрузить WP (${waypoints.size} точек)"
-            isChecked = hasWaypoints
-            isEnabled = hasWaypoints
+        val cbPoints = android.widget.CheckBox(requireContext()).apply {
+            text = "Загрузить точки (${pointWaypoints.size})"
+            isChecked = hasPoints
+            isEnabled = hasPoints
+        }
+        val cbRoute = android.widget.CheckBox(requireContext()).apply {
+            text = "Загрузить маршрут (${routeWaypoints.size} КП)"
+            isChecked = hasRoute
+            isEnabled = hasRoute
         }
 
-        // Info text with WP list
+        // Info text with file summary
         val infoText = android.widget.TextView(requireContext()).apply {
             text = sb.toString().trim()
             textSize = 12f
@@ -4889,14 +4865,19 @@ class SettingsFragment : Fragment() {
         }
 
         if (hasTrack) dialogView.addView(cbTrack)
-        if (hasWaypoints) dialogView.addView(cbWaypoints)
-        if (hasWaypoints && waypoints.isNotEmpty()) dialogView.addView(infoText)
+        if (hasPoints) dialogView.addView(cbPoints)
+        if (hasRoute) dialogView.addView(cbRoute)
+        dialogView.addView(infoText)
 
         android.app.AlertDialog.Builder(requireContext())
             .setTitle("Что загрузить из $fileName?")
             .setView(dialogView)
             .setPositiveButton("Загрузить") { _, _ ->
-                onConfirm(cbTrack.isChecked && hasTrack, cbWaypoints.isChecked && hasWaypoints)
+                onConfirm(
+                    cbTrack.isChecked && hasTrack,
+                    cbPoints.isChecked && hasPoints,
+                    cbRoute.isChecked && hasRoute
+                )
             }
             .setNegativeButton("Отмена", null)
             .show()

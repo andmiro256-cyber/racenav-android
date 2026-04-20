@@ -190,6 +190,8 @@ class MapFragment : Fragment() {
     var isScreenLocked = false
         private set
     private val loadedTrackPoints = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
+    private data class LoadedTrackImport(val name: String, val pointCount: Int)
+    private val loadedTrackImports = mutableListOf<LoadedTrackImport>()
 
     // Track editor state
     private var trackEditorMode = false
@@ -336,7 +338,15 @@ class MapFragment : Fragment() {
     private val visitedMarkerIndices = mutableSetOf<Int>()  // user marker approach fired once per index
 
     // User points — placed on map, editable name
-    data class UserPoint(var name: String, val position: LatLng, var color: String = "#1565C0", var symbol: String = "", var proximity: Double = 0.0)
+    data class UserPoint(
+        var name: String,
+        val position: LatLng,
+        var color: String = "#1565C0",
+        var symbol: String = "",
+        var proximity: Double = 0.0,
+        var sourceType: String = MapFragment.POINT_SOURCE_MANUAL,
+        var sourceName: String = ""
+    )
     private val userMarkers = mutableListOf<UserPoint>()
 
     // Tripmaster — resettable distance counter
@@ -412,6 +422,7 @@ class MapFragment : Fragment() {
         const val DEFAULT_TRACK_STOP_FILTER = 10
         const val PREF_LOADED_TRACK_VISIBLE = "loaded_track_visible"
         const val PREF_LOADED_WP_VISIBLE = "loaded_wp_visible"
+        const val PREF_USER_POINTS_VISIBLE = "user_points_visible"
         const val PREF_ROUTE_LINE_VISIBLE = "route_line_visible"
         const val PREF_LOADED_TRACK_NAME = "loaded_track_name"
         const val PREF_LOADED_WP_NAME = "loaded_wp_name"
@@ -597,12 +608,16 @@ class MapFragment : Fragment() {
         const val WP_PROXIMITY_SOURCE_ID = "wp-proximity-source"
         const val WP_PROXIMITY_LAYER_ID = "wp-proximity-layer"
         const val WP_PROXIMITY_OUTLINE_LAYER_ID = "wp-proximity-outline-layer"
+        const val USER_POINT_PROXIMITY_SOURCE_ID = "user-point-proximity-source"
+        const val USER_POINT_PROXIMITY_LAYER_ID = "user-point-proximity-layer"
+        const val USER_POINT_PROXIMITY_OUTLINE_LAYER_ID = "user-point-proximity-outline-layer"
         const val PREF_NAV_LINE_COLOR = "nav_line_color"    // hex, default "#FF6F00"
         const val PREF_NAV_LINE_WIDTH = "nav_line_width"    // dp, default 3
 
         // Persistence of loaded data across restarts
         const val PREF_SAVED_WAYPOINTS_JSON = "saved_waypoints_json"
         const val PREF_SAVED_TRACK_JSON = "saved_track_json"
+        const val PREF_SAVED_TRACK_META_JSON = "saved_track_meta_json"
         const val PREF_ACTIVE_WP_INDEX = "active_wp_index"
 
         // Sound notifications
@@ -622,6 +637,8 @@ class MapFragment : Fragment() {
         const val USER_MARKER_SOURCE_ID = "user-marker-source"
         const val USER_MARKER_LAYER_ID = "user-marker-layer"
         const val USER_MARKER_ICON = "user-marker-icon"
+        const val POINT_SOURCE_MANUAL = "manual"
+        const val POINT_SOURCE_FILE = "file"
 
         data class TileSourceInfo(val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19, val minZoom: Int = 0)
 
@@ -720,6 +737,79 @@ class MapFragment : Fragment() {
             Toast.makeText(context, "Загружено ${wps.size} точек", Toast.LENGTH_SHORT).show()
         }
         saveWaypointsToPrefs()
+    }
+
+    fun loadPointSet(points: List<Waypoint>, sourceName: String, replaceExistingFilePoints: Boolean = true) {
+        if (replaceExistingFilePoints) {
+            userMarkers.removeAll { it.sourceType == POINT_SOURCE_FILE }
+        }
+        points.forEachIndexed { index, wp ->
+            val dedupeName = wp.name.ifBlank { "WP%02d".format(index + 1) }
+            val alreadyExists = userMarkers.any { existing ->
+                existing.name.equals(dedupeName, ignoreCase = true) &&
+                    kotlin.math.abs(existing.position.latitude - wp.lat) < 0.000001 &&
+                    kotlin.math.abs(existing.position.longitude - wp.lon) < 0.000001
+            }
+            if (!alreadyExists) {
+                userMarkers.add(
+                    UserPoint(
+                        name = dedupeName,
+                        position = LatLng(wp.lat, wp.lon),
+                        color = wp.color.ifBlank { "#1565C0" },
+                        symbol = wp.symbol,
+                        proximity = wp.proximity,
+                        sourceType = POINT_SOURCE_FILE,
+                        sourceName = sourceName
+                    )
+                )
+            }
+        }
+        updateUserMarkersOnMap()
+        updateUserMarkerRadiusCircles()
+        saveUserPoints()
+        val label = "Точки: $sourceName (${importedPointSetCount()} точек)"
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_LOADED_WP_NAME, label)
+            ?.apply()
+        Toast.makeText(context, label, Toast.LENGTH_SHORT).show()
+    }
+
+    fun loadRoute(routePoints: List<Waypoint>, routeName: String? = null) {
+        val resolved = resolveRouteWaypoints(routePoints)
+        loadWaypoints(resolved)
+        val finalRouteName = routeName?.ifBlank { null } ?: "Маршрут"
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putString(PREF_ROUTE_NAME, finalRouteName)
+            ?.apply()
+    }
+
+    private fun resolveRouteWaypoints(routePoints: List<Waypoint>): List<Waypoint> {
+        if (routePoints.isEmpty()) return emptyList()
+        val pointsByName = userMarkers
+            .mapNotNull { marker ->
+                marker.name.trim().lowercase().takeIf { it.isNotBlank() }?.let { key -> key to marker }
+            }
+            .toMap()
+        return routePoints.mapIndexed { index, wp ->
+            val fallbackName = wp.name.ifBlank { "WP%02d".format(index + 1) }
+            val matched = pointsByName[fallbackName.trim().lowercase()]
+            if (matched == null) {
+                wp.copy(name = fallbackName, index = index + 1)
+            } else {
+                // Route capture radius is controlled by device settings.
+                // A matched point may donate coordinates/style, but point proximity stays on the point layer only.
+                Waypoint(
+                    name = matched.name.ifBlank { fallbackName },
+                    lat = matched.position.latitude,
+                    lon = matched.position.longitude,
+                    index = index + 1,
+                    description = wp.description,
+                    proximity = wp.proximity,
+                    color = wp.color.ifBlank { matched.color },
+                    symbol = wp.symbol.ifBlank { matched.symbol }
+                )
+            }
+        }
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -2998,19 +3088,19 @@ class MapFragment : Fragment() {
             val type = attachment.typeInfo
             when (type) {
                 MonitoringAttachmentType.ROUTE -> {
-                    if (result.waypoints.isEmpty()) {
+                    if (result.routeWaypoints.isEmpty()) {
                         Toast.makeText(ctx, "В маршруте нет точек", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    loadWaypointsToMap(result.waypoints, attachment.name)
+                    loadWaypointsToMap(result.routeWaypoints, attachment.name)
                     Toast.makeText(ctx, "Маршрут загружен: ${attachment.name}", Toast.LENGTH_SHORT).show()
                 }
                 MonitoringAttachmentType.WAYPOINTS -> {
-                    if (result.waypoints.isEmpty()) {
+                    if (result.pointWaypoints.isEmpty()) {
                         Toast.makeText(ctx, "Во вложении нет точек", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    loadUserPointsToMap(result.waypoints, attachment.name)
+                    loadUserPointsToMap(result.pointWaypoints, attachment.name)
                     Toast.makeText(ctx, "Точки загружены: ${attachment.name}", Toast.LENGTH_SHORT).show()
                 }
                 MonitoringAttachmentType.TRACK -> {
@@ -3023,8 +3113,12 @@ class MapFragment : Fragment() {
                 }
                 MonitoringAttachmentType.GPX -> {
                     var loadedAny = false
-                    if (result.waypoints.isNotEmpty()) {
-                        loadWaypointsToMap(result.waypoints, attachment.name)
+                    if (result.pointWaypoints.isNotEmpty()) {
+                        loadUserPointsToMap(result.pointWaypoints, attachment.name)
+                        loadedAny = true
+                    }
+                    if (result.routeWaypoints.isNotEmpty()) {
+                        loadWaypointsToMap(result.routeWaypoints, attachment.name)
                         loadedAny = true
                     }
                     if (result.trackPoints.isNotEmpty()) {
@@ -4291,7 +4385,7 @@ class MapFragment : Fragment() {
         // Clear stale loaded-track name prefs (track is gone after app restart)
         if (loadedTrackPoints.isEmpty()) {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-                ?.remove(PREF_LOADED_TRACK_NAME)?.remove(PREF_LOADED_WP_NAME)?.apply()
+                ?.remove(PREF_LOADED_TRACK_NAME)?.apply()
         }
         restoreLiveTrackFromTempIfNeeded()
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
@@ -4670,7 +4764,9 @@ class MapFragment : Fragment() {
                     0 -> {
                         // Replace in-memory loaded track and exit editor
                         loadedTrackPoints.clear()
+                        loadedTrackImports.clear()
                         loadedTrackPoints.addAll(pts.map { com.mapbox.mapboxsdk.geometry.LatLng(it.first, it.second) })
+                        loadedTrackImports.add(LoadedTrackImport(origName, pts.size))
                         updateLoadedTrackOnMap()
                         saveTrackToPrefs()
                         exitTrackEditMode()
@@ -4875,7 +4971,7 @@ class MapFragment : Fragment() {
                 try {
                     val file = java.io.File(getRaceNavDir(ctx, "tracks"), "$name.gpx")
                     file.writeText(gpx)
-                    loadTrack(pts)
+                    loadTrack(pts, append = false, name = name)
                     context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.edit()?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
                     exitDrawMode()
@@ -4971,6 +5067,19 @@ class MapFragment : Fragment() {
             PropertyFactory.visibility(routeLineVis)
         ))
 
+        // Point proximity circles must stay independent from route circles.
+        // They are added first so the route radius remains visually dominant during a race.
+        style.addSource(GeoJsonSource(USER_POINT_PROXIMITY_SOURCE_ID))
+        style.addLayer(FillLayer(USER_POINT_PROXIMITY_LAYER_ID, USER_POINT_PROXIMITY_SOURCE_ID).withProperties(
+            PropertyFactory.fillColor("#1565C0"),
+            PropertyFactory.fillOpacity(0.10f)
+        ))
+        style.addLayer(LineLayer(USER_POINT_PROXIMITY_OUTLINE_LAYER_ID, USER_POINT_PROXIMITY_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor("#1565C0"),
+            PropertyFactory.lineWidth(2.0f),
+            PropertyFactory.lineOpacity(0.85f),
+            PropertyFactory.lineDasharray(arrayOf(3f, 2f))
+        ))
         // Approach radius circles (behind waypoint dots)
         // Approach radius (outer circle — blue, warning/approach)
         style.addSource(GeoJsonSource(WP_RADIUS_SOURCE_ID))
@@ -5017,11 +5126,14 @@ class MapFragment : Fragment() {
         ))
         // User markers layer
         style.addSource(GeoJsonSource(USER_MARKER_SOURCE_ID))
+        val userPointVis = if (context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.getBoolean(PREF_USER_POINTS_VISIBLE, true) != false) "visible" else "none"
         style.addLayer(SymbolLayer(USER_MARKER_LAYER_ID, USER_MARKER_SOURCE_ID).withProperties(
             PropertyFactory.iconImage(com.mapbox.mapboxsdk.style.expressions.Expression.get("icon")),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
             PropertyFactory.iconAnchor("center"),
+            PropertyFactory.visibility(userPointVis),
             *wpIconSizeProps()
         ))
 
@@ -5208,23 +5320,15 @@ class MapFragment : Fragment() {
         val approachSource = style.getSourceAs<GeoJsonSource>(WP_RADIUS_SOURCE_ID) ?: return
         val proximitySource = style.getSourceAs<GeoJsonSource>(WP_PROXIMITY_SOURCE_ID)
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val globalApproachM = prefs?.getInt(PREF_WP_APPROACH_RADIUS, DEFAULT_WP_APPROACH_RADIUS)?.toDouble()
-            ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
         val globalTakenM = prefs?.getInt(PREF_WP_TAKEN_RADIUS, DEFAULT_WP_TAKEN_RADIUS)?.toDouble()
             ?: DEFAULT_WP_TAKEN_RADIUS.toDouble()
-        // Approach radius circles (outer, blue) — approach/warning
+        // Route radius on map is the device "taken radius", not per-point file proximity.
         val approachFeatures = JSONArray()
-        waypoints.forEach { wp ->
-            val r = if (wp.proximity > 0) wp.proximity else globalApproachM
-            approachFeatures.put(buildCirclePolygon(wp.lat, wp.lon, r))
-        }
         approachSource.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", approachFeatures).toString())
-        // Taken radius circles (inner, orange) — ONLY when navigation active
+        // Route taken circles (inner, orange) — one radius for the route, taken from device settings.
         val takenFeatures = JSONArray()
-        if (navActive) {
-            waypoints.forEach { wp ->
-                takenFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalTakenM))
-            }
+        waypoints.forEach { wp ->
+            takenFeatures.put(buildCirclePolygon(wp.lat, wp.lon, globalTakenM))
         }
         proximitySource?.setGeoJson(JSONObject().put("type", "FeatureCollection").put("features", takenFeatures).toString())
     }
@@ -6161,6 +6265,15 @@ class MapFragment : Fragment() {
         applyDistanceRingsVisibility()
     }
 
+    fun setUserPointsVisible(visible: Boolean) {
+        mapboxMap?.style?.getLayer(USER_MARKER_LAYER_ID)
+            ?.setProperties(PropertyFactory.visibility(if (visible) "visible" else "none"))
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(PREF_USER_POINTS_VISIBLE, visible)
+            ?.apply()
+        applyDistanceRingsVisibility()
+    }
+
     fun setDistanceRingsVisible(visible: Boolean) {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
             ?.putBoolean(PREF_DISTANCE_RINGS_VISIBLE, visible)?.apply()
@@ -6171,12 +6284,16 @@ class MapFragment : Fragment() {
         val style = mapboxMap?.style ?: return
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         val loadedWpVisible = prefs.getBoolean(PREF_LOADED_WP_VISIBLE, true)
-        val ringsVisible = loadedWpVisible && prefs.getBoolean(PREF_DISTANCE_RINGS_VISIBLE, true)
-        val visibility = if (ringsVisible) "visible" else "none"
-        style.getLayer(WP_RADIUS_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
-        style.getLayer(WP_RADIUS_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
-        style.getLayer(WP_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
-        style.getLayer(WP_PROXIMITY_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(visibility))
+        val userPointsVisible = prefs.getBoolean(PREF_USER_POINTS_VISIBLE, true)
+        val ringsEnabled = prefs.getBoolean(PREF_DISTANCE_RINGS_VISIBLE, true)
+        val routeVisibility = if (loadedWpVisible && ringsEnabled) "visible" else "none"
+        val userPointVisibility = if (userPointsVisible && ringsEnabled) "visible" else "none"
+        style.getLayer(WP_RADIUS_LAYER_ID)?.setProperties(PropertyFactory.visibility(routeVisibility))
+        style.getLayer(WP_RADIUS_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(routeVisibility))
+        style.getLayer(WP_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(routeVisibility))
+        style.getLayer(WP_PROXIMITY_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(routeVisibility))
+        style.getLayer(USER_POINT_PROXIMITY_LAYER_ID)?.setProperties(PropertyFactory.visibility(userPointVisibility))
+        style.getLayer(USER_POINT_PROXIMITY_OUTLINE_LAYER_ID)?.setProperties(PropertyFactory.visibility(userPointVisibility))
     }
 
     fun setRouteLineVisible(visible: Boolean) {
@@ -6211,7 +6328,7 @@ class MapFragment : Fragment() {
             ?.setProperties(PropertyFactory.lineColor(color), PropertyFactory.lineWidth(width))
     }
 
-    fun hasLoadedTrack() = loadedTrackPoints.isNotEmpty()
+    fun hasLoadedTrack() = loadedTrackPoints.any { it != SEGMENT_BREAK }
     fun hasLoadedWaypoints() = waypoints.isNotEmpty()
 
     fun unlockScreen() {
@@ -6293,12 +6410,22 @@ class MapFragment : Fragment() {
         }
     }
 
-    fun loadTrack(points: List<Pair<Double, Double>>) {
-        loadedTrackPoints.clear()
+    fun loadTrack(points: List<Pair<Double, Double>>, append: Boolean = false, name: String? = null) {
+        val cleanPoints = points.filter { !(it.first.isNaN() || it.second.isNaN()) }
+        if (!append || loadedTrackPoints.none { it != SEGMENT_BREAK }) {
+            loadedTrackPoints.clear()
+            loadedTrackImports.clear()
+        } else if (cleanPoints.isNotEmpty() && loadedTrackPoints.lastOrNull() != SEGMENT_BREAK) {
+            loadedTrackPoints.add(SEGMENT_BREAK)
+        }
         loadedTrackPoints.addAll(points.map {
             if (it.first.isNaN() || it.second.isNaN()) SEGMENT_BREAK
             else LatLng(it.first, it.second)
         })
+        if (cleanPoints.isNotEmpty()) {
+            val displayName = name?.ifBlank { null } ?: "Трек ${loadedTrackImports.size + 1}"
+            loadedTrackImports.add(LoadedTrackImport(displayName, cleanPoints.size))
+        }
         updateLoadedTrackOnMap()
         applyLoadedTrackStyle()
         if (points.isNotEmpty()) {
@@ -6311,7 +6438,8 @@ class MapFragment : Fragment() {
             val realCount = points.count { !it.first.isNaN() && !it.second.isNaN() }
             val segCount = points.count { it.first.isNaN() } + 1
             val segInfo = if (segCount > 1) ", $segCount сегментов" else ""
-            Toast.makeText(context, "Трек загружен: $realCount точек$segInfo", Toast.LENGTH_SHORT).show()
+            val verb = if (append && loadedTrackImports.size > 1) "Добавлен трек" else "Трек загружен"
+            Toast.makeText(context, "$verb: $realCount точек$segInfo", Toast.LENGTH_SHORT).show()
         }
         saveTrackToPrefs()
     }
@@ -6484,10 +6612,21 @@ class MapFragment : Fragment() {
                 .put("lon", p.position.longitude)
                 .put("color", p.color)
                 .put("symbol", p.symbol)
-                .put("proximity", p.proximity))
+                .put("proximity", p.proximity)
+                .put("sourceType", p.sourceType)
+                .put("sourceName", p.sourceName))
         }
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putString(PREF_USER_POINTS_JSON, arr.toString())?.apply()
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val editor = prefs.edit().putString(PREF_USER_POINTS_JSON, arr.toString())
+        val importedPoints = userMarkers.filter { it.sourceType == POINT_SOURCE_FILE }
+        if (importedPoints.isNotEmpty()) {
+            val sourceName = importedPoints.first().sourceName.ifBlank { "Файл" }
+            editor.putString(PREF_LOADED_WP_NAME, "Точки: $sourceName (${importedPoints.size} точек)")
+        } else {
+            editor.remove(PREF_LOADED_WP_NAME)
+        }
+        editor.apply()
+        updateUserMarkerRadiusCircles()
     }
 
     private fun restoreUserPoints() {
@@ -6503,7 +6642,9 @@ class MapFragment : Fragment() {
                     LatLng(o.getDouble("lat"), o.getDouble("lon")),
                     color = o.optString("color", "#1565C0"),
                     symbol = o.optString("symbol", ""),
-                    proximity = o.optDouble("proximity", 0.0)
+                    proximity = o.optDouble("proximity", 0.0),
+                    sourceType = o.optString("sourceType", POINT_SOURCE_MANUAL),
+                    sourceName = o.optString("sourceName", "")
                 ))
             }
             if (userMarkers.isNotEmpty()) {
@@ -6516,13 +6657,8 @@ class MapFragment : Fragment() {
     /** Draw proximity circles for user markers */
     private fun updateUserMarkerRadiusCircles() {
         val style = mapboxMap?.style ?: return
-        val proximitySource = style.getSourceAs<GeoJsonSource>(WP_PROXIMITY_SOURCE_ID) ?: return
+        val proximitySource = style.getSourceAs<GeoJsonSource>(USER_POINT_PROXIMITY_SOURCE_ID) ?: return
         val features = JSONArray()
-        // Add waypoint proximity circles
-        waypoints.forEach { wp ->
-            if (wp.proximity > 0) features.put(buildCirclePolygon(wp.lat, wp.lon, wp.proximity))
-        }
-        // Add user marker proximity circles
         userMarkers.forEach { pt ->
             if (pt.proximity > 0) features.put(buildCirclePolygon(pt.position.latitude, pt.position.longitude, pt.proximity))
         }
@@ -6538,6 +6674,24 @@ class MapFragment : Fragment() {
 
     fun hasUserMarkers() = userMarkers.isNotEmpty()
 
+    fun hasImportedPointSet() = userMarkers.any { it.sourceType == POINT_SOURCE_FILE }
+
+    private fun importedPointSetCount(): Int = userMarkers.count { it.sourceType == POINT_SOURCE_FILE }
+
+    fun getImportedPointSetCopy(): List<Waypoint> = userMarkers
+        .filter { it.sourceType == POINT_SOURCE_FILE }
+        .mapIndexed { i, pt ->
+            Waypoint(
+                pt.name,
+                pt.position.latitude,
+                pt.position.longitude,
+                i + 1,
+                color = pt.color,
+                symbol = pt.symbol,
+                proximity = pt.proximity
+            )
+        }
+
     fun getUserMarkersCopy(): List<Waypoint> = userMarkers.mapIndexed { i, pt ->
         Waypoint(pt.name, pt.position.latitude, pt.position.longitude, i + 1, color = "#1565C0")
     }
@@ -6545,8 +6699,41 @@ class MapFragment : Fragment() {
     /** Calculate total polyline length in meters */
     private fun calcPolylineLength(points: List<LatLng>): Double {
         var total = 0.0
-        for (i in 1 until points.size) total += distanceM(points[i - 1], points[i])
+        for (i in 1 until points.size) {
+            val prev = points[i - 1]
+            val current = points[i]
+            if (prev == SEGMENT_BREAK || current == SEGMENT_BREAK) continue
+            total += distanceM(prev, current)
+        }
         return total
+    }
+
+    private fun rebuildLoadedTrackSummary(): String? {
+        if (loadedTrackPoints.none { it != SEGMENT_BREAK }) {
+            return null
+        }
+        val realPoints = loadedTrackPoints.count { it != SEGMENT_BREAK }
+        return when {
+            loadedTrackImports.size == 1 -> loadedTrackImports.first().name
+            loadedTrackImports.size > 1 -> "Треки: ${loadedTrackImports.size} (${realPoints} точек)"
+            else -> "Трек (${realPoints} точек)"
+        }
+    }
+
+    private fun saveLoadedTrackMetaToPrefs(prefs: android.content.SharedPreferences) {
+        val arr = JSONArray()
+        loadedTrackImports.forEach { meta ->
+            arr.put(JSONObject().put("name", meta.name).put("pointCount", meta.pointCount))
+        }
+        val editor = prefs.edit()
+        if (arr.length() == 0) {
+            editor.remove(PREF_SAVED_TRACK_META_JSON)
+        } else {
+            editor.putString(PREF_SAVED_TRACK_META_JSON, arr.toString())
+        }
+        rebuildLoadedTrackSummary()?.let { editor.putString(PREF_LOADED_TRACK_NAME, it) }
+            ?: editor.remove(PREF_LOADED_TRACK_NAME)
+        editor.apply()
     }
 
     private fun loadFileFromPicker(uri: Uri) {
@@ -6556,79 +6743,32 @@ class MapFragment : Fragment() {
             if (it.moveToFirst()) it.getString(it.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME))
             else null
         } ?: uri.lastPathSegment ?: "file"
-        val ext = name.substringAfterLast('.', "").lowercase()
-        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val inputStream = ctx.contentResolver.openInputStream(uri)
                     ?: throw Exception("Не удалось открыть файл")
                 val bytes = inputStream.buffered(65536).use { it.readBytes() }
-
-                when (ext) {
-                    "gpx" -> {
-                        val result = GpxParser.parseGpxFull(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (result.trackPoints.isEmpty() && result.waypoints.isEmpty()) {
-                                Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
-                                return@withContext
-                            }
-                            if (result.trackPoints.isNotEmpty()) {
-                                loadTrack(result.trackPoints)
-                                prefs.edit().putString(PREF_LOADED_TRACK_NAME, name).apply()
-                            }
-                            if (result.waypoints.isNotEmpty()) {
-                                loadWaypoints(result.waypoints)
-                                prefs.edit().putString(PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                            }
-                            Toast.makeText(ctx, "Загружено: $name", Toast.LENGTH_SHORT).show()
-                        }
+                val parsed = NavigationFileImporter.parse(name, bytes)
+                withContext(Dispatchers.Main) {
+                    if (!parsed.hasAnything) {
+                        Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
+                        return@withContext
                     }
-                    "wpt" -> {
-                        val wpts = GpxParser.parseWpt(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (wpts.isNotEmpty()) {
-                                loadWaypoints(wpts)
-                                prefs.edit().putString(PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                Toast.makeText(ctx, "Загружено WP: ${wpts.size}", Toast.LENGTH_SHORT).show()
-                            } else Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
-                        }
+                    if (parsed.hasPointSet) {
+                        loadPointSet(parsed.pointWaypoints, name.substringBeforeLast('.'))
                     }
-                    "rte" -> {
-                        val result = try { GpxParser.parseGpxFull(bytes.inputStream()) } catch (_: Exception) { null }
-                        val wpts = if (result != null && result.waypoints.isNotEmpty()) result.waypoints
-                            else GpxParser.parseRteOzi(bytes.inputStream())
-                        val trackPts = result?.trackPoints
-                        withContext(Dispatchers.Main) {
-                            if (trackPts != null && trackPts.isNotEmpty()) {
-                                loadTrack(trackPts)
-                                prefs.edit().putString(PREF_LOADED_TRACK_NAME, name).apply()
-                            }
-                            if (wpts.isNotEmpty()) {
-                                loadWaypoints(wpts)
-                                prefs.edit().putString(PREF_ROUTE_NAME, name.substringBeforeLast('.')).apply()
-                                Toast.makeText(ctx, "Загружено WP: ${wpts.size}", Toast.LENGTH_SHORT).show()
-                            } else if (trackPts.isNullOrEmpty()) {
-                                Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                    if (parsed.hasRoute) {
+                        loadRoute(parsed.routeWaypoints, parsed.routeName ?: name.substringBeforeLast('.'))
                     }
-                    "plt" -> {
-                        val pts = GpxParser.parsePltTrack(bytes.inputStream())
-                        withContext(Dispatchers.Main) {
-                            if (pts.isNotEmpty()) {
-                                loadTrack(pts)
-                                prefs.edit().putString(PREF_LOADED_TRACK_NAME, name).apply()
-                                Toast.makeText(ctx, "Загружен трек: ${pts.size} точек", Toast.LENGTH_SHORT).show()
-                            } else Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
-                        }
+                    if (parsed.hasTrack) {
+                        loadTrack(
+                            parsed.trackPoints,
+                            append = hasLoadedTrack(),
+                            name = parsed.trackName ?: name.substringBeforeLast('.')
+                        )
                     }
-                    "kml", "kmz" -> withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, "Формат .$ext: используйте GPX/WPT/PLT/RTE", Toast.LENGTH_SHORT).show()
-                    }
-                    else -> withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, "Неизвестный формат: .$ext", Toast.LENGTH_SHORT).show()
-                    }
+                    Toast.makeText(ctx, "Загружено: $name", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -6676,7 +6816,7 @@ class MapFragment : Fragment() {
             Tab("📍 WP",  "#FFD600") { clearContent(); buildWpContent(ctx, prefs, content, dialog, dp) },
             Tab("🗺 RTE", "#FF6F00") { clearContent(); buildRteContent(ctx, prefs, content, dialog, dp) },
             Tab("📏 TRK", "#2196F3") { clearContent(); buildTrkContent(ctx, prefs, content, dialog, dp) },
-            Tab("📦 GPX", "#CCCCCC") { clearContent(); buildGpxContent(ctx, prefs, content, dialog, dp) }
+            Tab("📂 Files", "#CCCCCC") { clearContent(); buildGpxContent(ctx, prefs, content, dialog, dp) }
         )
 
         val tabButtons = mutableListOf<android.widget.Button>()
@@ -6862,6 +7002,7 @@ class MapFragment : Fragment() {
                         .setPositiveButton("Очистить") { _, _ ->
                             userMarkers.clear()
                             updateUserMarkersOnMap()
+                            saveUserPoints()
                             dialog.dismiss()
                             Toast.makeText(ctx, "Точки очищены", Toast.LENGTH_SHORT).show()
                         }
@@ -6915,7 +7056,6 @@ class MapFragment : Fragment() {
                 setOnClickListener {
                     val newVis = !prefs.getBoolean(PREF_LOADED_WP_VISIBLE, true)
                     setLoadedWpVisible(newVis)
-                    setLoadedTrackVisible(newVis)
                     text = if (newVis) "👁 Скрыть" else "👁 Показать"
                 }
             })
@@ -6950,7 +7090,7 @@ class MapFragment : Fragment() {
                             updateNavLine()
                             updateWaypointNavBar()
                             saveWaypointsToPrefs()
-                            prefs.edit().remove(PREF_ROUTE_NAME).remove(PREF_LOADED_WP_NAME).apply()
+                            prefs.edit().remove(PREF_ROUTE_NAME).apply()
                             dialog.dismiss()
                             Toast.makeText(ctx, "Маршрут очищен", Toast.LENGTH_SHORT).show()
                         }
@@ -7062,7 +7202,10 @@ class MapFragment : Fragment() {
         if (loadedTrackPoints.isNotEmpty()) {
             val trackLenKm = calcPolylineLength(loadedTrackPoints) / 1000.0
             val trkVisible = prefs.getBoolean(PREF_LOADED_TRACK_VISIBLE, true)
-            val trackName = prefs.getString(PREF_LOADED_TRACK_NAME, "Трек") ?: "Трек"
+            val trackName = rebuildLoadedTrackSummary()
+                ?: prefs.getString(PREF_LOADED_TRACK_NAME, "Трек")
+                ?: "Трек"
+            val realTrackPoints = loadedTrackPoints.count { it != SEGMENT_BREAK }
 
             root.addView(android.widget.TextView(ctx).apply {
                 text = "📏 $trackName"
@@ -7071,11 +7214,21 @@ class MapFragment : Fragment() {
                 setPadding(0, (14 * dp).toInt(), 0, 2)
             })
             root.addView(android.widget.TextView(ctx).apply {
-                text = "Точек: ${loadedTrackPoints.size}  •  Длина: ${"%.1f".format(trackLenKm)} км"
+                text = "Точек: $realTrackPoints  •  Длина: ${"%.1f".format(trackLenKm)} км"
                 setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
                 textSize = 12f
                 setPadding(0, 0, 0, (6 * dp).toInt())
             })
+            if (loadedTrackImports.size > 1) {
+                loadedTrackImports.forEachIndexed { index, meta ->
+                    root.addView(android.widget.TextView(ctx).apply {
+                        text = "${index + 1}. ${meta.name} (${meta.pointCount} т.)"
+                        setTextColor(android.graphics.Color.parseColor("#888888"))
+                        textSize = 11f
+                        setPadding((8 * dp).toInt(), 0, 0, (2 * dp).toInt())
+                    })
+                }
+            }
 
             val btnLp = android.widget.LinearLayout.LayoutParams(0, (40 * dp).toInt(), 1f).apply {
                 marginEnd = (6 * dp).toInt()
@@ -7104,10 +7257,10 @@ class MapFragment : Fragment() {
                         .setMessage("«$trackName» (${loadedTrackPoints.size} точек) будет убран с карты")
                         .setPositiveButton("Очистить") { _, _ ->
                             loadedTrackPoints.clear()
+                            loadedTrackImports.clear()
                             mapboxMap?.style?.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)
                                 ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
                             saveTrackToPrefs()
-                            prefs.edit().remove(PREF_LOADED_TRACK_NAME).apply()
                             dialog.dismiss()
                             Toast.makeText(ctx, "Трек очищен", Toast.LENGTH_SHORT).show()
                         }
@@ -7203,7 +7356,7 @@ class MapFragment : Fragment() {
                                 return@launch
                             }
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts)
+                                loadTrack(pts, append = hasLoadedTrack(), name = trackFileName)
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -7236,7 +7389,7 @@ class MapFragment : Fragment() {
                                 return@launch
                             }
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts)
+                                loadTrack(pts, append = false, name = trackFileName)
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -7506,8 +7659,11 @@ class MapFragment : Fragment() {
                         if (gpx != null) {
                             try {
                                 val result = GpxParser.parseGpxFull(gpx.byteInputStream())
-                                if (result.waypoints.isNotEmpty()) {
-                                    loadWaypointsToMap(result.waypoints, entry.name)
+                                if (result.pointWaypoints.isNotEmpty()) {
+                                    loadUserPointsToMap(result.pointWaypoints, entry.name)
+                                }
+                                if (result.routeWaypoints.isNotEmpty()) {
+                                    loadWaypointsToMap(result.routeWaypoints, entry.name)
                                 }
                                 if (result.trackPoints.isNotEmpty()) {
                                     loadTrackToMap(result.trackPoints, entry.name)
@@ -7538,48 +7694,19 @@ class MapFragment : Fragment() {
             .show()
     }
 
-    /** Load waypoints from shared GPX onto map */
+    /** Load route waypoints from shared GPX onto map */
     private fun loadWaypointsToMap(wps: List<Waypoint>, name: String) {
-        waypoints.clear()
-        waypoints.addAll(wps)
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putString(PREF_LOADED_WP_NAME, name)?.apply()
-        saveWaypointsToPrefs()
-        updateWaypointsOnMap()
+        loadRoute(wps, name)
     }
 
     /** Load shared waypoints into user points layer */
     private fun loadUserPointsToMap(wps: List<Waypoint>, name: String) {
-        userMarkers.clear()
-        wps.forEachIndexed { idx, wp ->
-            userMarkers.add(
-                UserPoint(
-                    name = wp.name.ifBlank { "WP%02d".format(idx + 1) },
-                    position = LatLng(wp.lat, wp.lon),
-                    color = wp.color.ifBlank { "#1565C0" },
-                    symbol = wp.symbol,
-                    proximity = wp.proximity
-                )
-            )
-        }
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putString(PREF_USER_POINTS_JSON, "[]")?.apply()
-        saveUserPoints()
-        updateUserMarkersOnMap()
-        updateUserMarkerRadiusCircles()
+        loadPointSet(wps, name, replaceExistingFilePoints = true)
     }
 
     /** Load track from shared GPX onto map */
     private fun loadTrackToMap(pts: List<Pair<Double, Double>>, name: String) {
-        loadedTrackPoints.clear()
-        pts.forEach { (lat, lon) ->
-            if (lat.isNaN() || lon.isNaN()) loadedTrackPoints.add(SEGMENT_BREAK)
-            else loadedTrackPoints.add(com.mapbox.mapboxsdk.geometry.LatLng(lat, lon))
-        }
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
-        saveTrackToPrefs()
-        try { updateLoadedTrackOnMap() } catch (_: Exception) {}
+        loadTrack(pts, append = false, name = name)
     }
 
     /** Show picker to select a favorites group for sharing GPX */
@@ -8683,7 +8810,11 @@ class MapFragment : Fragment() {
     private fun saveTrackToPrefs() {
         val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
         if (loadedTrackPoints.isEmpty()) {
-            prefs.edit().remove(PREF_SAVED_TRACK_JSON).apply()
+            prefs.edit()
+                .remove(PREF_SAVED_TRACK_JSON)
+                .remove(PREF_SAVED_TRACK_META_JSON)
+                .remove(PREF_LOADED_TRACK_NAME)
+                .apply()
             return
         }
         // Save up to 5000 points to avoid prefs size limits
@@ -8697,6 +8828,7 @@ class MapFragment : Fragment() {
             }
         }
         prefs.edit().putString(PREF_SAVED_TRACK_JSON, arr.toString()).apply()
+        saveLoadedTrackMetaToPrefs(prefs)
     }
 
     private fun restoreWaypointsFromPrefs() {
@@ -8750,6 +8882,24 @@ class MapFragment : Fragment() {
             }
         } catch (e: Exception) {
             Log.w("MapFragment", "Failed to restore track: ${e.message}")
+        }
+        loadedTrackImports.clear()
+        val metaJson = prefs.getString(PREF_SAVED_TRACK_META_JSON, null)
+        if (!metaJson.isNullOrBlank()) {
+            try {
+                val arr = JSONArray(metaJson)
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    loadedTrackImports.add(
+                        LoadedTrackImport(
+                            name = item.optString("name", "Трек ${i + 1}"),
+                            pointCount = item.optInt("pointCount", 0)
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w("MapFragment", "Failed to restore track meta: ${e.message}")
+            }
         }
     }
 
@@ -9078,8 +9228,8 @@ class MapFragment : Fragment() {
                             ?: DEFAULT_WP_APPROACH_RADIUS.toDouble()
                         val globalTakenRadius = prefs?.getInt(PREF_WP_TAKEN_RADIUS, DEFAULT_WP_TAKEN_RADIUS)?.toDouble()
                             ?: DEFAULT_WP_TAKEN_RADIUS.toDouble()
-                        val approachRadius = if (wp.proximity > 0) wp.proximity else globalApproachRadius
-                        val takenRadius = globalTakenRadius.coerceAtMost(approachRadius)
+                        val approachRadius = kotlin.math.max(globalApproachRadius, globalTakenRadius)
+                        val takenRadius = globalTakenRadius
                         val inApproach = distM <= approachRadius
                         val inTaken = distM <= takenRadius
                         // Sound: entering approach radius (fire once per waypoint, only when nav active)
@@ -9108,7 +9258,7 @@ class MapFragment : Fragment() {
                                 val jtWp = waypoints.getOrNull(justTakenWpIndex)
                                 if (jtWp != null) {
                                     val jtDist = distanceM(newPoint, LatLng(jtWp.lat, jtWp.lon))
-                                    val jtRadius = if (jtWp.proximity > 0) jtWp.proximity else globalApproachRadius
+                                    val jtRadius = globalTakenRadius
                                     if (jtDist > jtRadius) justTakenWpIndex = -1
                                 }
                             }
@@ -9568,23 +9718,23 @@ class MapFragment : Fragment() {
 
     fun shareLoadedWaypoints() {
         val ctx = context ?: return
-        if (waypoints.isEmpty()) {
+        val exportPoints = when {
+            waypoints.isNotEmpty() -> waypoints.toList()
+            hasImportedPointSet() -> getImportedPointSetCopy()
+            userMarkers.isNotEmpty() -> getUserMarkersCopy()
+            else -> emptyList()
+        }
+        if (exportPoints.isEmpty()) {
             Toast.makeText(ctx, "Нет загруженных точек", Toast.LENGTH_SHORT).show()
             return
         }
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
         val filename = "waypoints_$timestamp.gpx"
-        val sb = StringBuilder()
-        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-        sb.append("<gpx version=\"1.1\" creator=\"RaceNav\">\n")
-        waypoints.forEach { wp ->
-            sb.append("  <wpt lat=\"${wp.lat}\" lon=\"${wp.lon}\"><name>${wp.name}</name></wpt>\n")
-        }
-        sb.append("</gpx>\n")
+        val gpx = GpxParser.writeWaypointsGpx(exportPoints, "Точки")
         try {
             val file = java.io.File(ctx.externalCacheDir ?: ctx.cacheDir, filename)
-            file.writeText(sb.toString())
+            file.writeText(gpx)
             val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "com.andreykoff.racenav.provider", file)
             val share = Intent(Intent.ACTION_SEND).apply {
                 type = "application/gpx+xml"
@@ -10626,7 +10776,7 @@ class MapFragment : Fragment() {
                 }
                 val latestVersion = json.optString("versionName", json.optString("version", ""))
                 val apkUrl = json.optString("apkUrl", json.optString("url", ""))
-                val changelog = json.optString("changelog", null)
+                val changelog = json.optString("changelog").ifBlank { null }
                 val hasUpdate = UpdateManager.isNewer(latestVersion, current)
                 onResult("v$latestVersion", "v$current", hasUpdate, apkUrl, changelog)
             } catch (e: Exception) {
@@ -10747,11 +10897,7 @@ class MapFragment : Fragment() {
                     saveUserPoints()
 
                     if (syncRouteWaypoints.isNotEmpty()) {
-                        loadWaypoints(syncRouteWaypoints)
-                        prefs.edit()
-                            .putString(PREF_ROUTE_NAME, importedRouteName ?: "Маршрут синхронизации")
-                            .putString(PREF_LOADED_WP_NAME, "Маршрут: ${syncRouteWaypoints.size} WP")
-                            .apply()
+                        loadRoute(syncRouteWaypoints, importedRouteName ?: "Маршрут синхронизации")
                     } else {
                         waypoints.clear()
                         activeWpIndex = 0
@@ -10762,10 +10908,11 @@ class MapFragment : Fragment() {
                         updateNavLine()
                         updateWaypointNavBar()
                         saveWaypointsToPrefs()
-                        prefs.edit().remove(PREF_ROUTE_NAME).remove(PREF_LOADED_WP_NAME).apply()
+                        prefs.edit().remove(PREF_ROUTE_NAME).apply()
                     }
 
-                    loadTrack(syncTrackPts)
+                    val trackLoadName = if ((tracksArray?.length() ?: 0) > 1) "Синхр. треки" else "Синхр. трек"
+                    loadTrack(syncTrackPts, append = false, name = trackLoadName)
                     if (syncTrackPts.isNotEmpty()) {
                         val realTrackPoints = syncTrackPts.count { !it.first.isNaN() && !it.second.isNaN() }
                         val trackLabel = if ((tracksArray?.length() ?: 0) > 1) {
