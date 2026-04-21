@@ -11,6 +11,7 @@ This file documents the contract for imported navigation data. Do not change the
 - `RTE` or GPX `<rte>/<rtept>` = route.
 - `PLT` or GPX `<trk>/<trkpt>` = track.
 - GPX is only a container and may contain points, routes, tracks, or several of them at once.
+- Imported coordinates must be finite, in lat/lon range, and not `0,0`; Null Island is treated as a bad import/header artifact, not as a race point.
 
 ## Proximity rules
 
