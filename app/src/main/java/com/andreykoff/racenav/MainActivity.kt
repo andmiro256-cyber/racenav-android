@@ -1,6 +1,7 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -16,20 +17,15 @@ class MainActivity : AppCompatActivity() {
     private var isAppUpdateCheckScheduled = false
     private var appUpdateCheckRetryCount = 0
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        // Head units (Li Auto, Chinese tablets) have large screens with low density (160dpi),
-        // making everything tiny. Scale up density only for this app.
-        // User needs to press "fullscreen" button on Li Auto to avoid letterboxing.
-        val metrics = resources.displayMetrics
-        if (metrics.densityDpi <= 160 && maxOf(metrics.widthPixels, metrics.heightPixels) >= 1920) {
-            val scale = 2.0f
-            metrics.density = scale
-            metrics.scaledDensity = scale
-            metrics.densityDpi = (160 * scale).toInt()
-        }
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(newBase.withHeadUnitDensityScale())
+    }
 
+    override fun onCreate(savedInstanceState: Bundle?) {
         AppThemeHelper.applyTheme(this)
+        applyHeadUnitDensityScale()
         super.onCreate(savedInstanceState)
+        applyHeadUnitDensityScale()
 
         // Crash logger — saves stacktrace to /sdcard/Download/racenav_crash.txt
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -408,9 +404,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
+        const val HEAD_UNIT_LOW_DENSITY_DPI = 160
+        const val HEAD_UNIT_TARGET_DENSITY_DPI = 320
+        const val HEAD_UNIT_MIN_LONG_EDGE_PX = 1920
         const val APP_UPDATE_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000L
         const val APP_UPDATE_CHECK_RETRY_DELAY_MS = 1500L
         const val APP_UPDATE_CHECK_MAX_RETRIES = 3
+    }
+
+    private fun Context.withHeadUnitDensityScale(): Context {
+        val metrics = resources.displayMetrics
+        if (!isLowDensityHeadUnit(metrics.densityDpi, metrics.widthPixels, metrics.heightPixels)) {
+            return this
+        }
+        // Li Auto reports a tablet-sized panel as mdpi; make dp-based UI usable before AppCompat applies DayNight.
+        val config = Configuration(resources.configuration)
+        config.densityDpi = HEAD_UNIT_TARGET_DENSITY_DPI
+        return createConfigurationContext(config)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyHeadUnitDensityScale() {
+        val metrics = resources.displayMetrics
+        if (!isLowDensityHeadUnit(metrics.densityDpi, metrics.widthPixels, metrics.heightPixels)) {
+            return
+        }
+        val scale = HEAD_UNIT_TARGET_DENSITY_DPI.toFloat() / HEAD_UNIT_LOW_DENSITY_DPI
+        metrics.density = scale
+        metrics.scaledDensity = scale * resources.configuration.fontScale
+        metrics.densityDpi = HEAD_UNIT_TARGET_DENSITY_DPI
+    }
+
+    private fun isLowDensityHeadUnit(densityDpi: Int, widthPixels: Int, heightPixels: Int): Boolean {
+        return densityDpi <= HEAD_UNIT_LOW_DENSITY_DPI &&
+            maxOf(widthPixels, heightPixels) >= HEAD_UNIT_MIN_LONG_EDGE_PX
     }
 
     private fun showUpdateDialogWithProgress(latest: String, current: String, apkUrl: String, changelog: String?) {
