@@ -1549,6 +1549,7 @@ class SettingsFragment : Fragment() {
         // Offline maps — dynamic list
         refreshDownloadedAreasUI(view)
         refreshOfflineMapsUI(view)
+        startOfflineProgressPolling(view)
         val rowOfflineMapStorage = view.findViewById<View>(R.id.rowOfflineMapStorage)
         val txtOfflineMapStorage = view.findViewById<TextView>(R.id.txtOfflineMapStorage)
         val txtOfflineMapStoragePath = view.findViewById<TextView>(R.id.txtOfflineMapStoragePath)
@@ -3096,6 +3097,10 @@ class SettingsFragment : Fragment() {
     private var liveUsersHandler: android.os.Handler? = null
     private var favoritesLabelPrefListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var liveUsersRunnable: Runnable? = null
+    private var offlineProgressHandler: android.os.Handler? = null
+    private var offlineProgressRunnable: Runnable? = null
+    private var lastOfflineProgressSnapshot: String? = null
+    private var lastOfflineProgressWasRunning = false
     private var currentSettingsTab = "main"
     private var scrollContentRef: android.view.ViewGroup? = null
     private var settingsTabs: Map<String, TextView?> = emptyMap()
@@ -3202,6 +3207,10 @@ class SettingsFragment : Fragment() {
                 currentSettingsTab = key
                 applyTabVisibility()
                 applySettingsTabSelection()
+                if (key == "maps") {
+                    refreshDownloadedAreasUI(view)
+                    refreshOfflineMapsUI(view)
+                }
             }
         }
         // Defer first apply to after all programmatic views are added
@@ -4672,12 +4681,12 @@ class SettingsFragment : Fragment() {
         if (isAdded) applySettingsTheme(view)
     }
 
-    private fun refreshDownloadedAreasUI(view: View) {
+    private fun refreshDownloadedAreasUI(view: View, syncSources: Boolean = true) {
         val container = view.findViewById<LinearLayout>(R.id.containerDownloadedAreas)
         container.removeAllViews()
         val ctx = requireContext()
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
-        mapFrag?.syncOfflineAreaSources()
+        if (syncSources) mapFrag?.syncOfflineAreaSources()
         val progress = TileDownloadManager.getProgress()
         val activeAreaId = TileDownloadManager.currentAreaId
         val areas = OfflineAreasManager.loadAreas(ctx).sortedWith(
@@ -4708,7 +4717,7 @@ class SettingsFragment : Fragment() {
             row.findViewById<TextView>(R.id.txtAreaMeta).text =
                 "${area.layersDescription()} • z${area.minZoom}-${area.maxZoom} • ${String.format("%.0f", area.areaKm2)} км²"
             row.findViewById<TextView>(R.id.txtAreaStatus).text =
-                "Статус: ${statusLabel(area.status)}${if (!area.hasStoredGeometry()) " • без данных для перезакачки" else ""}"
+                "Статус: ${areaStatusLabel(area, activeAreaId, progress)}${if (!area.hasStoredGeometry()) " • без данных для перезакачки" else ""}"
 
             val btnOpen = row.findViewById<TextView>(R.id.btnAreaOpen)
             val btnLayers = row.findViewById<TextView>(R.id.btnAreaLayers)
@@ -4798,6 +4807,78 @@ class SettingsFragment : Fragment() {
         "partial" -> "частично"
         "complete" -> "готово"
         else -> status
+    }
+
+    private fun areaStatusLabel(
+        area: OfflineAreasManager.OfflineArea,
+        activeAreaId: String?,
+        progress: DownloadProgress
+    ): String {
+        if (activeAreaId != area.id) return statusLabel(area.status)
+        val progressText = if (progress.totalTiles > 0) {
+            " ${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+        } else {
+            ""
+        }
+        return when {
+            progress.isRunning -> "загрузка$progressText"
+            progress.isPaused -> "пауза$progressText"
+            progress.wasCancelled -> "остановлено$progressText"
+            progress.error != null -> "ошибка$progressText"
+            progress.isPartial -> "частично$progressText"
+            else -> "готово$progressText"
+        }
+    }
+
+    private fun startOfflineProgressPolling(rootView: View) {
+        stopOfflineProgressPolling()
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        offlineProgressHandler = handler
+        offlineProgressRunnable = object : Runnable {
+            override fun run() {
+                val currentRoot = view
+                if (!isAdded || currentRoot !== rootView) return
+
+                val progress = TileDownloadManager.getProgress()
+                val areaId = TileDownloadManager.currentAreaId.orEmpty()
+                val snapshot = listOf(
+                    areaId,
+                    progress.totalTiles,
+                    progress.downloadedTiles,
+                    progress.successfulTiles,
+                    progress.failedTiles,
+                    progress.skippedTiles,
+                    progress.percent,
+                    progress.isRunning,
+                    progress.isPaused,
+                    progress.wasCancelled,
+                    progress.error.orEmpty()
+                ).joinToString("|")
+
+                if (snapshot != lastOfflineProgressSnapshot) {
+                    val wasRunning = lastOfflineProgressWasRunning
+                    lastOfflineProgressSnapshot = snapshot
+                    lastOfflineProgressWasRunning = progress.isRunning
+                    if (currentSettingsTab == "maps") {
+                        refreshDownloadedAreasUI(rootView, syncSources = false)
+                        if (wasRunning && !progress.isRunning) {
+                            refreshOfflineMapsUI(rootView)
+                        }
+                    }
+                }
+
+                handler.postDelayed(this, if (progress.isRunning || progress.isPaused) 1000L else 2000L)
+            }
+        }
+        handler.post(offlineProgressRunnable!!)
+    }
+
+    private fun stopOfflineProgressPolling() {
+        offlineProgressRunnable?.let { offlineProgressHandler?.removeCallbacks(it) }
+        offlineProgressRunnable = null
+        offlineProgressHandler = null
+        lastOfflineProgressSnapshot = null
+        lastOfflineProgressWasRunning = false
     }
 
     private fun getFileName(uri: Uri): String {
@@ -5117,6 +5198,7 @@ class SettingsFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        stopOfflineProgressPolling()
         liveUsersHandler?.removeCallbacksAndMessages(null)
         liveUsersHandler = null
         customApproachSoundValueView = null

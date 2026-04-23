@@ -47,7 +47,12 @@ data class DownloadProgress(
     val wasCancelled: Boolean,
     val error: String? = null
 ) {
-    val percent: Int get() = if (totalTiles > 0) (downloadedTiles * 100 / totalTiles) else 0
+    val percent: Int
+        get() = if (totalTiles > 0) {
+            ((downloadedTiles.toLong() * 100L) / totalTiles.toLong()).toInt().coerceIn(0, 100)
+        } else {
+            0
+        }
     val isPartial: Boolean get() = failedTiles > 0 || skippedTiles > 0
 }
 
