@@ -67,6 +67,12 @@ import kotlin.math.sqrt
 
 class MapFragment : Fragment() {
 
+    private enum class DownloadLaunchResult {
+        STARTED,
+        QUEUED,
+        FAILED
+    }
+
     private var _binding: FragmentMapBinding? = null
     private val binding get() = _binding ?: throw IllegalStateException("Binding accessed after onDestroyView")
     private var mapboxMap: MapboxMap? = null
@@ -202,6 +208,7 @@ class MapFragment : Fragment() {
     private var dragPointIndex = -1
     private var dragStartRunnable: Runnable? = null
     private var renderEditorJob: Job? = null
+    private var pendingDownloadRetryJob: Job? = null
 
     // Widget-free mode state (long-press on map → hide bars)
     private var isWidgetFreeMode = false
@@ -6095,16 +6102,38 @@ class MapFragment : Fragment() {
         flyToOfflineMapBounds(baseInfo.index)
     }
 
-    fun deleteOfflineArea(areaId: String) {
+    fun deleteOfflineArea(areaId: String, onDeleted: (() -> Unit)? = null) {
         val ctx = context ?: return
+        pendingDownloadRetryJob?.cancel()
+        pendingDownloadRetryJob = null
         if (TileDownloadManager.currentAreaId == areaId) {
             TileDownloadManager.stopDownload()
-            TileDownloadManager.currentAreaId = null
-            _binding?.downloadIndicator?.visibility = View.GONE
+            _binding?.downloadIndicator?.visibility = View.VISIBLE
+            _binding?.dlProgressText?.text = "Остановка..."
+            lifecycleScope.launch {
+                val stopped = withContext(Dispatchers.IO) { TileDownloadManager.awaitIdle() }
+                if (!stopped) {
+                    if (isAdded) {
+                        Toast.makeText(ctx, "Не удалось дождаться остановки загрузки", Toast.LENGTH_LONG).show()
+                    }
+                    return@launch
+                }
+                TileDownloadManager.clearSession()
+                OfflineAreasManager.deleteArea(ctx, areaId) { name ->
+                    if (isAdded) removeOfflineMapByName(name)
+                }
+                if (isAdded) {
+                    _binding?.downloadIndicator?.visibility = View.GONE
+                    syncOfflineAreaSources(areaId)
+                }
+                onDeleted?.invoke()
+            }
+            return
         }
         OfflineAreasManager.deleteArea(ctx, areaId) { name ->
             removeOfflineMapByName(name)
         }
+        onDeleted?.invoke()
     }
 
     fun restartOfflineAreaDownload(areaId: String, forceRedownload: Boolean): Boolean {
@@ -6124,12 +6153,15 @@ class MapFragment : Fragment() {
             Toast.makeText(ctx, "Не удалось собрать задачу загрузки", Toast.LENGTH_SHORT).show()
             return false
         }
-        val started = startTileDownload(ctx, task, areaId, cleanupOnFailure = false)
-        if (started) {
-            val msg = if (forceRedownload) "Обновление области начато" else "Продолжение загрузки начато"
-            Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+        when (startTileDownload(ctx, task, areaId, cleanupOnFailure = false)) {
+            DownloadLaunchResult.STARTED -> {
+                val msg = if (forceRedownload) "Обновление области начато" else "Продолжение загрузки начато"
+                Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                return true
+            }
+            DownloadLaunchResult.QUEUED -> return true
+            DownloadLaunchResult.FAILED -> return false
         }
-        return started
     }
 
     private fun clearOfflineAreaFiles(ctx: Context, area: OfflineAreasManager.OfflineArea) {
@@ -11519,7 +11551,7 @@ class MapFragment : Fragment() {
                 polygon = polygonPairs
             )
             OfflineAreasManager.saveArea(ctx, offlineArea)
-            if (!startTileDownload(ctx, task, offlineArea.id)) return@launch
+            if (startTileDownload(ctx, task, offlineArea.id) == DownloadLaunchResult.FAILED) return@launch
             polygonPicker?.stop()
             polygonPicker = null
             polygonSnackbar?.dismiss()
@@ -11911,11 +11943,17 @@ class MapFragment : Fragment() {
 
             val task = DownloadTask(mapName, layers, bounds, null, minZoom, maxZoom)
 
-            if (!startTileDownload(ctx, task)) return@setOnClickListener
+            val launchResult = startTileDownload(ctx, task)
+            if (launchResult == DownloadLaunchResult.FAILED) return@setOnClickListener
 
             removeDownloadRect()
             dialog.dismiss()
-            Toast.makeText(ctx, "Загрузка начата: $mapName", Toast.LENGTH_SHORT).show()
+            val message = if (launchResult == DownloadLaunchResult.QUEUED) {
+                "Загрузка поставлена в ожидание: $mapName"
+            } else {
+                "Загрузка начата: $mapName"
+            }
+            Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show()
         }
 
         dialog.setContentView(scroll)
@@ -11936,6 +11974,9 @@ class MapFragment : Fragment() {
         b.dlProgressText.text = counters
         if (!progress.isRunning) {
             b.dlProgressText.text = when {
+                progress.isStopping && progress.isPaused -> "Пауза..."
+                progress.isStopping && progress.wasCancelled -> "Остановка..."
+                progress.isStopping -> "Завершение..."
                 progress.isPaused -> "Пауза"
                 progress.wasCancelled -> "Остановлено"
                 progress.error != null -> "Ошибка"
@@ -11945,11 +11986,11 @@ class MapFragment : Fragment() {
         }
     }
 
-    private fun onDownloadComplete() {
+    private fun onDownloadComplete(snapshot: DownloadStateSnapshot) {
         val b = _binding ?: return
-        val progress = TileDownloadManager.getProgress()
-        val task = TileDownloadManager.lastTask
-        val areaId = TileDownloadManager.currentAreaId
+        val progress = snapshot.progress
+        val task = snapshot.task
+        val areaId = snapshot.areaId
         context?.let { ctx ->
             DiagnosticsCollector.logEvent(ctx, "DL complete: ${task?.name ?: "?"} ok=${progress.successfulTiles} fail=${progress.failedTiles} skip=${progress.skippedTiles} pause=${progress.isPaused} cancel=${progress.wasCancelled}")
             areaId?.let {
@@ -11981,7 +12022,6 @@ class MapFragment : Fragment() {
         }, 3000)
 
         if (progress.wasCancelled) {
-            TileDownloadManager.currentAreaId = null
             return
         }
 
@@ -12006,12 +12046,7 @@ class MapFragment : Fragment() {
                         }
                     }
                 }
-                val toastText = if (progress.error != null || progress.isPartial) {
-                    "Частично загружено: $displayName"
-                } else {
-                    "Загружено: $displayName"
-                }
-                Toast.makeText(context, toastText, Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Загружено: $displayName", Toast.LENGTH_LONG).show()
             } else {
                 Log.w("TileDownload", "Base layer file missing or empty: ${baseLayer.outputPath}")
                 val ctx2 = context
@@ -12023,63 +12058,154 @@ class MapFragment : Fragment() {
         } else {
             Toast.makeText(context, "Загрузка завершена", Toast.LENGTH_SHORT).show()
         }
-        TileDownloadManager.currentAreaId = null
+    }
+
+    private fun queueTileDownloadStartAfterStop(
+        ctx: Context,
+        task: DownloadTask,
+        areaId: String?,
+        cleanupOnFailure: Boolean
+    ): DownloadLaunchResult {
+        pendingDownloadRetryJob?.cancel()
+        pendingDownloadRetryJob = lifecycleScope.launch {
+            val stopped = withContext(Dispatchers.IO) { TileDownloadManager.awaitIdle() }
+            if (!stopped) {
+                if (cleanupOnFailure && areaId != null) {
+                    OfflineAreasManager.deleteArea(ctx, areaId) { name ->
+                        if (isAdded) removeOfflineMapByName(name)
+                    }
+                }
+                if (isAdded) {
+                    Toast.makeText(ctx, "Предыдущая загрузка не остановилась вовремя", Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            startTileDownload(
+                ctx = ctx,
+                task = task,
+                areaId = areaId,
+                cleanupOnFailure = cleanupOnFailure,
+                allowQueueWhileStopping = false
+            )
+        }
+        Toast.makeText(ctx, "Предыдущая загрузка завершается, новая стартует автоматически", Toast.LENGTH_SHORT).show()
+        return DownloadLaunchResult.QUEUED
+    }
+
+    private fun isSameDownloadTask(left: DownloadTask, right: DownloadTask?): Boolean {
+        return right != null &&
+            left.name == right.name &&
+            left.layers == right.layers &&
+            left.bounds == right.bounds &&
+            left.polygon == right.polygon &&
+            left.minZoom == right.minZoom &&
+            left.maxZoom == right.maxZoom
+    }
+
+    private fun canQueueAfterStop(
+        requestedTask: DownloadTask,
+        requestedAreaId: String?,
+        currentState: DownloadStateSnapshot
+    ): Boolean {
+        val progress = currentState.progress
+        if (!progress.isStopping) return false
+        if (progress.wasCancelled) return true
+        if (!progress.isPaused) return false
+        return when {
+            requestedAreaId != null && requestedAreaId == currentState.areaId -> true
+            else -> isSameDownloadTask(requestedTask, currentState.task)
+        }
     }
 
     private fun startTileDownload(
         ctx: Context,
         task: DownloadTask,
         areaId: String? = null,
-        cleanupOnFailure: Boolean = true
-    ): Boolean {
+        cleanupOnFailure: Boolean = true,
+        allowQueueWhileStopping: Boolean = true
+    ): DownloadLaunchResult {
         val diskError = TileDownloadManager.checkDiskSpace(ctx, task)
         if (diskError != null) {
             if (cleanupOnFailure && areaId != null) OfflineAreasManager.deleteArea(ctx, areaId)
             Toast.makeText(ctx, diskError, Toast.LENGTH_LONG).show()
-            return false
+            return DownloadLaunchResult.FAILED
         }
-        TileDownloadManager.tileSourcesRef = getTileSourceInfoMap()
-        TileDownloadManager.onProgressUpdate = { progress -> updateDownloadIndicator(progress) }
-        TileDownloadManager.onComplete = { onDownloadComplete() }
-        val started = TileDownloadManager.startDownload(ctx, task)
+        val sourceInfoMap = getTileSourceInfoMap()
+        TileDownloadManager.onProgressUpdate = { state -> updateDownloadIndicator(state.progress) }
+        TileDownloadManager.onComplete = { state -> onDownloadComplete(state) }
+        val started = TileDownloadManager.startDownload(ctx, task, areaId = areaId, sourceInfoMap = sourceInfoMap)
         if (!started) {
+            val currentState = TileDownloadManager.getStateSnapshot()
+            if (allowQueueWhileStopping && canQueueAfterStop(task, areaId, currentState)) {
+                return queueTileDownloadStartAfterStop(ctx, task, areaId, cleanupOnFailure)
+            }
             if (cleanupOnFailure && areaId != null) OfflineAreasManager.deleteArea(ctx, areaId)
-            Toast.makeText(ctx, "Загрузка уже выполняется", Toast.LENGTH_SHORT).show()
-            return false
+            val message = when {
+                currentState.progress.isStopping && currentState.progress.isPaused ->
+                    "Пауза ещё сохраняется, дождитесь завершения текущей паузы"
+                currentState.progress.isStopping ->
+                    "Предыдущая загрузка ещё останавливается"
+                else ->
+                    "Загрузка уже выполняется"
+            }
+            Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show()
+            return DownloadLaunchResult.FAILED
         }
-        TileDownloadManager.currentAreaId = areaId
+        pendingDownloadRetryJob?.cancel()
+        pendingDownloadRetryJob = null
         if (areaId != null) {
             OfflineAreasManager.markDownloading(ctx, areaId)
         }
         _binding?.downloadIndicator?.visibility = View.VISIBLE
-        return true
+        return DownloadLaunchResult.STARTED
     }
 
     private fun resumeTileDownload(ctx: Context) {
-        val areaId = TileDownloadManager.currentAreaId
+        val state = TileDownloadManager.getStateSnapshot()
+        val areaId = state.areaId
         if (areaId != null && restartOfflineAreaDownload(areaId, forceRedownload = false)) return
 
-        val task = TileDownloadManager.lastTask ?: run {
+        val task = state.task ?: run {
             Toast.makeText(ctx, "Нет сохранённой загрузки для продолжения", Toast.LENGTH_SHORT).show()
             return
         }
         startTileDownload(ctx, task, null, cleanupOnFailure = false)
     }
 
-    private fun cancelCurrentDownload(ctx: Context, task: DownloadTask) {
-        TileDownloadManager.stopDownload()
-        val area = TileDownloadManager.currentAreaId?.let { OfflineAreasManager.getAreaById(ctx, it) }
-            ?: OfflineAreasManager.loadAreas(ctx).find { it.name == task.name }
-        if (area != null) {
-            OfflineAreasManager.deleteArea(ctx, area.id) { name ->
-                removeOfflineMapByName(name)
-            }
-        } else {
-            cleanupDownloadTaskFiles(task)
+    private fun cancelCurrentDownload(ctx: Context, snapshot: DownloadStateSnapshot) {
+        val task = snapshot.task ?: run {
+            Toast.makeText(ctx, "Нет активной загрузки", Toast.LENGTH_SHORT).show()
+            return
         }
-        TileDownloadManager.currentAreaId = null
-        _binding?.downloadIndicator?.visibility = View.GONE
-        Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
+        pendingDownloadRetryJob?.cancel()
+        pendingDownloadRetryJob = null
+        TileDownloadManager.stopDownload()
+        val area = snapshot.areaId?.let { OfflineAreasManager.getAreaById(ctx, it) }
+            ?: OfflineAreasManager.loadAreas(ctx).find { it.name == task.name }
+        _binding?.downloadIndicator?.visibility = View.VISIBLE
+        _binding?.dlProgressText?.text = "Остановка..."
+        lifecycleScope.launch {
+            val stopped = withContext(Dispatchers.IO) { TileDownloadManager.awaitIdle() }
+            if (!stopped) {
+                if (isAdded) {
+                    Toast.makeText(ctx, "Не удалось дождаться остановки загрузки", Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            if (area != null) {
+                OfflineAreasManager.deleteArea(ctx, area.id) { name ->
+                    if (isAdded) removeOfflineMapByName(name)
+                }
+            } else {
+                cleanupDownloadTaskFiles(task)
+            }
+            TileDownloadManager.clearSession()
+            if (isAdded) {
+                _binding?.downloadIndicator?.visibility = View.GONE
+                syncOfflineAreaSources(snapshot.areaId)
+                Toast.makeText(ctx, "Загрузка отменена", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun cleanupDownloadTaskFiles(task: DownloadTask) {
@@ -12108,8 +12234,9 @@ class MapFragment : Fragment() {
 
     private fun showDownloadDetailsDialog() {
         val ctx = context ?: return
-        val progress = TileDownloadManager.getProgress()
-        val task = TileDownloadManager.lastTask ?: return
+        val state = TileDownloadManager.getStateSnapshot()
+        val progress = state.progress
+        val task = state.task ?: return
         val dp = resources.displayMetrics.density
 
         val root = android.widget.LinearLayout(ctx).apply {
@@ -12157,7 +12284,7 @@ class MapFragment : Fragment() {
                 maxOf(progress.downloadedTiles - idx * tilesPerLayer, 0),
                 tilesPerLayer
             )
-            val isCurrent = layer.layerLabel == progress.currentLayer && (progress.isRunning || progress.isPaused)
+            val isCurrent = layer.layerLabel == progress.currentLayer && (progress.isRunning || progress.isPaused || progress.isStopping)
             val isDone = layerDownloaded >= tilesPerLayer
             if (isDone) completedLayers++
             val icon = when {
@@ -12210,15 +12337,16 @@ class MapFragment : Fragment() {
                     Toast.makeText(ctx, "Загрузка поставлена на паузу", Toast.LENGTH_SHORT).show()
                 }
                 dlg.setNegativeButton("⏹ Отменить") { _, _ ->
-                    cancelCurrentDownload(ctx, task)
+                    cancelCurrentDownload(ctx, state)
                 }
             }
+            progress.isStopping -> Unit
             progress.isPaused || progress.error != null || progress.isPartial -> {
                 dlg.setPositiveButton("▶ Продолжить") { _, _ ->
                     resumeTileDownload(ctx)
                 }
                 dlg.setNegativeButton("⏹ Отменить") { _, _ ->
-                    cancelCurrentDownload(ctx, task)
+                    cancelCurrentDownload(ctx, state)
                 }
             }
         }

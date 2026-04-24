@@ -4450,8 +4450,9 @@ class SettingsFragment : Fragment() {
         val warningColor = themedColor(R.color.warning)
         val errorColor = themedColor(R.color.error)
         val density = resources.displayMetrics.density
-        val liveProgress = TileDownloadManager.getProgress()
-        val liveTaskName = TileDownloadManager.lastTask?.name
+        val liveState = TileDownloadManager.getStateSnapshot()
+        val liveProgress = liveState.progress
+        val liveTaskName = liveState.task?.name
 
         fun sectionTitle(text: String) {
             val tv = android.widget.TextView(requireContext()).apply {
@@ -4533,6 +4534,8 @@ class SettingsFragment : Fragment() {
                 }
                 val statusLabel = when {
                     liveTaskName == area.name && liveProgress.isRunning -> "Загрузка ${liveProgress.percent}%"
+                    liveTaskName == area.name && liveProgress.isStopping && liveProgress.isPaused -> "Пауза..."
+                    liveTaskName == area.name && liveProgress.isStopping -> "Остановка..."
                     liveTaskName == area.name && liveProgress.isPaused -> "Пауза ${liveProgress.percent}%"
                     area.status == "partial" -> "Частично"
                     area.status == "complete" -> "Готово"
@@ -4540,6 +4543,7 @@ class SettingsFragment : Fragment() {
                 }
                 val statusColor = when {
                     liveTaskName == area.name && liveProgress.isRunning -> palette.accent
+                    liveTaskName == area.name && liveProgress.isStopping -> warningColor
                     liveTaskName == area.name && liveProgress.isPaused -> warningColor
                     area.status == "partial" -> warningColor
                     area.status == "complete" -> successColor
@@ -4579,6 +4583,7 @@ class SettingsFragment : Fragment() {
                 })
                 when {
                     liveTaskName == area.name && liveProgress.isRunning -> Unit
+                    liveTaskName == area.name && liveProgress.isStopping -> Unit
                     liveTaskName == area.name && liveProgress.isPaused || area.status == "partial" || area.status == "paused" -> {
                         actions.addView(chip("Продолжить", palette.textPrimary, palette.surfaceOverlay) {
                             mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
@@ -4608,10 +4613,14 @@ class SettingsFragment : Fragment() {
                         .setTitle("Удалить область")
                         .setMessage("Удалить оффлайн-область \"${area.name}\" вместе со слоями?")
                         .setPositiveButton("Удалить") { _, _ ->
-                            OfflineAreasManager.deleteArea(ctx, area.id) { name ->
-                                mapFrag?.removeOfflineMapByName(name)
+                            if (mapFrag != null) {
+                                mapFrag.deleteOfflineArea(area.id) {
+                                    refreshOfflineMapsUI(view)
+                                }
+                            } else {
+                                OfflineAreasManager.deleteArea(ctx, area.id)
+                                refreshOfflineMapsUI(view)
                             }
-                            refreshOfflineMapsUI(view)
                         }
                         .setNegativeButton("Отмена", null)
                         .show()
@@ -4687,8 +4696,9 @@ class SettingsFragment : Fragment() {
         val ctx = requireContext()
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
         if (syncSources) mapFrag?.syncOfflineAreaSources()
-        val progress = TileDownloadManager.getProgress()
-        val activeAreaId = TileDownloadManager.currentAreaId
+        val state = TileDownloadManager.getStateSnapshot()
+        val progress = state.progress
+        val activeAreaId = state.areaId
         val areas = OfflineAreasManager.loadAreas(ctx).sortedWith(
             compareBy<OfflineAreasManager.OfflineArea> { statusPriority(it.status) }.thenByDescending { it.createdAt }
         )
@@ -4743,6 +4753,9 @@ class SettingsFragment : Fragment() {
                         refreshDownloadedAreasUI(view)
                     }
                 }
+                activeAreaId == area.id && progress.isStopping -> {
+                    configureAction(btnResume, false, "Остановка")
+                }
                 activeAreaId == area.id && progress.isPaused -> {
                     configureAction(btnResume, area.hasStoredGeometry(), "Продолжить") {
                         mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
@@ -4780,9 +4793,16 @@ class SettingsFragment : Fragment() {
                     .setTitle("Удалить область")
                     .setMessage("Удалить область \"${area.name}\" и её файлы?")
                     .setPositiveButton("Удалить") { _, _ ->
-                        mapFrag?.deleteOfflineArea(area.id)
-                        refreshDownloadedAreasUI(view)
-                        refreshOfflineMapsUI(view)
+                        if (mapFrag != null) {
+                            mapFrag.deleteOfflineArea(area.id) {
+                                refreshDownloadedAreasUI(view)
+                                refreshOfflineMapsUI(view)
+                            }
+                        } else {
+                            OfflineAreasManager.deleteArea(ctx, area.id)
+                            refreshDownloadedAreasUI(view)
+                            refreshOfflineMapsUI(view)
+                        }
                     }
                     .setNegativeButton("Отмена", null)
                     .show()
@@ -4822,6 +4842,8 @@ class SettingsFragment : Fragment() {
         }
         return when {
             progress.isRunning -> "загрузка$progressText"
+            progress.isStopping && progress.isPaused -> "ставим на паузу$progressText"
+            progress.isStopping -> "останавливается$progressText"
             progress.isPaused -> "пауза$progressText"
             progress.wasCancelled -> "остановлено$progressText"
             progress.error != null -> "ошибка$progressText"
@@ -4839,8 +4861,9 @@ class SettingsFragment : Fragment() {
                 val currentRoot = view
                 if (!isAdded || currentRoot !== rootView) return
 
-                val progress = TileDownloadManager.getProgress()
-                val areaId = TileDownloadManager.currentAreaId.orEmpty()
+                val state = TileDownloadManager.getStateSnapshot()
+                val progress = state.progress
+                val areaId = state.areaId.orEmpty()
                 val snapshot = listOf(
                     areaId,
                     progress.totalTiles,
@@ -4850,6 +4873,7 @@ class SettingsFragment : Fragment() {
                     progress.skippedTiles,
                     progress.percent,
                     progress.isRunning,
+                    progress.isStopping,
                     progress.isPaused,
                     progress.wasCancelled,
                     progress.error.orEmpty()

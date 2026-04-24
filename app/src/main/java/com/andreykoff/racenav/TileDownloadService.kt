@@ -37,10 +37,16 @@ class TileDownloadService : Service() {
         progressRunnable = object : Runnable {
             override fun run() {
                 val progress = TileDownloadManager.getProgress()
-                if (progress.isRunning) {
+                if (progress.isRunning || progress.isStopping) {
                     val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    val statusText = when {
+                        progress.isRunning -> "Загрузка: ${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+                        progress.isPaused -> "Пауза: сохраняю прогресс..."
+                        progress.wasCancelled -> "Остановка: завершаю загрузку..."
+                        else -> "Завершаю загрузку..."
+                    }
                     nm.notify(NOTIFICATION_ID, buildNotification(
-                        "Загрузка: ${progress.percent}% (${progress.downloadedTiles}/${progress.totalTiles})"
+                        statusText
                     ))
                     progressHandler?.postDelayed(this, 2000)
                 } else {

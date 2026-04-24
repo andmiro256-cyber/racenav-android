@@ -6,12 +6,11 @@ import android.net.wifi.WifiManager
 import android.os.PowerManager
 import android.os.StatFs
 import android.util.Log
-import kotlinx.coroutines.*
 import okhttp3.*
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.*
 
 data class DownloadTask(
@@ -43,6 +42,7 @@ data class DownloadProgress(
     val currentLayer: String,
     val bytesDownloaded: Long,
     val isRunning: Boolean,
+    val isStopping: Boolean,
     val isPaused: Boolean,
     val wasCancelled: Boolean,
     val error: String? = null
@@ -56,12 +56,31 @@ data class DownloadProgress(
     val isPartial: Boolean get() = failedTiles > 0 || skippedTiles > 0
 }
 
+data class DownloadStateSnapshot(
+    val sessionId: Long?,
+    val task: DownloadTask?,
+    val areaId: String?,
+    val progress: DownloadProgress
+)
+
 object TileDownloadManager {
 
-    private var job: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private data class DownloadSessionInfo(
+        val sessionId: Long,
+        val task: DownloadTask,
+        val areaId: String?,
+        val sourceInfoMap: Map<String, MapFragment.Companion.TileSourceInfo>?
+    )
 
-    var lastTask: DownloadTask? = null
+    private val stateLock = Any()
+    private val sessionCounter = AtomicLong(0L)
+    @Volatile
+    private var workerThread: Thread? = null
+    @Volatile
+    private var sessionInfo: DownloadSessionInfo? = null
+
+    val lastTask: DownloadTask?
+        get() = sessionInfo?.task
     val isDownloading = AtomicBoolean(false)
     val downloaded = AtomicInteger(0)
     val successful = AtomicInteger(0)
@@ -72,15 +91,13 @@ object TileDownloadManager {
     val paused = AtomicBoolean(false)
     val cancelled = AtomicBoolean(false)
     var currentLayerName = ""
-    var currentAreaId: String? = null
+    val currentAreaId: String?
+        get() = sessionInfo?.areaId
     var error: String? = null
 
     // Callbacks
-    var onProgressUpdate: ((DownloadProgress) -> Unit)? = null
-    var onComplete: (() -> Unit)? = null
-
-    // Tile sources reference — will be set from MapFragment
-    var tileSourcesRef: Map<String, MapFragment.Companion.TileSourceInfo>? = null
+    var onProgressUpdate: ((DownloadStateSnapshot) -> Unit)? = null
+    var onComplete: ((DownloadStateSnapshot) -> Unit)? = null
 
     private val client = OkHttpClient.Builder()
         .dispatcher(Dispatcher().apply {
@@ -119,6 +136,36 @@ object TileDownloadManager {
         wifiLock = null
     }
 
+    fun isStopping(): Boolean = !isDownloading.get() && (workerThread?.isAlive == true)
+
+    fun getStateSnapshot(): DownloadStateSnapshot = buildStateSnapshot()
+
+    fun awaitIdle(timeoutMs: Long = 20_000L): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val activeWorker = synchronized(stateLock) { workerThread }
+            if (activeWorker == null || !activeWorker.isAlive) {
+                return true
+            }
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) {
+                return false
+            }
+            try {
+                activeWorker.join(minOf(remaining, 250L))
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+    }
+
+    fun clearSession() {
+        synchronized(stateLock) {
+            sessionInfo = null
+        }
+    }
+
     fun estimateTiles(bounds: BoundsRect, minZoom: Int, maxZoom: Int): Int {
         var total = 0
         for (z in minZoom..maxZoom) {
@@ -150,10 +197,25 @@ object TileDownloadManager {
         return null
     }
 
-    fun startDownload(context: Context, task: DownloadTask): Boolean {
-        if (isDownloading.get()) return false
+    fun startDownload(
+        context: Context,
+        task: DownloadTask,
+        areaId: String? = null,
+        sourceInfoMap: Map<String, MapFragment.Companion.TileSourceInfo>? = null
+    ): Boolean {
+        synchronized(stateLock) {
+            if (isDownloading.get() || workerThread?.isAlive == true) return false
+        }
 
-        lastTask = task
+        val session = DownloadSessionInfo(
+            sessionId = sessionCounter.incrementAndGet(),
+            task = task,
+            areaId = areaId,
+            sourceInfoMap = sourceInfoMap?.toMap()
+        )
+        synchronized(stateLock) {
+            sessionInfo = session
+        }
         skippedLayers.clear()
         isDownloading.set(true)
         downloaded.set(0)
@@ -169,6 +231,7 @@ object TileDownloadManager {
         } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
         totalTiles.set(tilesPerLayer * task.layers.size)
         bytesTotal.set(0)
+        lastNotifyTime.set(0L)
         Log.d("TileDownload", "startDownload: ${task.layers.size} layers, $tilesPerLayer tiles/layer, zoom ${task.minZoom}-${task.maxZoom}")
 
         // Acquire WakeLock + WiFi lock
@@ -186,12 +249,19 @@ object TileDownloadManager {
             Log.w("TileDownload", "Failed to start ForegroundService: ${e.message}")
         }
 
-        Thread {
+        val worker = Thread {
             try {
                 for (layer in task.layers) {
                     if (!isDownloading.get()) break
                     currentLayerName = layer.layerLabel
-                    downloadLayerSync(context, layer, task.bounds, task.minZoom, task.maxZoom)
+                    downloadLayerSync(
+                        layer = layer,
+                        bounds = task.bounds,
+                        polygon = task.polygon,
+                        minZoom = task.minZoom,
+                        maxZoom = task.maxZoom,
+                        sourceInfoMap = session.sourceInfoMap
+                    )
                 }
             } catch (e: Exception) {
                 error = e.message
@@ -202,12 +272,25 @@ object TileDownloadManager {
                 releaseLocks()
                 // Stop foreground service
                 try { context.stopService(Intent(context, TileDownloadService::class.java)) } catch (_: Exception) {}
+                synchronized(stateLock) {
+                    if (workerThread === Thread.currentThread()) {
+                        workerThread = null
+                    }
+                    if (cancelled.get() && sessionInfo?.sessionId == session.sessionId) {
+                        sessionInfo = null
+                    }
+                }
+                val completionSnapshot = buildStateSnapshot(session)
+                notifyProgress(completionSnapshot)
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    notifyProgress()
-                    onComplete?.invoke()
+                    onComplete?.invoke(completionSnapshot)
                 }
             }
-        }.start()
+        }
+        synchronized(stateLock) {
+            workerThread = worker
+        }
+        worker.start()
         return true
     }
 
@@ -225,7 +308,7 @@ object TileDownloadManager {
         return count
     }
 
-    val skippedLayers = mutableSetOf<String>()
+    val skippedLayers = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     fun skipLayer(layerKey: String) {
         skippedLayers.add(layerKey)
@@ -235,8 +318,8 @@ object TileDownloadManager {
         paused.set(false)
         cancelled.set(true)
         isDownloading.set(false)
-        job?.cancel()
         client.dispatcher.cancelAll()
+        notifyProgress()
     }
 
     fun pauseDownload() {
@@ -244,11 +327,12 @@ object TileDownloadManager {
         paused.set(true)
         cancelled.set(false)
         isDownloading.set(false)
-        job?.cancel()
         client.dispatcher.cancelAll()
+        notifyProgress()
     }
 
     fun getProgress(): DownloadProgress {
+        val stopping = isStopping()
         return DownloadProgress(
             totalTiles = totalTiles.get(),
             downloadedTiles = downloaded.get(),
@@ -258,9 +342,19 @@ object TileDownloadManager {
             currentLayer = currentLayerName,
             bytesDownloaded = bytesTotal.get(),
             isRunning = isDownloading.get(),
+            isStopping = stopping,
             isPaused = paused.get(),
             wasCancelled = cancelled.get(),
             error = error
+        )
+    }
+
+    private fun buildStateSnapshot(session: DownloadSessionInfo? = sessionInfo): DownloadStateSnapshot {
+        return DownloadStateSnapshot(
+            sessionId = session?.sessionId,
+            task = session?.task,
+            areaId = session?.areaId,
+            progress = getProgress()
         )
     }
 
@@ -287,7 +381,14 @@ object TileDownloadManager {
         return (x.toDouble() + 0.5) / (1 shl z) * 360.0 - 180.0
     }
 
-    private fun downloadLayerSync(context: Context, layer: LayerDownload, bounds: BoundsRect, minZoom: Int, maxZoom: Int) {
+    private fun downloadLayerSync(
+        layer: LayerDownload,
+        bounds: BoundsRect,
+        polygon: List<Pair<Double, Double>>?,
+        minZoom: Int,
+        maxZoom: Int,
+        sourceInfoMap: Map<String, MapFragment.Companion.TileSourceInfo>?
+    ) {
         val dbFile = File(layer.outputPath)
         dbFile.parentFile?.mkdirs()
 
@@ -305,7 +406,6 @@ object TileDownloadManager {
             arrayOf("${bounds.west},${bounds.south},${bounds.east},${bounds.north}"))
 
         // Collect tiles (filtered by polygon if available)
-        val polygon = lastTask?.polygon
         val collectedTiles = mutableListOf<Triple<Int, Int, Int>>()
         for (z in minZoom..maxZoom) {
             val n = 1 shl z
@@ -331,7 +431,7 @@ object TileDownloadManager {
             return
         }
 
-        val sourceInfo = tileSourcesRef?.get(layer.layerKey)
+        val sourceInfo = sourceInfoMap?.get(layer.layerKey)
         Log.d("TileDownload", "downloadLayerSync: key='${layer.layerKey}', has sourceInfo=${sourceInfo != null}")
         if (sourceInfo == null) {
             db.close()
@@ -490,10 +590,9 @@ object TileDownloadManager {
         notifyProgress()
     }
 
-    private fun notifyProgress() {
-        val progress = getProgress()
+    private fun notifyProgress(snapshot: DownloadStateSnapshot = buildStateSnapshot()) {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            onProgressUpdate?.invoke(progress)
+            onProgressUpdate?.invoke(snapshot)
         }
     }
 
