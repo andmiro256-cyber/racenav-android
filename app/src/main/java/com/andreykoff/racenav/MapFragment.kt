@@ -2951,8 +2951,7 @@ class MapFragment : Fragment() {
                 )
             }
             MonitoringAttachmentType.TRACK -> {
-                val loaded = loadedTrackPoints.map { it.latitude to it.longitude }
-                    .filterNot { it.first == 0.0 && it.second == 0.0 }
+                val loaded = loadedTrackPairsForGpx()
                 val recorded = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
                 val trackPoints = if (loaded.isNotEmpty()) loaded else recorded
                 if (trackPoints.isEmpty()) return null
@@ -4454,6 +4453,10 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         if (loadedTrackPoints.isEmpty()) {
             Toast.makeText(ctx, "Нет загруженного трека", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (loadedTrackPoints.any { it == SEGMENT_BREAK }) {
+            Toast.makeText(ctx, "Редактор треков пока работает только с одним сегментом", Toast.LENGTH_LONG).show()
             return
         }
         TrackEditor.load(loadedTrackPoints.map { TrackEditor.TrackPoint(it.latitude, it.longitude) })
@@ -6361,6 +6364,22 @@ class MapFragment : Fragment() {
     }
 
     fun hasLoadedTrack() = loadedTrackPoints.any { it != SEGMENT_BREAK }
+    private fun loadedTrackPairsForGpx(): List<Pair<Double, Double>> {
+        fun isValidTrackCoordinate(lat: Double, lon: Double): Boolean {
+            if (lat.isNaN() || lon.isNaN() || lat.isInfinite() || lon.isInfinite()) return false
+            if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return false
+            return !(lat == 0.0 && lon == 0.0)
+        }
+        return loadedTrackPoints.mapNotNull { point ->
+            if (point == SEGMENT_BREAK) {
+                Double.NaN to Double.NaN
+            } else if (isValidTrackCoordinate(point.latitude, point.longitude)) {
+                point.latitude to point.longitude
+            } else {
+                null
+            }
+        }
+    }
     fun hasLoadedWaypoints() = waypoints.isNotEmpty()
 
     fun unlockScreen() {
@@ -6426,7 +6445,7 @@ class MapFragment : Fragment() {
                 // Add waypoint at current GPS position
                 val addCtx = context
                 if (addCtx != null && !LicenseManager.hasFullAccess(addCtx) && userMarkers.size >= LicenseManager.getMaxUserWaypoints(addCtx)) {
-                    Toast.makeText(addCtx, "Макс. ${LicenseManager.getMaxUserWaypoints(addCtx)} точек. Лицензия — info@trophynav.ru", Toast.LENGTH_LONG).show()
+                    Toast.makeText(addCtx, "Макс. ${LicenseManager.getMaxUserWaypoints(addCtx)} точек. Лицензия — ${LicenseManager.getContactEmail()}", Toast.LENGTH_LONG).show()
                 } else if (lastGpsLat != 0.0 || lastGpsLon != 0.0) {
                     val num = userMarkers.size + 1
                     val wpName = "WP%02d".format(num)
@@ -7508,7 +7527,8 @@ class MapFragment : Fragment() {
 
         // Count available data
         val routeWps = waypoints.toList()
-        val loadedTrk = loadedTrackPoints.map { Pair(it.latitude, it.longitude) }
+        val loadedTrk = loadedTrackPairsForGpx()
+        val loadedTrkRealCount = loadedTrk.count { !it.first.isNaN() && !it.second.isNaN() }
         val userPts = userMarkers.map { Waypoint(it.name, it.position.latitude, it.position.longitude, 0, color = it.color, symbol = it.symbol, proximity = it.proximity) }
         val recordedPts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
 
@@ -7519,9 +7539,9 @@ class MapFragment : Fragment() {
             buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
         }
         val cbTrack = android.widget.CheckBox(ctx).apply {
-            text = "Загруженный трек (${loadedTrk.size} точек)"
-            isChecked = loadedTrk.isNotEmpty(); isEnabled = loadedTrk.isNotEmpty()
-            setTextColor(if (loadedTrk.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
+            text = "Загруженный трек ($loadedTrkRealCount точек)"
+            isChecked = loadedTrkRealCount > 0; isEnabled = loadedTrkRealCount > 0
+            setTextColor(if (loadedTrkRealCount > 0) 0xFFFFFFFF.toInt() else 0xFF666666.toInt()); textSize = 13f
             buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
         }
         val cbRecorded = android.widget.CheckBox(ctx).apply {
@@ -7686,9 +7706,24 @@ class MapFragment : Fragment() {
             .setPositiveButton("Принять") { _, _ ->
                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     val gpx = GroupShareApi.downloadData(email, syncKey, entry.shareId)
+                    val attachmentType = MonitoringAttachmentType.fromCode(entry.type)
+                    val cachedAttachment = gpx?.let {
+                        MonitoringRepository.cacheAttachment(
+                            context = ctx,
+                            type = attachmentType,
+                            name = entry.name,
+                            payload = it,
+                            remoteId = entry.shareId
+                        )
+                    }
                     withContext(Dispatchers.Main) {
                         if (!isAdded || view == null) { onDismiss?.invoke(); return@withContext }
                         if (gpx != null) {
+                            if (cachedAttachment == null) {
+                                android.widget.Toast.makeText(context, "Не удалось сохранить вложение", android.widget.Toast.LENGTH_LONG).show()
+                                onDismiss?.invoke()
+                                return@withContext
+                            }
                             try {
                                 val result = GpxParser.parseGpxFull(gpx.byteInputStream())
                                 if (result.pointWaypoints.isNotEmpty()) {
@@ -9185,8 +9220,6 @@ class MapFragment : Fragment() {
                                 put("gpsSpd", "%.1f".format(loc.speed * 3.6))
                                 put("magHead", "%.0f".format(magneticHeading))
                                 put("effBear", "%.0f".format(effectiveBearing))
-                                put("lat", "%.6f".format(loc.latitude))
-                                put("lon", "%.6f".format(loc.longitude))
                             }
                             Analytics.sendEvent(ctx, "telemetry", extra)
                         }
@@ -9385,6 +9418,18 @@ class MapFragment : Fragment() {
             }
         } catch (_: Exception) {}
         Log.i("RaceNav", "LocationManager fallback started, interval=${intervalMs}ms")
+    }
+
+    private fun stopLocationManagerFallback(ctx: Context? = context) {
+        val listener = fallbackLocationListener ?: return
+        try {
+            val locMgr = ctx?.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+            locMgr?.removeUpdates(listener)
+        } catch (_: Exception) {
+        } finally {
+            fallbackLocationListener = null
+            usingFallbackGps = false
+        }
     }
 
     private fun toggleRecording() {
@@ -11177,6 +11222,55 @@ class MapFragment : Fragment() {
         }
     }
 
+    /** Push empty snapshot to wipe waypoints/tracks/routes on the server. Local data is untouched. */
+    fun syncWipeServer(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
+        val ctx = context ?: run { onResult(false, "Контекст недоступен"); return }
+        if (!LicenseManager.hasFullAccess(ctx)) { onResult(false, "Требуется лицензия"); return }
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val email = prefs.getString("sync_email", null)?.trim().orEmpty()
+        val useModernSync = email.isNotEmpty()
+        if (!useModernSync) { onResult(false, "Сначала укажите email"); return }
+
+        val payload = JSONObject()
+            .put("version", 1)
+            .put("waypoints", JSONArray())
+            .put("tracks", JSONArray())
+            .put("routes", JSONArray())
+            .put("waypointSets", JSONArray())
+            .put("activeSetId", 1)
+
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                    fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    val body = JSONObject()
+                        .put("data", payload)
+                        .put("deviceId", LicenseManager.getShortDeviceId(ctx))
+                        .put("deviceType", "android")
+                        .put("timestamp", fmt.format(java.util.Date()))
+                    val conn = java.net.URL("$SYNC_BASE_URL/api/sync/push").openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.setRequestProperty("X-Sync-Email", email)
+                    conn.setRequestProperty("X-Sync-Key", apiKey)
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
+                    conn.doOutput = true
+                    conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                    readSyncJson(conn)
+                }
+                withContext(Dispatchers.Main) {
+                    onResult(true, "Сервер очищен")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, "Ошибка: ${e.message}")
+                }
+            }
+        }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         if (requestCode == 100 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
@@ -12130,6 +12224,13 @@ class MapFragment : Fragment() {
             Toast.makeText(ctx, diskError, Toast.LENGTH_LONG).show()
             return DownloadLaunchResult.FAILED
         }
+        // Soft warning for large regions: surface size up-front so users can pause/resize
+        // before they realize the download will run for an hour.
+        val totalTiles = TileDownloadManager.estimateTotalTiles(task)
+        if (cleanupOnFailure && totalTiles > 100_000) {
+            val mb = TileDownloadManager.estimateMegabytes(task)
+            Toast.makeText(ctx, "Большой регион: ~$totalTiles тайлов, ~$mb МБ. Лучше уменьшить макс. зум.", Toast.LENGTH_LONG).show()
+        }
         val sourceInfoMap = getTileSourceInfoMap()
         TileDownloadManager.onProgressUpdate = { state -> updateDownloadIndicator(state.progress) }
         TileDownloadManager.onComplete = { state -> onDownloadComplete(state) }
@@ -12631,6 +12732,7 @@ class MapFragment : Fragment() {
         }
         activeLocationCallback = null
         locationEngine = null
+        stopLocationManagerFallback()
         locationTrackingStarted = false
         emergencyHandler.removeCallbacksAndMessages(null)
         emergencyRunnable = null

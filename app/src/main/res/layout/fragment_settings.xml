@@ -1636,14 +1636,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Сохранить текущий трек"
+                    android:text="Сохранить текущий трек в GPX"
                     android:textColor="#FFFFFF"
                     android:textSize="15sp" />
                 <Button
                     android:id="@+id/btnSaveTrack"
                     android:layout_width="wrap_content"
                     android:layout_height="40dp"
-                    android:text="💾 Сохранить"
+                    android:text="💾 GPX"
                     android:textSize="11sp"
                     android:minWidth="0dp"
                     android:paddingStart="12dp"
@@ -2370,12 +2370,22 @@
                     android:background="#888888" />
                 <TextView
                     android:id="@+id/txtTraccarStatus"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:text="Статус: выключен"
                     android:textColor="#888888"
                     android:textSize="12sp"
                     android:layout_marginStart="8dp" />
+                <Button
+                    android:id="@+id/btnTraccarSendNow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:text="Отправить"
+                    android:textSize="10sp"
+                    android:minWidth="0dp"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp" />
             </LinearLayout>
 
             <!-- Show other users on map -->
@@ -2674,6 +2684,18 @@
                     android:textAllCaps="false"
                     android:layout_marginTop="6dp" />
 
+                <Button
+                    android:id="@+id/btnSyncWipe"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="36dp"
+                    android:text="🗑 Очистить данные на сервере"
+                    android:textSize="12sp"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#5D4037"
+                    android:textAllCaps="false"
+                    android:layout_marginTop="6dp" />
+
                 <TextView
                     android:id="@+id/txtSyncStatus"
                     android:layout_width="match_parent"
@@ -2966,7 +2988,7 @@
                     android:id="@+id/txtContactEmail"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="info@trophynav.ru"
+                    android:text=""
                     android:textColor="#FF6F00"
                     android:textSize="14sp"
                     android:layout_marginTop="6dp"

@@ -1579,18 +1579,33 @@ class SettingsFragment : Fragment() {
                         .setTitle("Перенести карты?")
                         .setMessage("Оффлайн-карты будут перенесены в новое хранилище:\n${selected.dir.absolutePath}")
                         .setPositiveButton("Перенести") { _, _ ->
+                            val cancelRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+                            var migrationJob: kotlinx.coroutines.Job? = null
                             val progress = androidx.appcompat.app.AlertDialog.Builder(ctx)
                                 .setTitle("Перенос карт")
+                                .setMessage("Копируем офлайн-карты. Можно отменить между файлами.")
                                 .setView(android.widget.ProgressBar(ctx).apply { isIndeterminate = true })
-                                .setCancelable(false)
+                                .setNegativeButton("Отмена", null)
+                                .setCancelable(true)
                                 .create()
+                            progress.setOnShowListener {
+                                progress.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setOnClickListener {
+                                    cancelRequested.set(true)
+                                    migrationJob?.cancel()
+                                    Toast.makeText(ctx, "Отмена переноса...", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            progress.setOnCancelListener {
+                                cancelRequested.set(true)
+                                migrationJob?.cancel()
+                            }
                             progress.show()
                             parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                                 ?.prepareOfflineMapsForMigration()
-                            viewLifecycleOwner.lifecycleScope.launch {
+                            migrationJob = viewLifecycleOwner.lifecycleScope.launch {
                                 try {
                                     val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                        MapStorageManager.migrateToTarget(ctx, selected.id)
+                                        MapStorageManager.migrateToTarget(ctx, selected.id) { cancelRequested.get() }
                                     }
                                     parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                                         ?.reloadOfflineMapsFromStorage()
@@ -1602,6 +1617,13 @@ class SettingsFragment : Fragment() {
                                         "Карты перенесены: ${result.movedFiles} файлов",
                                         Toast.LENGTH_LONG
                                     ).show()
+                                } catch (e: java.util.concurrent.CancellationException) {
+                                    parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                                        ?.reloadOfflineMapsFromStorage()
+                                    refreshDownloadedAreasUI(view)
+                                    refreshOfflineMapsUI(view)
+                                    updateOfflineMapStorageUi()
+                                    Toast.makeText(ctx, "Перенос карт отменён", Toast.LENGTH_LONG).show()
                                 } catch (e: Exception) {
                                     parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                                         ?.reloadOfflineMapsFromStorage()
@@ -1702,6 +1724,7 @@ class SettingsFragment : Fragment() {
         val txtSyncKeyToggle = view.findViewById<TextView>(R.id.txtSyncKeyToggle)
         val btnSyncPull = view.findViewById<android.widget.Button>(R.id.btnSyncPull)
         val btnSyncPush = view.findViewById<android.widget.Button>(R.id.btnSyncPush)
+        val btnSyncWipe = view.findViewById<android.widget.Button>(R.id.btnSyncWipe)
         val txtSyncStatus = view.findViewById<TextView>(R.id.txtSyncStatus)
         val txtSyncDataInfo = view.findViewById<TextView>(R.id.txtSyncDataInfo)
         val txtSyncLastTime = view.findViewById<TextView>(R.id.txtSyncLastTime)
@@ -1723,7 +1746,7 @@ class SettingsFragment : Fragment() {
             editSyncEmail.isEnabled = false
             btnSaveEmail?.visibility = View.GONE
             txtEmailWarning?.visibility = View.GONE
-            txtAccountStatus.text = "Изменить email → поддержка info@trophynav.ru"
+            txtAccountStatus.text = "Изменить email → поддержка ${LicenseManager.getContactEmail()}"
             txtAccountStatus.setTextColor(0xFF888888.toInt())
             txtAccountStatus.visibility = View.VISIBLE
         } else {
@@ -1754,7 +1777,7 @@ class SettingsFragment : Fragment() {
                     editSyncEmail.isEnabled = false
                     btnSaveEmail.visibility = View.GONE
                     txtEmailWarning?.visibility = View.GONE
-                    txtAccountStatus.text = "Изменить email → поддержка info@trophynav.ru"
+                    txtAccountStatus.text = "Изменить email → поддержка ${LicenseManager.getContactEmail()}"
                     txtAccountStatus.setTextColor(0xFF888888.toInt())
                     txtAccountStatus.visibility = View.VISIBLE
                     // Register email on server + get sync key
@@ -1918,6 +1941,7 @@ class SettingsFragment : Fragment() {
             txtSyncStatus.visibility = View.VISIBLE
             btnSyncPull.isEnabled = true
             btnSyncPush.isEnabled = true
+            btnSyncWipe.isEnabled = true
             if (ok) prefs.edit().putLong("last_sync_time", System.currentTimeMillis()).apply()
         }
 
@@ -1946,7 +1970,7 @@ class SettingsFragment : Fragment() {
                     Toast.makeText(requireContext(), "Введите email или ключ", Toast.LENGTH_SHORT).show()
                     return@getSyncKey
                 }
-                btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false
+                btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false; btnSyncWipe.isEnabled = false
                 txtSyncStatus.text = "Отправляю трек..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
                 val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                 if (mf != null) {
@@ -1955,6 +1979,31 @@ class SettingsFragment : Fragment() {
                     setSyncStatus(false, "Откройте карту и попробуйте снова")
                 }
             }
+        }
+
+        btnSyncWipe.setOnClickListener {
+            if (!LicenseManager.hasFullAccess(requireContext())) { LicenseManager.showLicenseRequired(requireContext()); return@setOnClickListener }
+            android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Очистить данные на сервере?")
+                .setMessage("Все точки, треки и маршруты будут удалены с сервера для этого аккаунта. Локальные данные на устройстве не изменятся. Продолжить?")
+                .setPositiveButton("Очистить") { _, _ ->
+                    getSyncKey { key ->
+                        if (key.isNullOrEmpty()) {
+                            Toast.makeText(requireContext(), "Введите email или ключ", Toast.LENGTH_SHORT).show()
+                            return@getSyncKey
+                        }
+                        btnSyncPull.isEnabled = false; btnSyncPush.isEnabled = false; btnSyncWipe.isEnabled = false
+                        txtSyncStatus.text = "Очищаю сервер..."; txtSyncStatus.setTextColor(0xFF888888.toInt()); txtSyncStatus.visibility = View.VISIBLE
+                        val mf = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                        if (mf != null) {
+                            mf.syncWipeServer(key) { ok, msg -> setSyncStatus(ok, msg) }
+                        } else {
+                            setSyncStatus(false, "Откройте карту и попробуйте снова")
+                        }
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
         }
 
         // ── Backup ── (uses shared email from Account block)
@@ -2010,6 +2059,7 @@ class SettingsFragment : Fragment() {
         val txtTraccarDeviceName = view.findViewById<TextView>(R.id.txtTraccarDeviceName)
         val txtTraccarStatus = view.findViewById<TextView>(R.id.txtTraccarStatus)
         val viewTraccarStatusDot = view.findViewById<View>(R.id.viewTraccarStatusDot)
+        val btnTraccarSendNow = view.findViewById<android.widget.Button>(R.id.btnTraccarSendNow)
 
         // Auto-assign server URL and Device ID if not set
         if (prefs.getString(MapFragment.PREF_TRACCAR_URL, "").isNullOrBlank()) {
@@ -2059,17 +2109,66 @@ class SettingsFragment : Fragment() {
 
         // Update status indicator
         fun updateTraccarStatus() {
+            val enabledNow = prefs.getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
+            val hasAccess = LicenseManager.hasFullAccess(requireContext())
+            val baseText: String
             if (TraccarService.isRunning) {
                 viewTraccarStatusDot.setBackgroundColor(0xFF4CAF50.toInt())
-                txtTraccarStatus.text = "Статус: активен"
+                baseText = "Статус: активен"
+                txtTraccarStatus.text = baseText
                 txtTraccarStatus.setTextColor(0xFF4CAF50.toInt())
             } else {
                 viewTraccarStatusDot.setBackgroundColor(0xFF888888.toInt())
-                txtTraccarStatus.text = "Статус: выключен"
+                baseText = "Статус: выключен"
+                txtTraccarStatus.text = baseText
                 txtTraccarStatus.setTextColor(0xFF888888.toInt())
+            }
+            btnTraccarSendNow.isEnabled = enabledNow && hasAccess
+            val appContext = requireContext().applicationContext
+            viewLifecycleOwner.lifecycleScope.launch {
+                val pendingCount = withContext(Dispatchers.IO) {
+                    val db = TraccarLocationDb(appContext)
+                    try {
+                        db.unsentCount()
+                    } finally {
+                        db.close()
+                    }
+                }
+                if (!isAdded) return@launch
+                txtTraccarStatus.text = if (pendingCount > 0) {
+                    "$baseText · ожидают $pendingCount"
+                } else {
+                    baseText
+                }
+                btnTraccarSendNow.isEnabled = enabledNow && hasAccess && pendingCount > 0
             }
         }
         updateTraccarStatus()
+
+        btnTraccarSendNow.setOnClickListener {
+            val ctx = requireContext()
+            val enabled = prefs.getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
+            if (!enabled) {
+                Toast.makeText(ctx, "Сначала включите отправку на сервер", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (!LicenseManager.hasFullAccess(ctx)) {
+                LicenseManager.showLicenseRequired(ctx)
+                updateTraccarStatus()
+                return@setOnClickListener
+            }
+            if (!TraccarService.isRunning) {
+                ctx.startForegroundService(
+                    android.content.Intent(ctx, TraccarService::class.java).apply {
+                        action = TraccarService.ACTION_START
+                    }
+                )
+                Toast.makeText(ctx, "Отправка запущена", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(ctx, "Отправка идёт автоматически", Toast.LENGTH_SHORT).show()
+            }
+            view.postDelayed({ updateTraccarStatus() }, 700)
+        }
 
         // Toggle starts/stops TraccarService
         switchTraccar.setOnCheckedChangeListener { _, checked ->
@@ -2792,10 +2891,19 @@ class SettingsFragment : Fragment() {
             txtDevId.text = "ID: $deviceId"
 
             view.findViewById<TextView>(R.id.txtVersion).text = "Trophy Navigator v$v\n© Andrey Mironchik"
+            view.findViewById<TextView>(R.id.txtContactEmail).apply {
+                text = LicenseManager.getContactEmail()
+                setOnClickListener {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SENDTO).apply {
+                        data = android.net.Uri.parse("mailto:${LicenseManager.getContactEmail()}")
+                    }
+                    try { startActivity(intent) } catch (_: Exception) {}
+                }
+            }
             view.findViewById<TextView>(R.id.txtAboutFeatures).text = listOf(
                 "• Оффлайн и онлайн карты с кешированием",
-                "• Запись и экспорт треков (GPX/PLT/KML)",
-                "• Загрузка маршрутов и точек (GPX/PLT/KML/RTE)",
+                "• Запись треков и экспорт в GPX",
+                "• Импорт точек, маршрутов и треков (GPX/WPT/RTE/PLT)",
                 "• Навигация по маршруту и к отдельным точкам",
                 "• Установка точек на карте с редактированием",
                 "• Настраиваемые виджеты скорости, высоты, курса",

@@ -18,6 +18,9 @@ fun secretProperty(name: String): String? {
         ?: System.getenv(name)
 }
 
+val appVersionCode = secretProperty("RACENAV_VERSION_CODE")?.toIntOrNull() ?: 391
+val appVersionName = secretProperty("RACENAV_VERSION_NAME") ?: "2.9.86"
+
 val releaseStoreFile = secretProperty("RACENAV_STORE_FILE")
     ?: secretProperty("KEYSTORE_PATH")
     ?: "${rootProject.projectDir}/racenav.keystore"
@@ -50,8 +53,8 @@ android {
         applicationId = "com.andreykoff.racenav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 390
-        versionName = "2.9.85"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     signingConfigs {

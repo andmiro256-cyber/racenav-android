@@ -74,6 +74,8 @@ object TileDownloadManager {
 
     private val stateLock = Any()
     private val sessionCounter = AtomicLong(0L)
+    private val MAX_IN_FLIGHT = 256
+    private val BYTES_PER_TILE_ESTIMATE = 50_000L
     @Volatile
     private var workerThread: Thread? = null
     @Volatile
@@ -184,7 +186,7 @@ object TileDownloadManager {
         val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
             countPolygonTiles(task)
         } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
-        val estimatedBytes = tilesPerLayer.toLong() * task.layers.size * 25_000L // ~25KB per tile avg
+        val estimatedBytes = tilesPerLayer.toLong() * task.layers.size * BYTES_PER_TILE_ESTIMATE
         val mapsDir = task.layers.firstOrNull()?.let { File(it.outputPath).parentFile }?.also { it.mkdirs() }
             ?: MapStorageManager.getMapsDir(context)
         val stat = StatFs(mapsDir.absolutePath)
@@ -195,6 +197,19 @@ object TileDownloadManager {
             return "Недостаточно места: нужно ~${needMB} МБ, доступно ${freeMB} МБ"
         }
         return null
+    }
+
+    /** Returns total tile count across all layers — used for size warnings. */
+    fun estimateTotalTiles(task: DownloadTask): Int {
+        val tilesPerLayer = if (task.polygon != null && task.polygon.size >= 3) {
+            countPolygonTiles(task)
+        } else estimateTiles(task.bounds, task.minZoom, task.maxZoom)
+        return tilesPerLayer * task.layers.size
+    }
+
+    /** Returns estimated download size in MB. */
+    fun estimateMegabytes(task: DownloadTask): Long {
+        return estimateTotalTiles(task).toLong() * BYTES_PER_TILE_ESTIMATE / 1_048_576L
     }
 
     fun startDownload(
@@ -397,6 +412,9 @@ object TileDownloadManager {
         db.rawQuery("PRAGMA cache_size=-8192", null).close()
         db.rawQuery("PRAGMA synchronous=NORMAL", null).close()
         db.execSQL("CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB, PRIMARY KEY (zoom_level, tile_column, tile_row))")
+        // Per-stripe resume scans by (zoom_level, tile_row); the primary key starts with zoom_level/tile_column,
+        // so we need a dedicated index to avoid full scans during downloads of large regions.
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_tiles_zoom_row ON tiles(zoom_level, tile_row)")
         db.execSQL("CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT)")
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('name', ?)", arrayOf(layer.layerLabel))
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('format', 'png')")
@@ -405,26 +423,11 @@ object TileDownloadManager {
         db.execSQL("INSERT OR REPLACE INTO metadata VALUES ('bounds', ?)",
             arrayOf("${bounds.west},${bounds.south},${bounds.east},${bounds.north}"))
 
-        // Collect tiles (filtered by polygon if available)
-        val collectedTiles = mutableListOf<Triple<Int, Int, Int>>()
-        for (z in minZoom..maxZoom) {
-            val n = 1 shl z
-            for (x in lonToTileX(bounds.west, n)..lonToTileX(bounds.east, n)) {
-                for (y in latToTileY(bounds.north, n)..latToTileY(bounds.south, n)) {
-                    if (polygon != null && polygon.size >= 3) {
-                        val centerLat = tileCenterLat(y, z)
-                        val centerLon = tileCenterLon(x, z)
-                        if (!pointInPolygon(centerLat, centerLon, polygon)) continue
-                    }
-                    collectedTiles.add(Triple(x, y, z))
-                }
-            }
-        }
-
         if (layer.layerKey in skippedLayers) {
             Log.d("TileDownload", "Skipping layer: ${layer.layerKey}")
-            skipped.addAndGet(collectedTiles.size)
-            downloaded.addAndGet(collectedTiles.size)
+            val skipCount = countTilesIn(bounds, polygon, minZoom, maxZoom)
+            skipped.addAndGet(skipCount)
+            downloaded.addAndGet(skipCount)
             db.close()
             dbFile.delete()
             notifyProgressThrottled()
@@ -439,36 +442,11 @@ object TileDownloadManager {
             throw IllegalStateException("Не найден источник слоя ${layer.layerLabel}")
         }
 
-        val existingTiles = mutableSetOf<Triple<Int, Int, Int>>()
-        try {
-            db.rawQuery("SELECT zoom_level, tile_column, tile_row FROM tiles", null).use { c ->
-                while (c.moveToNext()) {
-                    existingTiles.add(Triple(c.getInt(0), c.getInt(1), c.getInt(2)))
-                }
-            }
-        } catch (_: Exception) {}
-        if (existingTiles.isNotEmpty()) {
-            Log.d("TileDownload", "Resume: ${existingTiles.size} tiles already in DB, filtering")
-        }
-        val alreadyDownloaded = collectedTiles.count { (x, y, z) ->
-            Triple(z, x, (1 shl z) - 1 - y) in existingTiles
-        }
-        val tiles = collectedTiles.filterNot { (x, y, z) ->
-            Triple(z, x, (1 shl z) - 1 - y) in existingTiles
-        }
-        if (alreadyDownloaded > 0) {
-            successful.addAndGet(alreadyDownloaded)
-            downloaded.addAndGet(alreadyDownloaded)
-            notifyProgressThrottled()
-        }
-
-        Log.d("TileDownload", "downloadLayerSync: ${tiles.size} tiles for ${layer.layerKey}")
-
-        // Download tiles using thread pool
+        // Bounded concurrency: at most MAX_IN_FLIGHT pending HTTP requests + queued executor tasks.
+        // Prevents OOM on large regions where collected tile lists used to exceed millions of entries.
         val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
-        val latch = java.util.concurrent.CountDownLatch(tiles.size)
+        val inFlight = java.util.concurrent.Semaphore(MAX_IN_FLIGHT)
 
-        // Batch insert buffer
         val insertBuffer = java.util.Collections.synchronizedList(mutableListOf<Triple<Triple<Int, Int, Int>, ByteArray, Int>>())
         val BATCH_SIZE = 200
 
@@ -498,87 +476,195 @@ object TileDownloadManager {
             }
         }
 
-        for ((x, y, z) in tiles) {
-            if (!isDownloading.get()) { latch.countDown(); continue }
-            executor.submit {
-                var tileOk = false
-                try {
-                    val url = buildTileUrl(sourceInfo, x, y, z)
-                    if (url == null) {
-                        Log.w("TileDownload", "Tile URL missing: z=$z x=$x y=$y layer=${layer.layerKey}")
-                        return@submit
-                    }
+        // Stream tiles by zoom level and y-stripe. Each stripe owns a small in-memory list,
+        // so total RAM is O(stripe width) instead of O(total tiles).
+        zoomLoop@ for (z in minZoom..maxZoom) {
+            if (!isDownloading.get()) break
+            val n = 1 shl z
+            val xMin = lonToTileX(bounds.west, n)
+            val xMax = lonToTileX(bounds.east, n)
+            val yMin = latToTileY(bounds.north, n)
+            val yMax = latToTileY(bounds.south, n)
 
-                    // Retry with progressive backoff: 1s -> 5s -> 30s
-                    val retryDelaysMs = longArrayOf(1_000L, 5_000L, 30_000L)
-                    var lastError: Exception? = null
-                    for (attempt in 0..retryDelaysMs.size) {
-                        if (!isDownloading.get()) break
+            for (y in yMin..yMax) {
+                if (!isDownloading.get()) break@zoomLoop
+
+                val tmsY = (1 shl z) - 1 - y
+                // Existing tile_columns for this stripe: small, bounded by (xMax-xMin+1).
+                val existingX = HashSet<Int>()
+                try {
+                    db.rawQuery(
+                        "SELECT tile_column FROM tiles WHERE zoom_level=? AND tile_row=?",
+                        arrayOf(z.toString(), tmsY.toString())
+                    ).use { c -> while (c.moveToNext()) existingX.add(c.getInt(0)) }
+                } catch (_: Exception) {}
+
+                val stripeTiles = ArrayList<Triple<Int, Int, Int>>()
+                var stripeAlreadyDone = 0
+                for (x in xMin..xMax) {
+                    if (polygon != null && polygon.size >= 3) {
+                        val centerLat = tileCenterLat(y, z)
+                        val centerLon = tileCenterLon(x, z)
+                        if (!pointInPolygon(centerLat, centerLon, polygon)) continue
+                    }
+                    if (x in existingX) {
+                        stripeAlreadyDone++
+                        continue
+                    }
+                    stripeTiles.add(Triple(x, y, z))
+                }
+                if (stripeAlreadyDone > 0) {
+                    successful.addAndGet(stripeAlreadyDone)
+                    downloaded.addAndGet(stripeAlreadyDone)
+                    notifyProgressThrottled()
+                }
+                if (stripeTiles.isEmpty()) continue
+
+                val stripeLatch = java.util.concurrent.CountDownLatch(stripeTiles.size)
+                for ((tx, ty, tz) in stripeTiles) {
+                    if (!isDownloading.get()) {
+                        // Drain remaining counts so the latch can release without leaking tasks.
+                        stripeLatch.countDown()
+                        continue
+                    }
+                    try {
+                        inFlight.acquire()
+                    } catch (_: InterruptedException) {
+                        stripeLatch.countDown()
+                        continue
+                    }
+                    executor.submit {
+                        var tileOk = false
                         try {
-                            val request = Request.Builder().url(url)
-                                .header("User-Agent", "RaceNav/2.1 Android")
-                                .build()
-                            val response = client.newCall(request).execute()
-                            response.use { resp ->
-                                if (resp.isSuccessful) {
-                                    val contentType = resp.body?.contentType()?.toString()
-                                        ?: resp.header("Content-Type").orEmpty()
-                                    val bytes = resp.body?.bytes()
-                                    if (bytes != null && bytes.isNotEmpty() && isSupportedRasterTile(bytes)) {
-                                        val tmsY = (1 shl z) - 1 - y
-                                        insertBuffer.add(Triple(Triple(x, y, z), bytes, tmsY))
-                                        bytesTotal.addAndGet(bytes.size.toLong())
-                                        if (insertBuffer.size >= BATCH_SIZE) flushBatch()
-                                        tileOk = true
-                                        lastError = null
-                                    } else {
-                                        lastError = IllegalStateException(
-                                            if (bytes == null || bytes.isEmpty()) {
-                                                "Empty tile body"
+                            val url = buildTileUrl(sourceInfo, tx, ty, tz)
+                            if (url == null) {
+                                Log.w("TileDownload", "Tile URL missing: z=$tz x=$tx y=$ty layer=${layer.layerKey}")
+                                return@submit
+                            }
+
+                            val retryDelaysMs = longArrayOf(1_000L, 5_000L, 30_000L)
+                            var lastError: Exception? = null
+                            for (attempt in 0..retryDelaysMs.size) {
+                                if (!isDownloading.get()) break
+                                try {
+                                    val request = Request.Builder().url(url)
+                                        .header("User-Agent", "RaceNav/2.1 Android")
+                                        .build()
+                                    val response = client.newCall(request).execute()
+                                    response.use { resp ->
+                                        if (resp.isSuccessful) {
+                                            val contentType = resp.body?.contentType()?.toString()
+                                                ?: resp.header("Content-Type").orEmpty()
+                                            val bytes = resp.body?.bytes()
+                                            if (bytes != null && bytes.isNotEmpty() && isSupportedRasterTile(bytes)) {
+                                                val rowTms = (1 shl tz) - 1 - ty
+                                                insertBuffer.add(Triple(Triple(tx, ty, tz), bytes, rowTms))
+                                                bytesTotal.addAndGet(bytes.size.toLong())
+                                                if (insertBuffer.size >= BATCH_SIZE) flushBatch()
+                                                tileOk = true
+                                                lastError = null
                                             } else {
-                                                "Unsupported tile body (${contentType.ifBlank { "unknown" }})"
+                                                lastError = IllegalStateException(
+                                                    if (bytes == null || bytes.isEmpty()) {
+                                                        "Empty tile body"
+                                                    } else {
+                                                        "Unsupported tile body (${contentType.ifBlank { "unknown" }})"
+                                                    }
+                                                )
                                             }
-                                        )
+                                        } else {
+                                            lastError = IllegalStateException("HTTP ${resp.code}")
+                                        }
                                     }
-                                } else {
-                                    lastError = IllegalStateException("HTTP ${resp.code}")
+                                    if (tileOk) break
+                                } catch (e: Exception) {
+                                    lastError = e
+                                }
+                                if (attempt < retryDelaysMs.size && !tileOk && isDownloading.get()) {
+                                    Thread.sleep(retryDelaysMs[attempt])
                                 }
                             }
-                            if (tileOk) break
+                            if (lastError != null) {
+                                Log.w("TileDownload", "Tile fail after retries: z=$tz x=$tx y=$ty: $lastError")
+                            }
                         } catch (e: Exception) {
-                            lastError = e
+                            Log.w("TileDownload", "Tile fail: $e")
+                        } finally {
+                            val interrupted = !tileOk && (paused.get() || cancelled.get())
+                            if (tileOk) {
+                                successful.incrementAndGet()
+                                downloaded.incrementAndGet()
+                            } else if (!interrupted) {
+                                failed.incrementAndGet()
+                                downloaded.incrementAndGet()
+                            }
+                            notifyProgressThrottled()
+                            inFlight.release()
+                            stripeLatch.countDown()
                         }
-                        if (attempt < retryDelaysMs.size && !tileOk && isDownloading.get()) {
-                            Thread.sleep(retryDelaysMs[attempt])
-                        }
                     }
-                    if (lastError != null) {
-                        Log.w("TileDownload", "Tile fail after retries: z=$z x=$x y=$y: $lastError")
-                    }
-                } catch (e: Exception) {
-                    Log.w("TileDownload", "Tile fail: $e")
-                } finally {
-                    val interrupted = !tileOk && (paused.get() || cancelled.get())
-                    if (tileOk) {
-                        successful.incrementAndGet()
-                        downloaded.incrementAndGet()
-                    } else if (!interrupted) {
-                        failed.incrementAndGet()
-                        downloaded.incrementAndGet()
-                    }
-                    notifyProgressThrottled()
-                    latch.countDown()
+                }
+                stripeLatch.await()
+                // Periodic flush keeps the insert buffer (and SQLite WAL) bounded.
+                flushBatch()
+            }
+        }
+
+        // After pause/cancel HTTP is already aborted via client.dispatcher.cancelAll(); drop queued tasks
+        // immediately so the worker exits quickly enough for awaitIdle()'s 20s window in MapFragment.
+        // On normal completion we let in-flight finishes drain within 15s — also under awaitIdle's budget.
+        if (paused.get() || cancelled.get()) {
+            executor.shutdownNow()
+        } else {
+            executor.shutdown()
+            try { executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) {}
+        }
+        flushBatch()
+
+        // Final integrity check: if download was not paused/cancelled but DB has fewer tiles
+        // than expected, surface an explicit error instead of silently reporting success.
+        if (!paused.get() && !cancelled.get()) {
+            val expected = countTilesIn(bounds, polygon, minZoom, maxZoom)
+            val actual = try {
+                db.rawQuery("SELECT COUNT(*) FROM tiles", null).use { c ->
+                    if (c.moveToFirst()) c.getInt(0) else 0
+                }
+            } catch (_: Exception) { -1 }
+            if (actual in 0 until expected) {
+                val missing = expected - actual
+                Log.w("TileDownload", "Layer ${layer.layerKey} incomplete: $actual / $expected (missing $missing)")
+                if (error == null) {
+                    error = "Скачивание неполное: $actual из $expected тайлов. Нажмите Resume."
                 }
             }
         }
 
-        // Wait for ALL tiles to complete
-        latch.await()
-        executor.shutdown()
-        // Flush remaining batch
-        flushBatch()
         db.close()
         Log.d("TileDownload", "downloadLayerSync DONE: ${layer.layerKey}, file size=${dbFile.length()}")
+    }
+
+    /** Tile count for a rectangular region (optionally clipped by polygon) across a zoom range. */
+    private fun countTilesIn(
+        bounds: BoundsRect,
+        polygon: List<Pair<Double, Double>>?,
+        minZoom: Int,
+        maxZoom: Int
+    ): Int {
+        if (polygon == null || polygon.size < 3) return estimateTiles(bounds, minZoom, maxZoom)
+        var count = 0
+        for (z in minZoom..maxZoom) {
+            val n = 1 shl z
+            val xMin = lonToTileX(bounds.west, n)
+            val xMax = lonToTileX(bounds.east, n)
+            val yMin = latToTileY(bounds.north, n)
+            val yMax = latToTileY(bounds.south, n)
+            for (x in xMin..xMax) {
+                for (y in yMin..yMax) {
+                    if (pointInPolygon(tileCenterLat(y, z), tileCenterLon(x, z), polygon)) count++
+                }
+            }
+        }
+        return count
     }
 
     private val lastNotifyTime = AtomicLong(0L)
