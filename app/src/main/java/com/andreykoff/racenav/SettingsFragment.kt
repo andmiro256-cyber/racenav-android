@@ -2060,16 +2060,31 @@ class SettingsFragment : Fragment() {
         val txtTraccarStatus = view.findViewById<TextView>(R.id.txtTraccarStatus)
         val viewTraccarStatusDot = view.findViewById<View>(R.id.viewTraccarStatusDot)
         val btnTraccarSendNow = view.findViewById<android.widget.Button>(R.id.btnTraccarSendNow)
+        val switchRestrictedZone = view.findViewById<SwitchCompat>(R.id.switchRestrictedZone)
 
-        // Auto-assign server URL and Device ID if not set
-        if (prefs.getString(MapFragment.PREF_TRACCAR_URL, "").isNullOrBlank()) {
-            prefs.edit().putString(MapFragment.PREF_TRACCAR_URL, "http://217.60.1.225:5055").apply()
+        switchRestrictedZone.isChecked = prefs.getBoolean(MapFragment.PREF_RESTRICTED_ZONE_MODE, false)
+        switchRestrictedZone.setOnCheckedChangeListener { _, checked ->
+            val edit = prefs.edit().putBoolean(MapFragment.PREF_RESTRICTED_ZONE_MODE, checked)
+            if (checked) {
+                // Pin RELAY immediately so the next batch skips DIRECT discovery.
+                edit.putString(MapFragment.PREF_LAST_TRACCAR_ENDPOINT, MapFragment.ENDPOINT_RELAY)
+            } else {
+                // Reset the cache so DIRECT discovery runs again on next session.
+                edit.remove(MapFragment.PREF_LAST_TRACCAR_ENDPOINT)
+            }
+            edit.apply()
+        }
+
+        // Endpoint is resolved automatically (DIRECT with RELAY fallback).
+        // Clear stale legacy override that pinned the direct IP — auto-resolution does the right thing.
+        if (prefs.getString(MapFragment.PREF_TRACCAR_URL, "") == MapFragment.ENDPOINT_DIRECT) {
+            prefs.edit().remove(MapFragment.PREF_TRACCAR_URL).apply()
         }
         run {
             val stableId = LicenseManager.getRawDeviceId(requireContext())
             val stableTraccarId = stableId.replace("-", "").take(8).uppercase()
             val currentId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
-            
+
             if (currentId.isBlank()) {
                 // New install — use stable ID
                 prefs.edit().putString(MapFragment.PREF_TRACCAR_DEVICE_ID, stableTraccarId).apply()
@@ -2082,7 +2097,7 @@ class SettingsFragment : Fragment() {
                     .putBoolean("traccar_id_migrated", true)
                     .apply()
                 // Update device on Traccar server (change uniqueId)
-                val url = prefs.getString(MapFragment.PREF_TRACCAR_URL, "") ?: ""
+                val url = TraccarSender.currentBaseUrl(prefs)
                 val name = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_NAME, "") ?: ""
                 if (url.isNotBlank()) {
                     migrateTraccarDeviceId(url, oldId, stableTraccarId, name)
@@ -2215,7 +2230,7 @@ class SettingsFragment : Fragment() {
                         arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION), 200)
                 }
                 // Register device on Traccar server, then start service
-                val url = prefs.getString(MapFragment.PREF_TRACCAR_URL, "") ?: ""
+                val url = TraccarSender.currentBaseUrl(prefs)
                 val devId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
                 registerTraccarDevice(url, devId, devName) {
                     ctx.startForegroundService(

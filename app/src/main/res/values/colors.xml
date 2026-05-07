@@ -5,12 +5,12 @@
     <color name="primary">#E8540A</color>
     <color name="primary_variant">#B64609</color>
 
-    <color name="background">#F4F6F8</color>
-    <color name="surface">#FFFFFF</color>
-    <color name="surface_top">#EEF2F6</color>
-    <color name="surface_tab">#E7ECF2</color>
-    <color name="surface_variant">#F7F9FC</color>
-    <color name="surface_overlay">#E8EDF3</color>
+    <color name="background">#E4E8EC</color>
+    <color name="surface">#EFF2F5</color>
+    <color name="surface_top">#DDE2E7</color>
+    <color name="surface_tab">#D5DAE0</color>
+    <color name="surface_variant">#E8ECF0</color>
+    <color name="surface_overlay">#D8DDE3</color>
 
     <color name="text_primary">#FF111111</color>
     <color name="text_secondary">#FF4C5563</color>

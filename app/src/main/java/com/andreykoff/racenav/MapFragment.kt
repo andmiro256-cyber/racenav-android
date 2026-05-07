@@ -489,9 +489,17 @@ class MapFragment : Fragment() {
 
         // Traccar live monitoring
         const val PREF_TRACCAR_ENABLED     = "traccar_enabled"      // bool, default false
-        const val PREF_TRACCAR_URL         = "traccar_server_url"   // e.g. "http://217.60.1.225:5055"
+        const val PREF_TRACCAR_URL         = "traccar_server_url"   // optional manual override (e.g. set via debug)
         const val PREF_TRACCAR_DEVICE_ID   = "traccar_device_id"    // Traccar uniqueId used by OsmAnd protocol
         const val PREF_TRACCAR_DEVICE_NAME = "traccar_device_name"  // human-readable name
+
+        // Endpoint fallback: direct Latvia vs Yandex Cloud relay (whitelist-friendly).
+        const val ENDPOINT_DIRECT             = "http://217.60.1.225:5055"
+        const val ENDPOINT_RELAY              = "http://relay.m-systemon.ru:5055"
+        const val PREF_LAST_TRACCAR_ENDPOINT  = "last_traccar_endpoint"
+        const val PREF_RESTRICTED_ZONE_MODE   = "restricted_zone_mode"
+        const val ENDPOINT_TIMEOUT_MS         = 8000L
+        const val FAILURES_BEFORE_SWITCH      = 5
 
         const val LOADED_TRACK_SOURCE_ID = "loaded-track-source"
         const val LOADED_TRACK_LAYER_ID = "loaded-track-layer"

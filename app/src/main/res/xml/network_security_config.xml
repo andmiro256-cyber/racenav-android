@@ -6,6 +6,8 @@
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">87.120.84.254</domain>
         <domain includeSubdomains="false">217.60.1.225</domain>
+        <domain includeSubdomains="false">relay.m-systemon.ru</domain>
+        <domain includeSubdomains="false">158.160.243.222</domain>
     </domain-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
