@@ -663,7 +663,7 @@ class MapFragment : Fragment() {
         }
     }
 
-    data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19, val minZoom: Int = 0)
+    data class TileSource(val label: String, val urls: List<String>, val tms: Boolean = false, val maxZoom: Int = 19, val minZoom: Int = 0, val bounds: DoubleArray? = null)
 
     // Minimal fallback — used only when no catalog and no cache available
     private val tileSources = linkedMapOf(
@@ -1779,6 +1779,7 @@ class MapFragment : Fragment() {
     ): String {
         if (!savedTile.startsWith(OFFLINE_TILE_KEY)) return savedTile
         if (offlineMaps.none { it.key == savedTile }) return "osm"
+        if (!isNetworkAvailable()) return savedTile
         return if (isOfflineKeyNearCamera(savedTile, camera)) {
             savedTile
         } else {
@@ -1791,11 +1792,13 @@ class MapFragment : Fragment() {
         savedOverlays: List<String>,
         camera: com.mapbox.mapboxsdk.camera.CameraPosition?
     ): Set<String> {
+        val offline = !isNetworkAvailable()
         val valid = linkedSetOf<String>()
         savedOverlays.forEach { key ->
             when {
                 !key.startsWith(OFFLINE_TILE_KEY) -> valid += key
                 offlineMaps.none { it.key == key } -> Unit
+                offline -> valid += key
                 isOfflineKeyNearCamera(key, camera) -> valid += key
                 else -> Log.i("OfflineMap", "Dropping startup offline overlay outside saved camera: $key")
             }
@@ -2028,11 +2031,14 @@ class MapFragment : Fragment() {
         savedOverlays: Collection<String>,
         startupCamera: com.mapbox.mapboxsdk.camera.CameraPosition?
     ): Set<String> {
+        val offline = !isNetworkAvailable()
         return savedOverlays.filter { key ->
             if (!key.startsWith(OFFLINE_TILE_KEY)) {
                 true
             } else if (offlineMaps.none { it.key == key }) {
                 false
+            } else if (offline) {
+                true
             } else {
                 val keep = isOfflineKeyRelevantForCamera(key, startupCamera)
                 if (!keep) {
@@ -2077,17 +2083,19 @@ class MapFragment : Fragment() {
 
         val hideOnlineBase = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.getBoolean(PREF_HIDE_ONLINE_BASE, false) ?: false
-        // Only hide online base if user asked AND at least one offline key has renderable urls
-        val hasRenderableOffline = overlayKeys.any { key ->
-            tileSources[key]?.urls?.isNotEmpty() == true
-        }
-        val skipBase = hideOnlineBase && hasRenderableOffline
+        val currentZoom = mapboxMap?.cameraPosition?.zoom ?: 0.0
+        val isOfflineBase = baseKey.startsWith("offline_")
+        val hasOfflineLayer = selectedOfflineSources(baseKey, overlayKeys).isNotEmpty()
+        val skipBase = hideOnlineBase && !isOfflineBase && hasOfflineLayer
 
         val sources = StringBuilder()
         val layers = StringBuilder()
         if (!skipBase) {
             val baseMinZoom = if (base.minZoom > 0) ",\"minzoom\":${base.minZoom}" else ""
-            sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseScheme}")
+            val baseBounds = base.bounds?.takeIf { it.size == 4 }?.let {
+                ",\"bounds\":[${it[0]},${it[1]},${it[2]},${it[3]}]"
+            } ?: ""
+            sources.append("\"rt\":{\"type\":\"raster\",\"tiles\":[$baseTiles],\"tileSize\":256,\"maxzoom\":${base.maxZoom}$baseMinZoom$baseBounds$baseScheme}")
             layers.append("{\"id\":\"rl\",\"type\":\"raster\",\"source\":\"rt\",\"minzoom\":0,\"maxzoom\":22}")
         }
 
@@ -2110,7 +2118,10 @@ class MapFragment : Fragment() {
                 val ovTiles = offlineSrc.urls.joinToString(",") { "\"$it\"" }
                 val ovScheme = if (offlineSrc.tms) ",\"scheme\":\"tms\"" else ""
                 val offMinZoom = if (offlineSrc.minZoom > 0) ",\"minzoom\":${offlineSrc.minZoom}" else ""
-                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$ovScheme}")
+                val offBounds = offlineSrc.bounds?.takeIf { it.size == 4 }?.let {
+                    ",\"bounds\":[${it[0]},${it[1]},${it[2]},${it[3]}]"
+                } ?: ""
+                sources.append("$sep\"ov$idx\":{\"type\":\"raster\",\"tiles\":[$ovTiles],\"tileSize\":256,\"maxzoom\":${offlineSrc.maxZoom}$offMinZoom$offBounds$ovScheme}")
                 layers.append("$layerSep{\"id\":\"ol$idx\",\"type\":\"raster\",\"source\":\"ov$idx\",\"minzoom\":0,\"maxzoom\":22,\"paint\":{\"raster-opacity\":$opacity}}")
             }
         }
@@ -2128,15 +2139,33 @@ class MapFragment : Fragment() {
     fun getCurrentTileKey(): String = currentTileKey
 
     private fun loadTileStyle(baseKey: String, overlayKeys: Set<String>) {
-        currentTileKey = baseKey
-        currentOverlayKeys = overlayKeys.toMutableSet()
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-            ?.putString(PREF_TILE_KEY, baseKey)
-            ?.putString(PREF_OVERLAY_KEY, overlayKeys.joinToString(","))
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val hideOnlineBase = prefs?.getBoolean(PREF_HIDE_ONLINE_BASE, false) ?: false
+        var effectiveBaseKey = baseKey
+        val effectiveOverlayKeys = overlayKeys.toMutableSet()
+        if (hideOnlineBase && !effectiveBaseKey.startsWith(OFFLINE_TILE_KEY)) {
+            effectiveOverlayKeys.firstOrNull { isOfflineBaseMapKey(it) }?.let { offlineBaseKey ->
+                effectiveBaseKey = offlineBaseKey
+            }
+        }
+        if (effectiveBaseKey.startsWith(OFFLINE_TILE_KEY)) {
+            effectiveOverlayKeys.removeAll(effectiveOverlayKeys.filter { isOfflineBaseMapKey(it) }.toSet())
+        }
+
+        currentTileKey = effectiveBaseKey
+        currentOverlayKeys = effectiveOverlayKeys.toMutableSet()
+        prefs?.edit()
+            ?.putString(PREF_TILE_KEY, effectiveBaseKey)
+            ?.putString(PREF_OVERLAY_KEY, effectiveOverlayKeys.joinToString(","))
             ?.apply()
-        val json = buildStyleJson(baseKey, overlayKeys)
+        val json = buildStyleJson(effectiveBaseKey, effectiveOverlayKeys)
+        if (usesLocalTileServer(effectiveBaseKey, effectiveOverlayKeys)) {
+            context?.applicationContext?.let {
+                com.mapbox.mapboxsdk.net.ConnectivityReceiver.instance(it).setConnected(true)
+            }
+        }
         // Warn if offline and using online tiles
-        if (!baseKey.startsWith(OFFLINE_TILE_KEY) && !isNetworkAvailable()) {
+        if (!effectiveBaseKey.startsWith(OFFLINE_TILE_KEY) && !isNetworkAvailable()) {
             Toast.makeText(context, "Нет интернета — тайлы из кэша", Toast.LENGTH_SHORT).show()
         }
         // Use lastSavedCamera if set (startup restore), otherwise snapshot current position.
@@ -2148,11 +2177,21 @@ class MapFragment : Fragment() {
         val camToRestore = lastSavedCamera?.let { sanitizeCameraPosition(it) }
             ?: lastGoodCamera?.let { sanitizeCameraPosition(it) }
             ?: loadCameraFromPrefs()  // last resort: re-read from prefs
-        Log.d("CamDebug", "loadTileStyle[$baseKey]: lastSavedCamera=${lastSavedCamera?.zoom} lastGoodCamera=${lastGoodCamera?.zoom} camToRestore=${camToRestore?.zoom}")
+        val offlineMinZoom = if (hideOnlineBase) selectedOfflineSources(effectiveBaseKey, effectiveOverlayKeys)
+            .minOfOrNull { it.minZoom }
+            ?.toDouble() else null
+        val finalCamToRestore = if (offlineMinZoom != null && camToRestore != null && camToRestore.zoom < offlineMinZoom) {
+            com.mapbox.mapboxsdk.camera.CameraPosition.Builder(camToRestore)
+                .zoom(offlineMinZoom)
+                .build()
+        } else {
+            camToRestore
+        }
+        Log.d("CamDebug", "loadTileStyle[$effectiveBaseKey]: lastSavedCamera=${lastSavedCamera?.zoom} lastGoodCamera=${lastGoodCamera?.zoom} camToRestore=${finalCamToRestore?.zoom}")
         mapboxMap?.setStyle(Style.Builder().fromJson(json)) { style ->
             // Always restore camera — setStyle resets it to world view
-            Log.d("CamDebug", "onStyleLoaded: restoring camToRestore=${camToRestore?.zoom} curZoom=${mapboxMap?.cameraPosition?.zoom}")
-            camToRestore?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
+            Log.d("CamDebug", "onStyleLoaded: restoring camToRestore=${finalCamToRestore?.zoom} curZoom=${mapboxMap?.cameraPosition?.zoom}")
+            finalCamToRestore?.let { mapboxMap?.moveCamera(CameraUpdateFactory.newCameraPosition(it)) }
             enableLocation(style)
             setupTrackLayers(style)
             setupWaypointLayers(style)
@@ -2161,6 +2200,38 @@ class MapFragment : Fragment() {
             setupGpsArrowLayer(style)  // LAST — always on top of all layers
             // Re-apply fullscreen — setStyle resets window insets
             applyFullscreenPref()
+        }
+    }
+
+    private fun selectedOfflineSources(baseKey: String, overlayKeys: Set<String>): List<TileSource> {
+        val sources = mutableListOf<TileSource>()
+        if (baseKey.startsWith(OFFLINE_TILE_KEY)) {
+            tileSources[baseKey]?.takeIf { it.urls.isNotEmpty() }?.let { sources.add(it) }
+        }
+        overlayKeys.forEach { key ->
+            if (key.startsWith(OFFLINE_TILE_KEY)) {
+                tileSources[key]?.takeIf { it.urls.isNotEmpty() }?.let { sources.add(it) }
+            }
+        }
+        return sources
+    }
+
+    private fun isOfflineBaseMapKey(key: String): Boolean {
+        return offlineMaps.any { it.key == key && !it.name.contains("_слой_") }
+    }
+
+    private fun usesLocalTileServer(baseKey: String, overlayKeys: Set<String>): Boolean {
+        val sources = mutableListOf<TileSource>()
+        tileSources[baseKey]?.let { sources.add(it) }
+        overlayKeys.forEach { key ->
+            overlaySources[key]?.let { sources.add(TileSource(key, it.urls)) }
+            tileSources[key]?.let { sources.add(it) }
+        }
+        return sources.any { source ->
+            source.urls.any { url ->
+                url.startsWith("http://localhost:$TILE_SERVER_PORT/") ||
+                    url.startsWith("http://127.0.0.1:$TILE_SERVER_PORT/")
+            }
         }
     }
 
@@ -5951,7 +6022,10 @@ class MapFragment : Fragment() {
         if (existingIndex >= 0) offlineMaps[existingIndex] = info else offlineMaps.add(info)
         val maxZoom = tileServer?.getMaxZoom(index) ?: 19
         val minZoom = tileServer?.getMinZoom(index) ?: 0
-        tileSources[key] = TileSource(displayName, listOf("http://127.0.0.1:$TILE_SERVER_PORT/offline/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
+        // bounds = [north, south, east, west] from TileServer → convert to [west, south, east, north] for MapLibre
+        val srvBounds = tileServer?.getBounds(index)
+        val mbBounds = srvBounds?.let { doubleArrayOf(it[3], it[1], it[2], it[0]) }
+        tileSources[key] = TileSource(displayName, listOf("http://localhost:$TILE_SERVER_PORT/offline/$index/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom, bounds = mbBounds)
         saveOfflineMapsToPrefs()
         return key
     }
@@ -6017,6 +6091,45 @@ class MapFragment : Fragment() {
             ?: findOfflineAreaBaseInfo(displayName)
             ?: return
         removeOfflineMap(info.key)
+    }
+
+    fun renameOfflineArea(areaId: String, newName: String): Boolean {
+        val ctx = context ?: return false
+        val oldArea = OfflineAreasManager.getAreaById(ctx, areaId) ?: return false
+        val baseInfo = findOfflineAreaBaseInfo(oldArea.name)
+        val overlayInfos = oldArea.overlays.mapNotNull { overlay ->
+            findOfflineAreaOverlayInfo(oldArea.name, overlay.label)?.let { overlay.label to it }
+        }
+        val renamedArea = OfflineAreasManager.renameArea(ctx, areaId, newName) ?: return false
+
+        baseInfo?.let { info ->
+            renameOfflineMapInfo(info.key, offlineAreaBaseDisplayName(renamedArea))
+        }
+        overlayInfos.forEach { (label, info) ->
+            renameOfflineMapInfo(info.key, offlineAreaOverlayDisplayName(renamedArea.name, label))
+        }
+        saveOfflineMapsToPrefs()
+        syncOfflineAreaSources(areaId)
+        return true
+    }
+
+    fun renameOfflineMap(key: String, newName: String): Boolean {
+        val cleanName = OfflineAreasManager.sanitizeName(newName).replace(Regex("\\s+"), " ").trim()
+        if (cleanName.isBlank() || cleanName.contains("_слой_")) return false
+        if (offlineMaps.any { it.key != key && it.name.equals(cleanName, ignoreCase = true) }) return false
+        return renameOfflineMapInfo(key, cleanName).also { renamed ->
+            if (renamed) saveOfflineMapsToPrefs()
+        }
+    }
+
+    private fun renameOfflineMapInfo(key: String, newName: String): Boolean {
+        val idx = offlineMaps.indexOfFirst { it.key == key }
+        if (idx < 0) return false
+        val info = offlineMaps[idx]
+        if (info.name == newName) return true
+        offlineMaps[idx] = info.copy(name = newName)
+        tileSources[key]?.let { tileSources[key] = it.copy(label = newName) }
+        return true
     }
 
     fun removeOfflineMap(key: String) {
@@ -6099,17 +6212,15 @@ class MapFragment : Fragment() {
             return
         }
 
-        val nextBase = if (currentTileKey.startsWith(OFFLINE_TILE_KEY)) "osm" else currentTileKey
         val nextOverlays = currentOverlayKeys
             .filterNot { it.startsWith(OFFLINE_TILE_KEY) }
             .toMutableSet()
-        nextOverlays.add(baseInfo.key)
         area.enabledOverlays().forEach { ov ->
             findOfflineAreaOverlayInfo(area.name, ov.label)?.let { info ->
                 nextOverlays.add(info.key)
             }
         }
-        loadTileStyle(nextBase, nextOverlays)
+        loadTileStyle(baseInfo.key, nextOverlays)
         flyToOfflineMapBounds(baseInfo.index)
     }
 
@@ -6244,7 +6355,9 @@ class MapFragment : Fragment() {
                     offlineMaps.add(OfflineMapInfo(key, name, resolved.absolutePath))
                     val maxZoom = tileServer?.getMaxZoom(idx) ?: 19
                     val minZoom = tileServer?.getMinZoom(idx) ?: 0
-                    tileSources[key] = TileSource(name, listOf("http://127.0.0.1:$TILE_SERVER_PORT/offline/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom)
+                    val srvBounds = tileServer?.getBounds(idx)
+                    val mbBounds = srvBounds?.let { doubleArrayOf(it[3], it[1], it[2], it[0]) }
+                    tileSources[key] = TileSource(name, listOf("http://localhost:$TILE_SERVER_PORT/offline/$idx/{z}/{x}/{y}.png"), maxZoom = maxZoom, minZoom = minZoom, bounds = mbBounds)
                     cleanArr.put(JSONObject().put("key", key).put("name", name).put("path", resolved.absolutePath))
                 } else {
                     changed = true
@@ -10581,7 +10694,10 @@ class MapFragment : Fragment() {
         }
         baseGroup.setOnCheckedChangeListener { group, id ->
             val key = group.findViewById<RadioButton>(id)?.tag as? String ?: return@setOnCheckedChangeListener
-            loadTileStyle(key, currentOverlayKeys)
+            val nextOverlays = currentOverlayKeys
+                .filterNot { isOfflineBaseMapKey(it) }
+                .toMutableSet()
+            loadTileStyle(key, nextOverlays)
             dialog.dismiss()
         }
 
@@ -10607,40 +10723,32 @@ class MapFragment : Fragment() {
                 setPadding(16, 14, 16, 14)
             })
         } else {
-            // Group offline maps by area (base maps only, skip overlays)
+            // Offline bases are single-choice maps. Extra "_слой_" maps stay in the overlay controls.
             val areas = context?.let { OfflineAreasManager.loadAreas(it).filter { a -> a.status == "complete" } } ?: emptyList()
 
             val dp = resources.displayMetrics.density
             offlineMaps.filter { info -> !info.name.contains("_слой_") }.forEach { info ->
-                val cb = android.widget.CheckBox(requireContext()).apply {
+                val rb = android.widget.RadioButton(requireContext()).apply {
                     text = info.name; tag = info.key
-                    isChecked = info.key in currentOverlayKeys
+                    isChecked = info.key == currentTileKey || info.key in currentOverlayKeys
                     setTextColor(palette.textPrimary); textSize = 13f
                     setPadding(16, 14, 16, 14); id = View.generateViewId()
                     buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
                     setOnCheckedChangeListener { _, checked ->
+                        if (!checked) return@setOnCheckedChangeListener
                         val area = areas.find { a -> info.name.startsWith(a.name) }
-                        if (checked) {
-                            currentOverlayKeys.add(info.key)
-                            // Auto-enable area overlays (sub-layers)
-                            area?.enabledOverlays()?.forEach { ov ->
-                                val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
-                                if (ovInfo != null) currentOverlayKeys.add(ovInfo.key)
-                            }
-                            // Jump camera to map bounds
-                            flyToOfflineMapBounds(info.index)
-                        } else {
-                            currentOverlayKeys.remove(info.key)
-                            // Remove area overlays too
-                            area?.enabledOverlays()?.forEach { ov ->
-                                val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
-                                if (ovInfo != null) currentOverlayKeys.remove(ovInfo.key)
-                            }
+                        val nextOverlays = currentOverlayKeys
+                            .filterNot { it.startsWith(OFFLINE_TILE_KEY) }
+                            .toMutableSet()
+                        area?.enabledOverlays()?.forEach { ov ->
+                            val ovInfo = offlineMaps.find { it.name == "${area.name}_слой_${ov.label}" }
+                            if (ovInfo != null) nextOverlays.add(ovInfo.key)
                         }
-                        loadTileStyle(currentTileKey, currentOverlayKeys)
+                        loadTileStyle(info.key, nextOverlays)
+                        dialog.dismiss()
                     }
                 }
-                offlineGroup.addView(cb)
+                offlineGroup.addView(rb)
                 // Show ⚙️ gear button below checkbox if area has overlays
                 val area = areas.find { a -> info.name.startsWith(a.name) && a.overlays.isNotEmpty() }
                 if (area != null) {
@@ -12133,20 +12241,40 @@ class MapFragment : Fragment() {
             val baseFile = java.io.File(baseLayer.outputPath)
             if (baseFile.exists() && countTilesInMbtiles(baseFile) > 0) {
                 // Register base map as offline tile source (for MapLibre)
-                val area = context?.let { OfflineAreasManager.loadAreas(it).find { a -> a.name == task.name } }
+                val area = context?.let { ctx ->
+                    areaId?.let { OfflineAreasManager.getAreaById(ctx, it) }
+                        ?: OfflineAreasManager.loadAreas(ctx).find { a -> a.name == task.name }
+                }
                 val displayName = area?.let { "${it.name} (${it.layersDescription()})" }
                     ?: "${task.name} (${baseLayer.layerLabel})"
                 val key = addOfflineMap(baseFile.absolutePath, displayName)
                 if (key != null) {
                     Log.d("TileDownload", "Registered offline: $displayName → $key")
+                    val registeredOverlayKeys = mutableListOf<String>()
                     // Register overlays as separate offline sources (for layer toggling)
                     task.layers.drop(1).forEach { ovLayer ->
                         val ovFile = java.io.File(ovLayer.outputPath)
                         if (ovFile.exists() && countTilesInMbtiles(ovFile) > 0) {
-                            addOfflineMap(ovFile.absolutePath, "${task.name}_слой_${ovLayer.layerLabel}")
+                            addOfflineMap(ovFile.absolutePath, "${task.name}_слой_${ovLayer.layerLabel}")?.let { overlayKey ->
+                                registeredOverlayKeys.add(overlayKey)
+                            }
                             Log.d("TileDownload", "Registered overlay: ${ovLayer.layerLabel}")
                         }
                     }
+                    val nextOverlays = currentOverlayKeys
+                        .filterNot { it.startsWith(OFFLINE_TILE_KEY) }
+                        .toMutableSet()
+                    if (area != null) {
+                        area.enabledOverlays().forEach { ov ->
+                            findOfflineAreaOverlayInfo(area.name, ov.label)?.let { info ->
+                                nextOverlays.add(info.key)
+                            }
+                        }
+                    } else {
+                        nextOverlays.addAll(registeredOverlayKeys)
+                    }
+                    loadTileStyle(key, nextOverlays)
+                    offlineMaps.find { it.key == key }?.let { flyToOfflineMapBounds(it.index) }
                 }
                 Toast.makeText(context, "Загружено: $displayName", Toast.LENGTH_LONG).show()
             } else {

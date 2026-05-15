@@ -11,12 +11,12 @@ import java.net.URL
 import java.util.Locale
 
 /**
- * Lightweight anonymous analytics — sends device info on app launch.
- * No personal data collected. Device ID is the same UUID from LicenseManager.
+ * Lightweight pseudonymous app diagnostics.
+ * Never sends raw GPS coordinates.
  */
 object Analytics {
 
-    private const val ENDPOINT = "http://87.120.84.254:8090/ping"
+    private const val ENDPOINT = "https://trophynav.ru/api/analytics/ping"
 
     fun sendEvent(context: Context, action: String = "launch", extra: JSONObject? = null) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -34,7 +34,10 @@ object Analytics {
                     put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("locale", Locale.getDefault().language)
                     extra?.let { e ->
-                        val skip = setOf("device_id","version","action","os_version","device_model","locale")
+                        val skip = setOf(
+                            "device_id", "version", "action", "os_version", "device_model", "locale",
+                            "lat", "lon", "latitude", "longitude"
+                        )
                         val keys = e.keys()
                         while (keys.hasNext()) {
                             val k = keys.next()

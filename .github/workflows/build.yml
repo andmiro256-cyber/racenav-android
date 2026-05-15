@@ -37,26 +37,36 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Get version metadata
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            VERSION_CODE="$(node -e 'const c=require("./changelog.json"); const version=process.argv[1]; const entry=(c.stable||[]).find((item)=>item.version===version); if (!entry || !entry.versionCode) { console.error(`stable ${version} is missing versionCode in changelog.json`); process.exit(1); } console.log(entry.versionCode);' "$VERSION_NAME")"
+          else
+            VERSION_NAME="$(node -e 'const text=require("fs").readFileSync("app/build.gradle.kts","utf8"); const match=text.match(/appVersionName\s*=\s*secretProperty\("RACENAV_VERSION_NAME"\)\s*\?:\s*"([^"]+)"/); if (!match) process.exit(1); console.log(match[1]);')"
+            VERSION_CODE="$(node -e 'const text=require("fs").readFileSync("app/build.gradle.kts","utf8"); const match=text.match(/appVersionCode\s*=\s*secretProperty\("RACENAV_VERSION_CODE"\)\?\.toIntOrNull\(\)\s*\?:\s*(\d+)/); if (!match) process.exit(1); console.log(match[1]);')"
+          fi
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
       - name: Build Release APK
         env:
+          RACENAV_VERSION_NAME: ${{ steps.version.outputs.name }}
+          RACENAV_VERSION_CODE: ${{ steps.version.outputs.code }}
           KEYSTORE_PATH: /tmp/racenav-release.jks
           KEY_ALIAS: racenav
           KEY_PASSWORD: racenav123
           STORE_PASSWORD: racenav123
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Get version metadata
-        id: version
-        run: |
-          VERSION_NAME=$(grep 'versionName =' app/build.gradle.kts | head -n1 | grep -oP '"[^"]+"' | tr -d '"')
-          VERSION_CODE=$(grep 'versionCode =' app/build.gradle.kts | head -n1 | grep -oP '\d+')
-          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-
       - name: Prepare APK files
         run: |
           cp app/build/outputs/apk/release/app-release.apk \
              ./racenav-v${{ steps.version.outputs.name }}.apk
+          cp app/build/outputs/apk/release/app-release.apk \
+             ./racenav.apk
           cp app/build/outputs/apk/release/app-release.apk \
              ./racenav-beta.apk
 
@@ -65,29 +75,26 @@ jobs:
         env:
           VERSION_NAME: ${{ steps.version.outputs.name }}
           VERSION_CODE: ${{ steps.version.outputs.code }}
-          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          NOTES=$(printf '%s' "${HEAD_COMMIT_MESSAGE:-Beta build from main.}" \
-            | tr '\r\n' '  ' \
-            | sed 's/[[:space:]]\+/ /g' \
-            | sed 's/^ //; s/ $//')
-          if [ -z "$NOTES" ]; then
-            NOTES="Beta build from main."
-          fi
-          NOTES="Beta: $NOTES"
-          jq -n \
-            --arg version "$VERSION_NAME" \
-            --argjson versionCode "$VERSION_CODE" \
-            --arg notes "$NOTES" \
-            '{
-              version: $version,
-              versionName: $version,
-              versionCode: $versionCode,
-              url: "https://trophynav.ru/updates/racenav-beta.apk",
-              apkUrl: "https://trophynav.ru/updates/racenav-beta.apk",
-              notes: $notes,
-              changelog: $notes
-            }' > ./latest-beta.json
+          node scripts/generate-update-manifest.js \
+            --channel beta \
+            --version "$VERSION_NAME" \
+            --version-code "$VERSION_CODE" \
+            --apk-url "https://trophynav.ru/updates/racenav-beta.apk" \
+            --output ./latest-beta.json
+
+      - name: Prepare stable manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          node scripts/generate-update-manifest.js \
+            --channel stable \
+            --version "$VERSION_NAME" \
+            --version-code "$VERSION_CODE" \
+            --apk-url "https://trophynav.ru/updates/racenav.apk" \
+            --output ./latest.json
 
       - name: Upload artifact (every build)
         uses: actions/upload-artifact@v4
@@ -157,12 +164,75 @@ jobs:
             curl -k -I -fsSL https://trophynav.ru/updates/racenav-beta.apk | grep -qi '^HTTP/.* 200'
             rm -rf "${STAGE}"
 
+      - name: Validate stable deploy secrets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_SSH_KEY"
+
+      - name: Upload stable staging bundle (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          overwrite: true
+          source: ./racenav.apk,./latest.json
+          target: /tmp/racenav-stable-deploy-${{ github.run_id }}/
+
+      - name: Publish stable on DE2 (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: appleboy/ssh-action@v1
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          RUN_ID: ${{ github.run_id }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: VERSION_NAME,VERSION_CODE,RUN_ID
+          script: |
+            set -euo pipefail
+            STAGE="/tmp/racenav-stable-deploy-${RUN_ID}"
+            APK_STAGE="${STAGE}/racenav.apk"
+            JSON_STAGE="${STAGE}/latest.json"
+            TS="$(date +%Y%m%d-%H%M%S)"
+            APK_VERSIONED="/var/www/updates/releases/racenav-v${VERSION_NAME}.apk"
+            JSON_VERSIONED="/var/www/updates/releases/latest-v${VERSION_NAME}.json"
+
+            test -f "${APK_STAGE}"
+            test -f "${JSON_STAGE}"
+            mkdir -p /var/www/updates/releases
+
+            if [ -f /var/www/updates/racenav.apk ]; then
+              cp -f /var/www/updates/racenav.apk "/var/www/updates/releases/racenav.apk.bak-${TS}"
+            fi
+            if [ -f /var/www/updates/latest.json ]; then
+              cp -f /var/www/updates/latest.json "/var/www/updates/releases/latest.json.bak-${TS}"
+            fi
+
+            install -m 0644 "${APK_STAGE}" "${APK_VERSIONED}"
+            install -m 0644 "${JSON_STAGE}" "${JSON_VERSIONED}"
+            cp -f "${APK_VERSIONED}" /var/www/updates/racenav.apk
+            cp -f "${JSON_VERSIONED}" /var/www/updates/latest.json
+
+            curl -k -fsSL https://trophynav.ru/updates/latest.json | grep -q "\"versionName\":\"${VERSION_NAME}\""
+            curl -k -I -fsSL https://trophynav.ru/updates/racenav.apk | grep -qi '^HTTP/.* 200'
+            rm -rf "${STAGE}"
+
       - name: Create GitHub Release (on tag push only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: Trophy Navigator ${{ github.ref_name }}
-          files: ./racenav-v${{ steps.version.outputs.name }}.apk
+          files: |
+            ./racenav-v${{ steps.version.outputs.name }}.apk
+            ./latest.json
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

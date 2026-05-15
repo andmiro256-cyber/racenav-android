@@ -9,10 +9,15 @@
 .cxx
 local.properties
 app/build/
+.claude/
+.playwright-mcp/
+*.bak
 *.apk
 *.aab
 *.keystore
 keystore.properties.local
+gradle.properties.local
 firebase-debug.log
+android.html
 server/
 app/google-services.json

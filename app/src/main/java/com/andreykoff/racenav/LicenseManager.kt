@@ -34,7 +34,7 @@ object LicenseManager {
 
     const val TRIAL_DAYS = 14
     private const val CONTACT_TELEGRAM = "https://t.me/Andreykoff"
-    private const val CONTACT_EMAIL = "snowwolf888@gmail.com"
+    private const val CONTACT_EMAIL = "info@trophynav.ru"
 
     fun getContactUrl(): String = CONTACT_TELEGRAM
     fun getContactEmail(): String = CONTACT_EMAIL
@@ -213,7 +213,7 @@ object LicenseManager {
 
     /** Show "license required" toast */
     fun showLicenseRequired(context: Context) {
-        android.widget.Toast.makeText(context, "Требуется лицензия — info@trophynav.ru", android.widget.Toast.LENGTH_LONG).show()
+        android.widget.Toast.makeText(context, "Требуется лицензия — ${getContactEmail()}", android.widget.Toast.LENGTH_LONG).show()
     }
 
     /** Activate license from server response (email-based multi-device) */
@@ -336,11 +336,13 @@ object LicenseManager {
             val serverPlan = json.optString("plan", "").trim().lowercase().ifEmpty { null }
             val effectivePlan = when {
                 serverPlan in listOf("full", "license", "beta") -> serverPlan
-                currentPlan == "beta" -> "beta"
+                serverLicenseStatus == "active" && currentPlan in listOf("full", "license") -> currentPlan
                 else -> serverPlan
             }
             val effectiveLicenseStatus = if (effectivePlan == "beta") "active" else serverLicenseStatus
+            val isActivatedByServer = serverLicenseStatus == "active" || effectivePlan == "beta"
             prefs.edit()
+                .putBoolean(KEY_ACTIVATED, isActivatedByServer)
                 .putString(KEY_LICENSE_STATUS, effectiveLicenseStatus)
                 .putString(KEY_LICENSE_UNTIL, json.optString("license_until", ""))
                 .putString(KEY_SERVER_STATUS, json.optString("server", "none"))
@@ -348,11 +350,6 @@ object LicenseManager {
                 .putString(KEY_PLAN, effectivePlan)
                 .putLong(KEY_LAST_CHECK, System.currentTimeMillis())
                 .apply()
-
-            // If server says "active", mark as activated locally too
-            if (serverLicenseStatus == "active" || effectivePlan == "beta") {
-                prefs.edit().putBoolean(KEY_ACTIVATED, true).apply()
-            }
 
             return effectiveLicenseStatus != "expired"
         } catch (e: Exception) {

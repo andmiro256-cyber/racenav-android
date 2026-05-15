@@ -161,10 +161,11 @@ class MainActivity : AppCompatActivity() {
     private fun showTrialExpiredDialog() {
         val userEmail = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .getString("sync_email", null) ?: ""
+        val contactEmail = LicenseManager.getContactEmail()
         val emailLine = if (userEmail.isNotEmpty()) "\nВаш email: $userEmail\n" else ""
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Пробный период завершён")
-            .setMessage("Запись треков, экспорт, синхронизация отключены.\nКарта и навигация работают.$emailLine\nДля полного доступа — info@trophynav.ru")
+            .setMessage("Запись треков, экспорт, синхронизация отключены.\nКарта и навигация работают.$emailLine\nДля полного доступа — $contactEmail")
             .setPositiveButton("trophynav.ru") { _, _ ->
                 try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://trophynav.ru"))) }
                 catch (_: Exception) {}
@@ -217,15 +218,16 @@ class MainActivity : AppCompatActivity() {
         })
 
         // Contact: Email
+        val contactEmail = LicenseManager.getContactEmail()
         root.addView(android.widget.TextView(this).apply {
-            text = "info@trophynav.ru"
+            text = contactEmail
             setTextColor(0xFFFF6F00.toInt())
             textSize = 16f
             setPadding(0, 0, 0, 8)
             setOnClickListener {
                 val deviceId = LicenseManager.getShortDeviceId(this@MainActivity)
                 val emailIntent = android.content.Intent(android.content.Intent.ACTION_SENDTO).apply {
-                    data = android.net.Uri.parse("mailto:info@trophynav.ru")
+                    data = android.net.Uri.parse("mailto:$contactEmail")
                     putExtra(android.content.Intent.EXTRA_SUBJECT, "Trophy Navigator — лицензия")
                     putExtra(android.content.Intent.EXTRA_TEXT, "ID устройства: $deviceId\n\nХочу приобрести лицензию.")
                 }

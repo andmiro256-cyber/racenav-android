@@ -126,6 +126,22 @@ object OfflineAreasManager {
     }
 
     @Synchronized
+    fun renameArea(context: Context, areaId: String, newName: String): OfflineArea? {
+        val cleanName = sanitizeName(newName).replace(Regex("\\s+"), " ").trim()
+        if (cleanName.isBlank() || cleanName.contains("_слой_")) return null
+
+        val areas = loadAreas(context).toMutableList()
+        if (areas.any { it.id != areaId && it.name.equals(cleanName, ignoreCase = true) }) return null
+        val idx = areas.indexOfFirst { it.id == areaId }
+        if (idx < 0) return null
+
+        val renamed = areas[idx].copy(name = cleanName)
+        areas[idx] = renamed
+        saveAll(context, areas)
+        return renamed
+    }
+
+    @Synchronized
     fun deleteArea(context: Context, areaId: String, onRemoveOfflineMap: ((String) -> Unit)? = null) {
         val areas = loadAreas(context).toMutableList()
         val area = areas.find { it.id == areaId } ?: return

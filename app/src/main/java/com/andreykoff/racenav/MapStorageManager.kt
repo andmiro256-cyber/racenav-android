@@ -99,7 +99,14 @@ object MapStorageManager {
     }
 
     @Synchronized
-    fun migrateToTarget(context: Context, targetId: String): MigrationResult {
+    fun migrateToTarget(
+        context: Context,
+        targetId: String,
+        shouldCancel: () -> Boolean = { false }
+    ): MigrationResult {
+        fun checkCancelled() {
+            if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
+        }
         val prefs = context.getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
         val current = getCurrentOption(context)
         val target = getAvailableOptions(context).firstOrNull { it.id == targetId }
@@ -113,18 +120,21 @@ object MapStorageManager {
         val newDir = target.dir.also { it.mkdirs() }
         var movedFiles = 0
         var updatedEntries = 0
+        checkCancelled()
 
         val offlineMapsJson = prefs.getString(MapFragment.PREF_OFFLINE_MAPS_JSON, null)
+        var migratedOfflineMapsJson: String? = null
         if (!offlineMapsJson.isNullOrBlank()) {
             val arr = JSONArray(offlineMapsJson)
             for (i in 0 until arr.length()) {
+                checkCancelled()
                 val obj = arr.optJSONObject(i) ?: continue
                 val oldPath = obj.optString("path")
                 val src = resolveExistingMapFile(context, oldPath) ?: continue
                 val dest = if (sameDir(src.parentFile, oldDir)) {
-                    moveToExactLocation(src, File(newDir, src.name))
+                    moveToExactLocation(src, File(newDir, src.name), shouldCancel)
                 } else {
-                    moveToUniqueLocation(src, newDir)
+                    moveToUniqueLocation(src, newDir, shouldCancel)
                 }
                 if (safePath(src) != safePath(dest)) movedFiles++
                 if (obj.optString("path") != dest.absolutePath) {
@@ -132,18 +142,37 @@ object MapStorageManager {
                     updatedEntries++
                 }
             }
-            prefs.edit().putString(MapFragment.PREF_OFFLINE_MAPS_JSON, arr.toString()).apply()
+            migratedOfflineMapsJson = arr.toString()
         }
 
         oldDir.listFiles()
-            ?.filter { it.isFile && (it.name == "areas.json" || isSupportedMapFile(it)) }
+            ?.filter { it.isFile && isSupportedMapFile(it) }
             ?.forEach { src ->
+                checkCancelled()
                 if (!src.exists()) return@forEach
-                val dest = moveToExactLocation(src, File(newDir, src.name))
+                val dest = moveToExactLocation(src, File(newDir, src.name), shouldCancel)
                 if (safePath(src) != safePath(dest)) movedFiles++
             }
 
-        prefs.edit().putString(PREF_MAP_STORAGE_TARGET, target.id).apply()
+        var oldAreasJsonToDelete: File? = null
+        val oldAreasJson = File(oldDir, "areas.json")
+        if (oldAreasJson.exists() && oldAreasJson.isFile) {
+            checkCancelled()
+            val dest = copyToExactLocation(oldAreasJson, File(newDir, oldAreasJson.name), shouldCancel)
+            if (safePath(oldAreasJson) != safePath(dest)) {
+                movedFiles++
+                oldAreasJsonToDelete = oldAreasJson
+            }
+        }
+
+        checkCancelled()
+        prefs.edit().apply {
+            if (migratedOfflineMapsJson != null) {
+                putString(MapFragment.PREF_OFFLINE_MAPS_JSON, migratedOfflineMapsJson)
+            }
+            putString(PREF_MAP_STORAGE_TARGET, target.id)
+        }.apply()
+        oldAreasJsonToDelete?.delete()
         return MigrationResult(movedFiles, updatedEntries, newDir)
     }
 
@@ -176,7 +205,8 @@ object MapStorageManager {
         return candidate
     }
 
-    private fun moveToExactLocation(src: File, dest: File): File {
+    private fun moveToExactLocation(src: File, dest: File, shouldCancel: () -> Boolean = { false }): File {
+        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
         if (safePath(src) == safePath(dest)) return dest
         dest.parentFile?.mkdirs()
         if (dest.exists()) {
@@ -186,24 +216,73 @@ object MapStorageManager {
             }
             throw IllegalStateException("Файл уже существует: ${dest.name}")
         }
-        return moveFile(src, dest)
+        return moveFile(src, dest, shouldCancel)
     }
 
-    private fun moveToUniqueLocation(src: File, dir: File): File {
+    private fun moveToUniqueLocation(src: File, dir: File, shouldCancel: () -> Boolean = { false }): File {
+        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
         if (sameDir(src.parentFile, dir)) return src
-        return moveFile(src, uniqueFile(dir, src.name))
+        return moveFile(src, uniqueFile(dir, src.name), shouldCancel)
     }
 
-    private fun moveFile(src: File, dest: File): File {
+    private fun copyToExactLocation(src: File, dest: File, shouldCancel: () -> Boolean = { false }): File {
+        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
+        if (safePath(src) == safePath(dest)) return dest
+        dest.parentFile?.mkdirs()
+        if (dest.exists()) {
+            if (dest.length() == src.length()) {
+                return dest
+            }
+            throw IllegalStateException("Файл уже существует: ${dest.name}")
+        }
+        return copyFile(src, dest, shouldCancel)
+    }
+
+    private fun moveFile(src: File, dest: File, shouldCancel: () -> Boolean = { false }): File {
+        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
         if (safePath(src) == safePath(dest)) return dest
         dest.parentFile?.mkdirs()
         if (src.renameTo(dest)) return dest
-        src.inputStream().use { input ->
-            dest.outputStream().use { output ->
-                input.copyTo(output)
+        try {
+            src.inputStream().use { input ->
+                dest.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
+                        val bytes = input.read(buffer)
+                        if (bytes < 0) break
+                        output.write(buffer, 0, bytes)
+                    }
+                }
             }
+        } catch (e: java.util.concurrent.CancellationException) {
+            runCatching { dest.delete() }
+            throw e
         }
         if (!src.delete()) src.deleteOnExit()
+        return dest
+    }
+
+    private fun copyFile(src: File, dest: File, shouldCancel: () -> Boolean = { false }): File {
+        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
+        if (safePath(src) == safePath(dest)) return dest
+        dest.parentFile?.mkdirs()
+        try {
+            src.inputStream().use { input ->
+                dest.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        if (shouldCancel()) throw java.util.concurrent.CancellationException("Перенос отменён")
+                        val bytes = input.read(buffer)
+                        if (bytes < 0) break
+                        output.write(buffer, 0, bytes)
+                    }
+                }
+            }
+        } catch (e: java.util.concurrent.CancellationException) {
+            runCatching { dest.delete() }
+            throw e
+        }
         return dest
     }
 

@@ -621,8 +621,11 @@ object TileDownloadManager {
         }
         flushBatch()
 
-        // Final integrity check: if download was not paused/cancelled but DB has fewer tiles
-        // than expected, surface an explicit error instead of silently reporting success.
+        // Final integrity check. Tile providers legitimately lack tiles for water,
+        // out-of-coverage areas and high zoom levels (HTTP 404), so "fewer than the full
+        // grid" is the NORMAL case — it is already surfaced via the partial status
+        // (failedTiles/skippedTiles → "⚠ Частично"). Only a layer that downloaded
+        // *nothing* is a genuine failure worth a hard, blocking error.
         if (!paused.get() && !cancelled.get()) {
             val expected = countTilesIn(bounds, polygon, minZoom, maxZoom)
             val actual = try {
@@ -631,11 +634,10 @@ object TileDownloadManager {
                 }
             } catch (_: Exception) { -1 }
             if (actual in 0 until expected) {
-                val missing = expected - actual
-                Log.w("TileDownload", "Layer ${layer.layerKey} incomplete: $actual / $expected (missing $missing)")
-                if (error == null) {
-                    error = "Скачивание неполное: $actual из $expected тайлов. Нажмите Resume."
-                }
+                Log.w("TileDownload", "Layer ${layer.layerKey} partial: $actual / $expected (provider gaps are normal)")
+            }
+            if (actual == 0 && expected > 0 && error == null) {
+                error = "Слой ${layer.layerLabel} не загружен — источник недоступен. Проверьте подключение."
             }
         }
 

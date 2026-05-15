@@ -4560,6 +4560,85 @@ class SettingsFragment : Fragment() {
         }
     }
 
+    private fun normalizeOfflineDisplayName(name: String): String {
+        return OfflineAreasManager.sanitizeName(name)
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun showRenameOfflineAreaDialog(view: View, area: OfflineAreasManager.OfflineArea) {
+        val ctx = requireContext()
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        val input = EditText(ctx).apply {
+            setText(area.name)
+            setSingleLine(true)
+            selectAll()
+            setTextColor(settingsPalette().textPrimary)
+            setHintTextColor(settingsPalette().textHint)
+            hint = "Название области"
+        }
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle("Переименовать область")
+            .setView(input)
+            .setPositiveButton("Сохранить", null)
+            .setNegativeButton("Отмена", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val cleanName = normalizeOfflineDisplayName(input.text.toString())
+                when {
+                    cleanName.isBlank() -> Toast.makeText(ctx, "Введите название", Toast.LENGTH_SHORT).show()
+                    cleanName.contains("_слой_") -> Toast.makeText(ctx, "Название не должно содержать _слой_", Toast.LENGTH_SHORT).show()
+                    mapFrag == null -> Toast.makeText(ctx, "Карта ещё не готова", Toast.LENGTH_SHORT).show()
+                    mapFrag.renameOfflineArea(area.id, cleanName) -> {
+                        Toast.makeText(ctx, "Переименовано: $cleanName", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        refreshOfflineMapsUI(view)
+                        refreshDownloadedAreasUI(view)
+                    }
+                    else -> Toast.makeText(ctx, "Не удалось переименовать", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showRenameOfflineMapDialog(view: View, mapKey: String, currentName: String) {
+        val ctx = requireContext()
+        val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        val input = EditText(ctx).apply {
+            setText(currentName)
+            setSingleLine(true)
+            selectAll()
+            setTextColor(settingsPalette().textPrimary)
+            setHintTextColor(settingsPalette().textHint)
+            hint = "Название карты"
+        }
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle("Переименовать карту")
+            .setView(input)
+            .setPositiveButton("Сохранить", null)
+            .setNegativeButton("Отмена", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val cleanName = normalizeOfflineDisplayName(input.text.toString())
+                when {
+                    cleanName.isBlank() -> Toast.makeText(ctx, "Введите название", Toast.LENGTH_SHORT).show()
+                    cleanName.contains("_слой_") -> Toast.makeText(ctx, "Название не должно содержать _слой_", Toast.LENGTH_SHORT).show()
+                    mapFrag == null -> Toast.makeText(ctx, "Карта ещё не готова", Toast.LENGTH_SHORT).show()
+                    mapFrag.renameOfflineMap(mapKey, cleanName) -> {
+                        Toast.makeText(ctx, "Переименовано: $cleanName", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        refreshOfflineMapsUI(view)
+                    }
+                    else -> Toast.makeText(ctx, "Не удалось переименовать", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        dialog.show()
+    }
+
     private fun refreshOfflineMapsUI(view: View) {
         val container = view.findViewById<LinearLayout>(R.id.containerOfflineMaps)
         container.removeAllViews()
@@ -4569,191 +4648,6 @@ class SettingsFragment : Fragment() {
         val maps = mapFrag?.getOfflineMaps() ?: emptyList()
         val areas = OfflineAreasManager.loadAreas(ctx)
         val palette = settingsPalette()
-        val successColor = themedColor(R.color.success)
-        val warningColor = themedColor(R.color.warning)
-        val errorColor = themedColor(R.color.error)
-        val density = resources.displayMetrics.density
-        val liveState = TileDownloadManager.getStateSnapshot()
-        val liveProgress = liveState.progress
-        val liveTaskName = liveState.task?.name
-
-        fun sectionTitle(text: String) {
-            val tv = android.widget.TextView(requireContext()).apply {
-                this.text = text
-                setTextColor(palette.textMuted)
-                textSize = 11f
-                letterSpacing = 0.06f
-                setPadding(4, 12, 4, 8)
-            }
-            container.addView(tv)
-        }
-
-        fun chip(
-            label: String,
-            textColor: Int,
-            fillColor: Int,
-            onClick: () -> Unit
-        ): android.widget.TextView {
-            return androidx.appcompat.widget.AppCompatTextView(ctx).apply {
-                text = label
-                setTextColor(textColor)
-                textSize = 12f
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-                gravity = android.view.Gravity.CENTER
-                setPadding((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (6 * density).toInt())
-                background = android.graphics.drawable.GradientDrawable().apply {
-                    cornerRadius = 10f * density
-                    setColor(fillColor)
-                }
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { onClick() }
-            }
-        }
-
-        if (areas.isEmpty() && maps.isEmpty()) {
-            val tv = android.widget.TextView(requireContext()).apply {
-                text = "Нет загруженных карт"
-                setTextColor(palette.textMuted)
-                textSize = 13f
-                setPadding(4, 8, 4, 8)
-            }
-            container.addView(tv)
-            return
-        }
-
-        if (areas.isNotEmpty()) {
-            sectionTitle("ОБЛАСТИ")
-            areas.sortedByDescending { it.createdAt }.forEach { area ->
-                val card = android.widget.LinearLayout(ctx).apply {
-                    orientation = android.widget.LinearLayout.VERTICAL
-                    setPadding((12 * density).toInt(), (12 * density).toInt(), (12 * density).toInt(), (12 * density).toInt())
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        cornerRadius = 12f * density
-                        setColor(palette.surface)
-                        setStroke((1 * density).toInt().coerceAtLeast(1), ContextCompat.getColor(ctx, R.color.card_stroke))
-                    }
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        bottomMargin = (8 * density).toInt()
-                    }
-                }
-
-                val titleRow = android.widget.LinearLayout(ctx).apply {
-                    orientation = android.widget.LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                }
-                val title = android.widget.TextView(ctx).apply {
-                    text = area.name
-                    setTextColor(palette.textPrimary)
-                    textSize = 15f
-                    setTypeface(null, android.graphics.Typeface.BOLD)
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                val statusLabel = when {
-                    liveTaskName == area.name && liveProgress.isRunning -> "Загрузка ${liveProgress.percent}%"
-                    liveTaskName == area.name && liveProgress.isStopping && liveProgress.isPaused -> "Пауза..."
-                    liveTaskName == area.name && liveProgress.isStopping -> "Остановка..."
-                    liveTaskName == area.name && liveProgress.isPaused -> "Пауза ${liveProgress.percent}%"
-                    area.status == "partial" -> "Частично"
-                    area.status == "complete" -> "Готово"
-                    else -> "Подготовка"
-                }
-                val statusColor = when {
-                    liveTaskName == area.name && liveProgress.isRunning -> palette.accent
-                    liveTaskName == area.name && liveProgress.isStopping -> warningColor
-                    liveTaskName == area.name && liveProgress.isPaused -> warningColor
-                    area.status == "partial" -> warningColor
-                    area.status == "complete" -> successColor
-                    else -> palette.textMuted
-                }
-                val status = android.widget.TextView(ctx).apply {
-                    text = statusLabel
-                    setTextColor(statusColor)
-                    textSize = 12f
-                    setTypeface(null, android.graphics.Typeface.BOLD)
-                }
-                titleRow.addView(title)
-                titleRow.addView(status)
-                card.addView(titleRow)
-
-                card.addView(android.widget.TextView(ctx).apply {
-                    text = "${area.layersDescription()} • z${area.minZoom}-${area.maxZoom} • ${String.format("%.0f", area.areaKm2)} км²"
-                    setTextColor(palette.textSecondary)
-                    textSize = 12.5f
-                    setPadding(0, (6 * density).toInt(), 0, 0)
-                })
-
-                card.addView(android.widget.TextView(ctx).apply {
-                    text = "Создано: ${area.createdAt.ifBlank { "без даты" }}"
-                    setTextColor(palette.textHint)
-                    textSize = 11f
-                    setPadding(0, (4 * density).toInt(), 0, 0)
-                })
-
-                val actions = android.widget.LinearLayout(ctx).apply {
-                    orientation = android.widget.LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, (10 * density).toInt(), 0, 0)
-                }
-                actions.addView(chip("На карте", palette.textPrimary, palette.surfaceOverlay) {
-                    mapFrag?.focusOfflineArea(area.name)
-                })
-                when {
-                    liveTaskName == area.name && liveProgress.isRunning -> Unit
-                    liveTaskName == area.name && liveProgress.isStopping -> Unit
-                    liveTaskName == area.name && liveProgress.isPaused || area.status == "partial" || area.status == "paused" -> {
-                        actions.addView(chip("Продолжить", palette.textPrimary, palette.surfaceOverlay) {
-                            mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
-                            refreshOfflineMapsUI(view)
-                        }.apply {
-                            (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
-                        })
-                    }
-                    area.status == "complete" -> {
-                        actions.addView(chip("Обновить", palette.accent, palette.surfaceOverlay) {
-                            mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = true)
-                            refreshOfflineMapsUI(view)
-                        }.apply {
-                            (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
-                        })
-                    }
-                }
-                if (area.overlays.isNotEmpty()) {
-                    actions.addView(chip("Слои", palette.textPrimary, palette.surfaceOverlay) {
-                        mapFrag?.showOfflineLayersMenu(area.name)
-                    }.apply {
-                        (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
-                    })
-                }
-                actions.addView(chip("Удалить", errorColor, 0x22C62828, {
-                    androidx.appcompat.app.AlertDialog.Builder(ctx)
-                        .setTitle("Удалить область")
-                        .setMessage("Удалить оффлайн-область \"${area.name}\" вместе со слоями?")
-                        .setPositiveButton("Удалить") { _, _ ->
-                            if (mapFrag != null) {
-                                mapFrag.deleteOfflineArea(area.id) {
-                                    refreshOfflineMapsUI(view)
-                                }
-                            } else {
-                                OfflineAreasManager.deleteArea(ctx, area.id)
-                                refreshOfflineMapsUI(view)
-                            }
-                        }
-                        .setNegativeButton("Отмена", null)
-                        .show()
-                }).apply {
-                    (layoutParams as? LinearLayout.LayoutParams)?.marginStart = (8 * density).toInt()
-                })
-                card.addView(actions)
-                container.addView(card)
-            }
-        }
 
         val looseMaps = maps.filterNot { info ->
             areas.any { area ->
@@ -4762,12 +4656,38 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        if (looseMaps.isNotEmpty()) {
-            sectionTitle("ОТДЕЛЬНЫЕ ФАЙЛЫ")
-            looseMaps.forEach { info ->
+        val filesLabel = view.findViewById<View>(R.id.labelOfflineMapFiles)
+        filesLabel.visibility = if (looseMaps.isEmpty()) View.GONE else View.VISIBLE
+        container.visibility = if (looseMaps.isEmpty()) View.GONE else View.VISIBLE
+        if (looseMaps.isEmpty()) {
+            if (isAdded) applySettingsTheme(view)
+            return
+        }
+
+        looseMaps.forEach { info ->
                 val row = layoutInflater.inflate(R.layout.item_offline_map, container, false)
                 row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).text = info.name
                 row.findViewById<android.widget.TextView>(R.id.txtOfflineMapName).setTextColor(palette.textSecondary)
+                val rowLayout = row as android.widget.LinearLayout
+                val renameBtn = android.widget.ImageButton(requireContext()).apply {
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        (36 * resources.displayMetrics.density).toInt(),
+                        (36 * resources.displayMetrics.density).toInt()
+                    )
+                    setImageResource(android.R.drawable.ic_menu_edit)
+                    setBackgroundResource(android.R.attr.selectableItemBackgroundBorderless.let { attr ->
+                        val ta = requireContext().obtainStyledAttributes(intArrayOf(attr))
+                        val resId = ta.getResourceId(0, 0)
+                        ta.recycle()
+                        resId
+                    })
+                    imageTintList = android.content.res.ColorStateList.valueOf(palette.textSecondary)
+                    contentDescription = "Rename"
+                    setOnClickListener {
+                        showRenameOfflineMapDialog(view, info.key, info.name)
+                    }
+                }
+                rowLayout.addView(renameBtn, rowLayout.childCount - 1)
                 // Add share button before remove button
                 val shareBtn = android.widget.ImageButton(requireContext()).apply {
                     layoutParams = android.widget.LinearLayout.LayoutParams(
@@ -4787,7 +4707,7 @@ class SettingsFragment : Fragment() {
                         mapFrag?.shareOfflineMap(info.key)
                     }
                 }
-                (row as android.widget.LinearLayout).addView(shareBtn, row.childCount - 1)
+                rowLayout.addView(shareBtn, rowLayout.childCount - 1)
 
                 row.findViewById<View>(R.id.btnRemoveOfflineMap).apply {
                     // Change minus icon to trash
@@ -4808,7 +4728,6 @@ class SettingsFragment : Fragment() {
                     }
                 }
                 container.addView(row)
-            }
         }
         if (isAdded) applySettingsTheme(view)
     }
@@ -4845,6 +4764,7 @@ class SettingsFragment : Fragment() {
         }
 
         areas.forEach { area ->
+            val isActiveArea = activeAreaId == area.id || state.task?.name == area.name
             val row = layoutInflater.inflate(R.layout.item_downloaded_area, container, false)
             row.findViewById<TextView>(R.id.txtAreaName).text = area.name
             row.findViewById<TextView>(R.id.txtAreaMeta).text =
@@ -4854,6 +4774,7 @@ class SettingsFragment : Fragment() {
 
             val btnOpen = row.findViewById<TextView>(R.id.btnAreaOpen)
             val btnLayers = row.findViewById<TextView>(R.id.btnAreaLayers)
+            val btnRename = row.findViewById<TextView>(R.id.btnAreaRename)
             val btnResume = row.findViewById<TextView>(R.id.btnAreaResume)
             val btnDelete = row.findViewById<TextView>(R.id.btnAreaDelete)
             val canOpenOnMap = mapFrag?.hasOfflineAreaBase(area.name) == true
@@ -4868,18 +4789,22 @@ class SettingsFragment : Fragment() {
                 mapFrag?.showOfflineLayersMenu(area.name)
             }
 
+            configureAction(btnRename, !(isActiveArea && (progress.isRunning || progress.isStopping)), "Имя") {
+                showRenameOfflineAreaDialog(view, area)
+            }
+
             when {
-                activeAreaId == area.id && progress.isRunning -> {
+                isActiveArea && progress.isRunning -> {
                     configureAction(btnResume, true, "Пауза") {
                         TileDownloadManager.pauseDownload()
                         OfflineAreasManager.markPaused(ctx, area.id)
                         refreshDownloadedAreasUI(view)
                     }
                 }
-                activeAreaId == area.id && progress.isStopping -> {
+                isActiveArea && progress.isStopping -> {
                     configureAction(btnResume, false, "Остановка")
                 }
-                activeAreaId == area.id && progress.isPaused -> {
+                isActiveArea && progress.isPaused -> {
                     configureAction(btnResume, area.hasStoredGeometry(), "Продолжить") {
                         mapFrag?.restartOfflineAreaDownload(area.id, forceRedownload = false)
                         refreshDownloadedAreasUI(view)

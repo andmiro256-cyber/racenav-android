@@ -66,6 +66,18 @@
             android:textSize="12sp" />
 
         <TextView
+            android:id="@+id/btnAreaRename"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:gravity="center"
+            android:background="#2A2A2A"
+            android:text="Имя"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+        <TextView
             android:id="@+id/btnAreaResume"
             android:layout_width="0dp"
             android:layout_height="36dp"
