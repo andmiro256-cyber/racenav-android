@@ -29,6 +29,7 @@ class WaypointListAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
+        val palette = UiTheme.palette(ctx)
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -42,20 +43,21 @@ class WaypointListAdapter(
             layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply { marginEnd = (8 * dp).toInt() }
         })
         row.addView(TextView(ctx).apply {
-            tag = "sym"; textSize = 16f; setTextColor(Color.WHITE)
+            tag = "sym"; textSize = 16f; setTextColor(palette.textPrimary)
             setPadding(0, 0, (8 * dp).toInt(), 0); visibility = View.GONE
         })
         val info = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        info.addView(TextView(ctx).apply { tag = "name"; textSize = 14f; setTextColor(Color.WHITE) })
-        info.addView(TextView(ctx).apply { tag = "coord"; textSize = 11f; setTextColor(Color.parseColor("#888888")) })
+        info.addView(TextView(ctx).apply { tag = "name"; textSize = 14f; setTextColor(palette.textPrimary) })
+        info.addView(TextView(ctx).apply { tag = "coord"; textSize = 11f; setTextColor(palette.textMuted) })
         row.addView(info)
         return VH(row)
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
+        val palette = UiTheme.palette(holder.itemView.context)
         val wp = waypoints[position]
         val dotColor = wp.color.ifBlank { "#FF6F00" }
         holder.dot.background = GradientDrawable().apply {
@@ -71,7 +73,7 @@ class WaypointListAdapter(
         }
         holder.nameText.text = wp.name.ifBlank { "WP%02d".format(position + 1) }
         holder.coordText.text = "%.5f, %.5f".format(wp.lat, wp.lon)
-        holder.itemView.setBackgroundColor(if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT)
+        holder.itemView.setBackgroundColor(palette.rowBackground(position))
         holder.itemView.setOnClickListener { v ->
             val pos = holder.adapterPosition
             if (pos != RecyclerView.NO_POSITION) onItemClick(pos, v)
@@ -110,6 +112,7 @@ class RouteEditorAdapter(
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
+        val palette = UiTheme.palette(ctx)
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -117,29 +120,29 @@ class RouteEditorAdapter(
             setPadding(0, (6 * dp).toInt(), 0, (6 * dp).toInt())
         }
         row.addView(TextView(ctx).apply {
-            tag = "drag"; text = "≡"; textSize = 20f; setTextColor(Color.parseColor("#666666"))
+            tag = "drag"; text = "≡"; textSize = 20f; setTextColor(palette.textHint)
             setPadding((8 * dp).toInt(), 0, (8 * dp).toInt(), 0)
         })
         row.addView(TextView(ctx).apply {
-            tag = "num"; textSize = 14f; setTextColor(Color.parseColor("#FF6F00"))
+            tag = "num"; textSize = 14f; setTextColor(palette.accent)
             setPadding(0, 0, (8 * dp).toInt(), 0)
         })
         val info = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        info.addView(TextView(ctx).apply { tag = "name"; textSize = 14f; setTextColor(Color.WHITE) })
-        info.addView(TextView(ctx).apply { tag = "coord"; textSize = 11f; setTextColor(Color.parseColor("#888888")) })
-        info.addView(TextView(ctx).apply { tag = "dist"; textSize = 11f; setTextColor(Color.parseColor("#FF6F00")); visibility = View.GONE })
+        info.addView(TextView(ctx).apply { tag = "name"; textSize = 14f; setTextColor(palette.textPrimary) })
+        info.addView(TextView(ctx).apply { tag = "coord"; textSize = 11f; setTextColor(palette.textMuted) })
+        info.addView(TextView(ctx).apply { tag = "dist"; textSize = 11f; setTextColor(palette.accent); visibility = View.GONE })
         row.addView(info)
         row.addView(Button(ctx).apply {
             text = "✏"; textSize = 14f; isAllCaps = false; tag = "edit"
-            setBackgroundColor(Color.TRANSPARENT); setTextColor(Color.parseColor("#FF6F00"))
+            setBackgroundColor(Color.TRANSPARENT); setTextColor(palette.accent)
             minWidth = 0; minimumWidth = 0; setPadding((8*dp).toInt(), 0, (8*dp).toInt(), 0)
         })
         row.addView(Button(ctx).apply {
             text = "✕"; textSize = 14f; isAllCaps = false; tag = "del"
-            setBackgroundColor(Color.TRANSPARENT); setTextColor(Color.parseColor("#FF4444"))
+            setBackgroundColor(Color.TRANSPARENT); setTextColor(palette.error)
             minWidth = 0; minimumWidth = 0; setPadding((8*dp).toInt(), 0, (8*dp).toInt(), 0)
         })
         return VH(row)
@@ -160,7 +163,7 @@ class RouteEditorAdapter(
             holder.distText.visibility = View.GONE
         }
 
-        holder.itemView.setBackgroundColor(if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT)
+        holder.itemView.setBackgroundColor(UiTheme.palette(holder.itemView.context).rowBackground(position))
 
         holder.dragHandle.setOnTouchListener { _, event ->
             if (event.actionMasked == MotionEvent.ACTION_DOWN) dragStartListener?.invoke(holder)
@@ -202,7 +205,9 @@ class RouteItemTouchCallback(private val adapter: RouteEditorAdapter) : ItemTouc
         super.onSelectedChanged(viewHolder, actionState)
         if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
             viewHolder?.itemView?.alpha = 0.7f
-            viewHolder?.itemView?.setBackgroundColor(Color.parseColor("#333333"))
+            viewHolder?.itemView?.setBackgroundColor(
+                UiTheme.palette(viewHolder.itemView.context).surfaceOverlay
+            )
         }
     }
 
@@ -237,6 +242,7 @@ class WidgetOrderAdapter(
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
+        val palette = UiTheme.palette(ctx)
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -247,11 +253,11 @@ class WidgetOrderAdapter(
             setPadding((4 * dp).toInt(), 0, (16 * dp).toInt(), 0)
         }
         row.addView(TextView(ctx).apply {
-            tag = "drag"; text = "≡"; textSize = 20f; setTextColor(Color.parseColor("#666666"))
+            tag = "drag"; text = "≡"; textSize = 20f; setTextColor(palette.textHint)
             setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
         })
         row.addView(TextView(ctx).apply {
-            tag = "label"; textSize = 15f; setTextColor(Color.WHITE)
+            tag = "label"; textSize = 15f; setTextColor(palette.textPrimary)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         row.addView(androidx.appcompat.widget.SwitchCompat(ctx).apply {
@@ -278,7 +284,7 @@ class WidgetOrderAdapter(
             }
         }
         holder.itemView.setBackgroundColor(
-            if (position % 2 == 0) Color.parseColor("#1E1E1E") else Color.TRANSPARENT
+            UiTheme.palette(holder.itemView.context).rowBackground(position)
         )
         holder.dragHandle.setOnTouchListener { _, event ->
             if (event.actionMasked == MotionEvent.ACTION_DOWN) dragStartListener?.invoke(holder)

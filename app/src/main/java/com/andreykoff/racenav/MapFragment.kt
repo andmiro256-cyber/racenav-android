@@ -7046,9 +7046,10 @@ class MapFragment : Fragment() {
     }
 
     private fun buildWpContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        val palette = currentModalPalette()
         root.addView(android.widget.TextView(ctx).apply {
             text = "📌 Точки: ${userMarkers.size}"
-            setTextColor(android.graphics.Color.parseColor("#FFD600"))
+            setTextColor(palette.warning)
             textSize = 15f
             setPadding(0, 12, 0, 4)
         })
@@ -7060,7 +7061,7 @@ class MapFragment : Fragment() {
                     setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
                     gravity = android.view.Gravity.CENTER_VERTICAL
                     isClickable = true; isFocusable = true
-                    if (i % 2 == 0) setBackgroundColor(android.graphics.Color.parseColor("#1E1E1E"))
+                    if (i % 2 == 0) setBackgroundColor(palette.surfaceVariant)
                 }
                 // Color dot
                 val dotSize = (20 * dp).toInt()
@@ -7081,11 +7082,11 @@ class MapFragment : Fragment() {
                 }
                 info.addView(android.widget.TextView(ctx).apply {
                     text = "${i + 1}. ${pt.name.ifBlank { "WP%02d".format(i + 1) }}"
-                    setTextColor(android.graphics.Color.WHITE); textSize = 14f
+                    setTextColor(palette.textPrimary); textSize = 14f
                 })
                 info.addView(android.widget.TextView(ctx).apply {
                     text = "%.5f, %.5f".format(pt.position.latitude, pt.position.longitude)
-                    setTextColor(android.graphics.Color.parseColor("#888888")); textSize = 11f
+                    setTextColor(palette.textMuted); textSize = 11f
                 })
                 pointRow.addView(info)
                 // Tap → popup menu

@@ -3,14 +3,14 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#FF1E1E1E">
+    android:background="@color/background">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="56dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:background="#FF242424"
+        android:background="@color/surface_top"
         android:elevation="2dp">
 
         <TextView
@@ -18,7 +18,7 @@
             android:layout_width="56dp"
             android:layout_height="match_parent"
             android:text="‹"
-            android:textColor="#FFFFFFFF"
+            android:textColor="@color/text_primary"
             android:textSize="28sp"
             android:gravity="center"
             android:clickable="true"
@@ -31,7 +31,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="Редактирование"
-            android:textColor="#FFFFFFFF"
+            android:textColor="@color/text_primary"
             android:textSize="17sp"
             android:textStyle="bold" />
 
@@ -40,7 +40,7 @@
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
             android:text="СОХРАНИТЬ"
-            android:textColor="#FFFF6F00"
+            android:textColor="@color/primary"
             android:textSize="13sp"
             android:textStyle="bold"
             android:paddingHorizontal="16dp"
@@ -65,7 +65,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="НАЗВАНИЕ"
-                android:textColor="#FF888888"
+                android:textColor="@color/text_muted"
                 android:textSize="11sp"
                 android:textStyle="bold"
                 android:letterSpacing="0.08"
@@ -75,10 +75,10 @@
                 android:id="@+id/groupEditName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:background="#FF2A2A2A"
+                android:background="@color/surface_variant"
                 android:padding="12dp"
-                android:textColor="#FFFFFFFF"
-                android:textColorHint="#FF666666"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_hint"
                 android:hint="Например, Ралли"
                 android:textSize="15sp"
                 android:maxLength="32"
@@ -89,7 +89,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="ЦВЕТ"
-                android:textColor="#FF888888"
+                android:textColor="@color/text_muted"
                 android:textSize="11sp"
                 android:textStyle="bold"
                 android:letterSpacing="0.08"
@@ -112,7 +112,7 @@
                 android:id="@+id/groupEditMembersCount"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:textColor="#FF888888"
+                android:textColor="@color/text_muted"
                 android:textSize="11sp"
                 android:textStyle="bold"
                 android:letterSpacing="0.08"
@@ -133,11 +133,11 @@
                 android:layout_marginTop="12dp"
                 android:padding="14dp"
                 android:text="+ ДОБАВИТЬ УЧАСТНИКОВ"
-                android:textColor="#FFFF6F00"
+                android:textColor="@color/primary"
                 android:textSize="13sp"
                 android:textStyle="bold"
                 android:gravity="center"
-                android:background="#331E3A5E"
+                android:background="@color/surface_overlay"
                 android:clickable="true"
                 android:focusable="true" />
 
@@ -148,11 +148,11 @@
                 android:layout_marginTop="24dp"
                 android:padding="14dp"
                 android:text="УДАЛИТЬ ГРУППУ"
-                android:textColor="#FFF44336"
+                android:textColor="@color/error"
                 android:textSize="13sp"
                 android:textStyle="bold"
                 android:gravity="center"
-                android:background="#332B1212"
+                android:background="@color/surface_overlay"
                 android:clickable="true"
                 android:focusable="true" />
         </LinearLayout>

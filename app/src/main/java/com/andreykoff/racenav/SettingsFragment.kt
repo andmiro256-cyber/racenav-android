@@ -106,7 +106,10 @@ class SettingsFragment : Fragment() {
         val textSecondary: Int,
         val textMuted: Int,
         val textHint: Int,
-        val accent: Int
+        val accent: Int,
+        val success: Int,
+        val warning: Int,
+        val error: Int
     )
 
     private companion object {
@@ -363,21 +366,22 @@ class SettingsFragment : Fragment() {
             val keepParent = keepScreenRow.parent as ViewGroup
             val keepIdx = keepParent.indexOfChild(keepScreenRow) + 1
             val dp = resources.displayMetrics.density
+            val palette = settingsPalette()
             val scaleRow = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.VERTICAL
-                setBackgroundColor(0xFF1E1E1E.toInt())
+                setBackgroundColor(palette.surface)
                 setPadding((16 * dp).toInt(), (8 * dp).toInt(), (16 * dp).toInt(), (12 * dp).toInt())
             }
             val labelRow = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
             }
             labelRow.addView(TextView(requireContext()).apply {
-                text = "Масштаб интерфейса"; setTextColor(0xFFFFFFFF.toInt()); textSize = 15f
+                text = "Масштаб интерфейса"; setTextColor(palette.textPrimary); textSize = 15f
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
             val scaleValue = TextView(requireContext()).apply {
                 val cur = prefs.getInt(MapFragment.PREF_UI_SCALE, 5)
-                text = "${cur * 20}%"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                text = "${cur * 20}%"; setTextColor(palette.textMuted); textSize = 13f
             }
             labelRow.addView(scaleValue)
             scaleRow.addView(labelRow)
@@ -875,10 +879,11 @@ class SettingsFragment : Fragment() {
             if (widgetParent != null && fontRow != null) {
                 val dp = resources.displayMetrics.density
                 val insertIdx = widgetParent.indexOfChild(fontRow) + 1
+                val palette = settingsPalette()
 
                 val compassContainer = LinearLayout(requireContext()).apply {
                     orientation = LinearLayout.VERTICAL
-                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setBackgroundColor(palette.surface)
                     setPadding((16 * dp).toInt(), (8 * dp).toInt(), (16 * dp).toInt(), (12 * dp).toInt())
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -896,7 +901,7 @@ class SettingsFragment : Fragment() {
                 }
                 switchRow.addView(TextView(requireContext()).apply {
                     text = "Компас навигации"
-                    setTextColor(0xFFFFFFFF.toInt()); textSize = 15f
+                    setTextColor(palette.textPrimary); textSize = 15f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
                 val compassSwitch = SwitchCompat(requireContext()).apply {
@@ -916,7 +921,7 @@ class SettingsFragment : Fragment() {
                     setPadding(0, (6 * dp).toInt(), 0, 0)
                 }
                 posRow.addView(TextView(requireContext()).apply {
-                    text = "Позиция:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    text = "Позиция:"; setTextColor(palette.textMuted); textSize = 13f
                     setPadding(0, 0, (8 * dp).toInt(), 0)
                 })
                 val posRg = RadioGroup(requireContext()).apply {
@@ -930,7 +935,7 @@ class SettingsFragment : Fragment() {
                 posOptions.forEach { (value, label) ->
                     posRg.addView(RadioButton(requireContext()).apply {
                         text = label; tag = value
-                        setTextColor(0xFFCCCCCC.toInt()); textSize = 12f
+                        setTextColor(palette.textSecondary); textSize = 12f
                         id = View.generateViewId()
                         isChecked = (value == currentPos)
                         setPadding((4 * dp).toInt(), 0, (4 * dp).toInt(), 0)
@@ -952,12 +957,12 @@ class SettingsFragment : Fragment() {
                     setPadding(0, (4 * dp).toInt(), 0, 0)
                 }
                 sizeRow.addView(TextView(requireContext()).apply {
-                    text = "Размер:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    text = "Размер:"; setTextColor(palette.textMuted); textSize = 13f
                     setPadding(0, 0, (8 * dp).toInt(), 0)
                 })
                 val currentSize = prefs.getInt(MapFragment.PREF_NAV_COMPASS_SIZE, 100)
                 val sizeLabel = TextView(requireContext()).apply {
-                    text = "${currentSize}dp"; setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+                    text = "${currentSize}dp"; setTextColor(palette.textSecondary); textSize = 13f
                     setPadding(0, 0, (8 * dp).toInt(), 0)
                 }
                 sizeRow.addView(sizeLabel)
@@ -986,12 +991,12 @@ class SettingsFragment : Fragment() {
                     setPadding(0, (4 * dp).toInt(), 0, 0)
                 }
                 alphaRow.addView(TextView(requireContext()).apply {
-                    text = "Прозрачность:"; setTextColor(0xFF888888.toInt()); textSize = 13f
+                    text = "Прозрачность:"; setTextColor(palette.textMuted); textSize = 13f
                     setPadding(0, 0, (8 * dp).toInt(), 0)
                 })
                 val alphaValue = TextView(requireContext()).apply {
                     val cur = prefs.getInt(MapFragment.PREF_NAV_COMPASS_ALPHA, 7)
-                    text = "${cur * 10}%"; setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+                    text = "${cur * 10}%"; setTextColor(palette.textSecondary); textSize = 13f
                     setPadding(0, 0, (8 * dp).toInt(), 0)
                 }
                 alphaRow.addView(alphaValue)
@@ -1399,28 +1404,29 @@ class SettingsFragment : Fragment() {
         val soundRowsParent = soundTakenRow?.parent as? ViewGroup
         if (soundRowsParent != null && soundTakenRow != null) {
             val density = resources.displayMetrics.density
+            val palette = settingsPalette()
             fun makeCustomSoundRow(title: String): Pair<LinearLayout, TextView> {
                 val row = LinearLayout(requireContext()).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setBackgroundColor(palette.surface)
                     setPadding((16 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
                 }
                 row.addView(TextView(requireContext()).apply {
                     text = title
-                    setTextColor(0xFFFFFFFF.toInt())
+                    setTextColor(palette.textPrimary)
                     textSize = 14f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
                 val value = TextView(requireContext()).apply {
-                    setTextColor(0xFFFF6F00.toInt())
+                    setTextColor(palette.accent)
                     textSize = 13f
                     gravity = android.view.Gravity.END
                 }
                 row.addView(value)
                 row.addView(TextView(requireContext()).apply {
                     text = "  ›"
-                    setTextColor(0xFF888888.toInt())
+                    setTextColor(palette.textMuted)
                     textSize = 15f
                 })
                 return row to value
@@ -2635,11 +2641,12 @@ class SettingsFragment : Fragment() {
                         R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
                     } else 0.0
                     val distStr = if (dist > 0) String.format("%.1f км", dist / 1000.0) else "—"
+                    val palette = settingsPalette()
                     val row = LinearLayout(requireContext()).apply {
                         orientation = LinearLayout.HORIZONTAL
                         setPadding((16 * density).toInt(), (6 * density).toInt(), (16 * density).toInt(), (6 * density).toInt())
                         gravity = android.view.Gravity.CENTER_VERTICAL
-                        setBackgroundColor(0xFF1E1E1E.toInt())
+                        setBackgroundColor(palette.surface)
                     }
                     // Green dot for online
                     val dot = android.view.View(requireContext()).apply {
@@ -2651,15 +2658,16 @@ class SettingsFragment : Fragment() {
                     row.addView(dot)
                     row.addView(TextView(requireContext()).apply {
                         text = "${monitoringStatus.emoji} ${d.name} — $distStr"
-                        setTextColor(0xFFCCCCCC.toInt())
+                        setTextColor(palette.textSecondary)
                         textSize = 13f
                     })
                     container.addView(row)
                 }
                 if (sorted.isEmpty()) {
+                    val palette = settingsPalette()
                     container.addView(TextView(requireContext()).apply {
                         text = "Нет участников онлайн"
-                        setTextColor(0xFF666666.toInt())
+                        setTextColor(palette.textHint)
                         textSize = 12f
                         setPadding((16 * density).toInt(), (8 * density).toInt(), 0, (4 * density).toInt())
                     })
@@ -2679,15 +2687,16 @@ class SettingsFragment : Fragment() {
                 val insertIdx = parentContainer.indexOfChild(markerSizeView) + 1
                 val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                 val density = resources.displayMetrics.density
+                val palette = settingsPalette()
                 val section = LinearLayout(requireContext()).apply {
                     orientation = LinearLayout.VERTICAL
-                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setBackgroundColor(palette.surface)
                     setPadding(0, (8 * density).toInt(), 0, (8 * density).toInt())
                 }
                 // Section title
                 section.addView(TextView(requireContext()).apply {
                     text = "Карта — дополнительно"
-                    setTextColor(0xFFFF6F00.toInt()); textSize = 14f
+                    setTextColor(palette.accent); textSize = 14f
                     setPadding((16 * density).toInt(), (8 * density).toInt(), 0, (12 * density).toInt())
                     setTypeface(null, android.graphics.Typeface.BOLD)
                 })
@@ -2858,24 +2867,25 @@ class SettingsFragment : Fragment() {
             val txtLicLine = view.findViewById<TextView>(R.id.txtLicenseLine)
             val txtSrvLine = view.findViewById<TextView>(R.id.txtServerLine)
             val txtDevId = view.findViewById<TextView>(R.id.txtLicenseDeviceId)
+            val palette = settingsPalette()
 
             if (isFull) {
                 txtBadge.text = "⭐ Navigator Pro"
-                txtBadge.setTextColor(0xFFFFD700.toInt())
-                licenseCard.setBackgroundColor(0xFF1A1A2E.toInt())
+                txtBadge.setTextColor(palette.warning)
+                licenseCard.setBackgroundColor(palette.surfaceOverlay)
             } else if (licActive) {
                 txtBadge.text = "📱 Navigator Pro"
-                txtBadge.setTextColor(0xFF4CAF50.toInt())
-                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+                txtBadge.setTextColor(palette.success)
+                licenseCard.setBackgroundColor(palette.surface)
             } else if (isTrial) {
                 val days = LicenseManager.trialDaysLeft(ctx)
                 txtBadge.text = "⏳ Пробный период — $days дн."
-                txtBadge.setTextColor(0xFFFF9800.toInt())
-                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+                txtBadge.setTextColor(palette.accent)
+                licenseCard.setBackgroundColor(palette.surface)
             } else {
                 txtBadge.text = "🔒 Лицензия не активна"
-                txtBadge.setTextColor(0xFFFF5252.toInt())
-                licenseCard.setBackgroundColor(0xFF1E1E1E.toInt())
+                txtBadge.setTextColor(palette.error)
+                licenseCard.setBackgroundColor(palette.surface)
             }
 
             txtLicLine.text = if (licActive) {
@@ -2886,7 +2896,7 @@ class SettingsFragment : Fragment() {
             } else {
                 "📱 Navigator Pro — нет лицензии"
             }
-            txtLicLine.setTextColor(if (licActive) 0xFF4CAF50.toInt() else 0xFF888888.toInt())
+            txtLicLine.setTextColor(if (licActive) palette.success else palette.textMuted)
 
             txtSrvLine.text = if (srvActive) {
                 val dateStr = fmtDate(srvUntil) ?: "активен"
@@ -2894,7 +2904,7 @@ class SettingsFragment : Fragment() {
             } else {
                 "📡 Server — нет подписки"
             }
-            txtSrvLine.setTextColor(if (srvActive) 0xFF4CAF50.toInt() else 0xFF888888.toInt())
+            txtSrvLine.setTextColor(if (srvActive) palette.success else palette.textMuted)
 
             // Show user email after server line
             val userEmail = prefs.getString("sync_email", null) ?: ""
@@ -3239,7 +3249,10 @@ class SettingsFragment : Fragment() {
         textSecondary = themedColor(R.color.text_secondary),
         textMuted = themedColor(R.color.text_muted),
         textHint = themedColor(R.color.text_hint),
-        accent = themedColor(R.color.primary)
+        accent = themedColor(R.color.primary),
+        success = themedColor(R.color.success),
+        warning = themedColor(R.color.warning),
+        error = themedColor(R.color.error)
     )
 
     private fun remapBackgroundColor(current: Int, palette: SettingsPalette): Int? = when (current) {
@@ -3395,17 +3408,18 @@ class SettingsFragment : Fragment() {
         val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
         val dp = resources.displayMetrics.density
         val pad = (16 * dp).toInt()
+        val palette = UiTheme.palette(ctx)
 
         val root = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+            setBackgroundColor(palette.surface)
         }
 
         // Title
         root.addView(android.widget.TextView(ctx).apply {
             text = "Путевые точки (${wps.size})"
-            setTextColor(android.graphics.Color.WHITE)
+            setTextColor(palette.textPrimary)
             textSize = 18f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, (12 * dp).toInt())
@@ -3479,9 +3493,11 @@ class SettingsFragment : Fragment() {
         root.addView(recyclerView)
 
         dialog.setContentView(root)
-        dialog.window?.navigationBarColor = android.graphics.Color.parseColor("#1A1A1A")
-        (root.parent as? android.view.View)?.setBackgroundColor(android.graphics.Color.parseColor("#1A1A1A"))
+        dialog.window?.navigationBarColor = palette.surface
+        (root.parent as? android.view.View)?.setBackgroundColor(palette.surface)
         dialog.show()
+        dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            ?.setBackgroundColor(palette.surface)
         dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
     }
 
@@ -3937,10 +3953,11 @@ class SettingsFragment : Fragment() {
                 val mapLabels = mapNames.values.toTypedArray()
 
                 fun addMapRow(label: String, prefKey: String, defaultKey: String) {
+                    val palette = settingsPalette()
                     val row = LinearLayout(requireContext()).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = android.view.Gravity.CENTER_VERTICAL
-                        setBackgroundColor(0xFF1E1E1E.toInt())
+                        setBackgroundColor(palette.surface)
                         layoutParams = LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT,
                             (48 * dp + 0.5f).toInt()
@@ -3950,13 +3967,13 @@ class SettingsFragment : Fragment() {
                     val currentKey = prefs.getString(prefKey, defaultKey) ?: defaultKey
                     val txt = TextView(requireContext()).apply {
                         text = label
-                        setTextColor(0xFFFFFFFF.toInt())
+                        setTextColor(palette.textPrimary)
                         textSize = 15f
                         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     }
                     val value = TextView(requireContext()).apply {
                         text = mapNames[currentKey] ?: currentKey
-                        setTextColor(0xFF888888.toInt())
+                        setTextColor(palette.textMuted)
                         textSize = 13f
                     }
                     row.addView(txt)
@@ -5109,6 +5126,7 @@ class SettingsFragment : Fragment() {
         fun rebuildList() {
             container.removeAllViews()
             val arr = loadSources()
+            val palette = settingsPalette()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
                 val name = obj.optString("name", "Без имени")
@@ -5119,7 +5137,7 @@ class SettingsFragment : Fragment() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
                     setPadding(16, 12, 16, 12)
-                    setBackgroundColor(0xFF1E1E1E.toInt())
+                    setBackgroundColor(palette.surface)
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
@@ -5129,7 +5147,7 @@ class SettingsFragment : Fragment() {
                 val typeIcon = if (type == "overlay") "🔲" else "🗺"
                 row.addView(TextView(requireContext()).apply {
                     text = "$typeIcon $name"
-                    setTextColor(0xFFFFFFFF.toInt())
+                    setTextColor(palette.textPrimary)
                     textSize = 14f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     setSingleLine(true)
@@ -5156,7 +5174,7 @@ class SettingsFragment : Fragment() {
             if (arr.length() == 0) {
                 container.addView(TextView(requireContext()).apply {
                     text = "Нет пользовательских источников"
-                    setTextColor(0xFF666666.toInt())
+                    setTextColor(palette.textHint)
                     textSize = 13f
                     setPadding(16, 8, 16, 8)
                 })
@@ -5175,6 +5193,7 @@ class SettingsFragment : Fragment() {
 
     private fun showAddSourceDialog(prefs: android.content.SharedPreferences, onDone: () -> Unit) {
         val ctx = requireContext()
+        val palette = settingsPalette()
         val pad = 24
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -5183,22 +5202,22 @@ class SettingsFragment : Fragment() {
 
         root.addView(TextView(ctx).apply {
             text = "Формат URL: https://.../{z}/{x}/{y}.png"
-            setTextColor(0xFF888888.toInt())
+            setTextColor(palette.textMuted)
             textSize = 12f
             setPadding(0, 0, 0, 12)
         })
 
         val inputName = android.widget.EditText(ctx).apply {
             hint = "Название"
-            setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF666666.toInt())
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textHint)
         }
         root.addView(inputName)
 
         val inputUrl = android.widget.EditText(ctx).apply {
             hint = "URL шаблон (с {z}/{x}/{y})"
-            setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF666666.toInt())
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textHint)
             inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
         root.addView(inputUrl)
@@ -5206,11 +5225,11 @@ class SettingsFragment : Fragment() {
         // Type selector
         val typeGroup = RadioGroup(ctx).apply { orientation = RadioGroup.HORIZONTAL }
         val rbBase = android.widget.RadioButton(ctx).apply {
-            setText("Базовый слой"); setTextColor(0xFFFFFFFF.toInt()); isChecked = true
+            setText("Базовый слой"); setTextColor(palette.textPrimary); isChecked = true
             id = View.generateViewId()
         }
         val rbOverlay = android.widget.RadioButton(ctx).apply {
-            setText("Оверлей"); setTextColor(0xFFFFFFFF.toInt())
+            setText("Оверлей"); setTextColor(palette.textPrimary)
             id = View.generateViewId()
         }
         typeGroup.addView(rbBase)
@@ -5219,7 +5238,7 @@ class SettingsFragment : Fragment() {
 
         // TMS checkbox
         val cbTms = android.widget.CheckBox(ctx).apply {
-            text = "TMS (перевёрнутая Y)"; setTextColor(0xFFCCCCCC.toInt()); textSize = 13f
+            text = "TMS (перевёрнутая Y)"; setTextColor(palette.textSecondary); textSize = 13f
         }
         root.addView(cbTms)
 

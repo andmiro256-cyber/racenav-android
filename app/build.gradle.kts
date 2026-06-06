@@ -18,8 +18,8 @@ fun secretProperty(name: String): String? {
         ?: System.getenv(name)
 }
 
-val appVersionCode = secretProperty("RACENAV_VERSION_CODE")?.toIntOrNull() ?: 396
-val appVersionName = secretProperty("RACENAV_VERSION_NAME") ?: "2.9.89"
+val appVersionCode = secretProperty("RACENAV_VERSION_CODE")?.toIntOrNull() ?: 399
+val appVersionName = secretProperty("RACENAV_VERSION_NAME") ?: "2.9.90"
 
 val releaseStoreFile = secretProperty("RACENAV_STORE_FILE")
     ?: secretProperty("KEYSTORE_PATH")

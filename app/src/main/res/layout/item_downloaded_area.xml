@@ -4,7 +4,7 @@
     android:layout_height="wrap_content"
     android:layout_marginTop="4dp"
     android:orientation="vertical"
-    android:background="#1E1E1E"
+    android:background="@color/surface"
     android:paddingStart="12dp"
     android:paddingTop="10dp"
     android:paddingEnd="12dp"
@@ -14,7 +14,7 @@
         android:id="@+id/txtAreaName"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textColor="#FFFFFF"
+        android:textColor="@color/text_primary"
         android:textSize="15sp"
         android:textStyle="bold"
         android:ellipsize="end"
@@ -25,7 +25,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:textColor="#BBBBBB"
+        android:textColor="@color/text_secondary"
         android:textSize="12sp" />
 
     <TextView
@@ -33,7 +33,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="2dp"
-        android:textColor="#888888"
+        android:textColor="@color/text_muted"
         android:textSize="12sp" />
 
     <LinearLayout
@@ -48,9 +48,9 @@
             android:layout_height="36dp"
             android:layout_weight="1"
             android:gravity="center"
-            android:background="#2A2A2A"
+            android:background="@color/surface_variant"
             android:text="Открыть"
-            android:textColor="#FFFFFF"
+            android:textColor="@color/text_primary"
             android:textSize="12sp" />
 
         <TextView
@@ -60,9 +60,9 @@
             android:layout_weight="1"
             android:layout_marginStart="6dp"
             android:gravity="center"
-            android:background="#2A2A2A"
+            android:background="@color/surface_variant"
             android:text="Слои"
-            android:textColor="#FFFFFF"
+            android:textColor="@color/text_primary"
             android:textSize="12sp" />
 
         <TextView
@@ -72,9 +72,9 @@
             android:layout_weight="1"
             android:layout_marginStart="6dp"
             android:gravity="center"
-            android:background="#2A2A2A"
+            android:background="@color/surface_variant"
             android:text="Имя"
-            android:textColor="#FFFFFF"
+            android:textColor="@color/text_primary"
             android:textSize="12sp" />
 
         <TextView
@@ -84,9 +84,9 @@
             android:layout_weight="1"
             android:layout_marginStart="6dp"
             android:gravity="center"
-            android:background="#2A2A2A"
+            android:background="@color/surface_variant"
             android:text="Продолжить"
-            android:textColor="#FFF59D"
+            android:textColor="@color/warning"
             android:textSize="12sp" />
 
         <TextView
@@ -96,9 +96,9 @@
             android:layout_weight="1"
             android:layout_marginStart="6dp"
             android:gravity="center"
-            android:background="#2A2A2A"
+            android:background="@color/surface_variant"
             android:text="Удалить"
-            android:textColor="#FF8A80"
+            android:textColor="@color/error"
             android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

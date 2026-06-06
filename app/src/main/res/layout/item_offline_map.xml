@@ -10,7 +10,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
-        android:textColor="#CCCCCC"
+        android:textColor="@color/text_secondary"
         android:textSize="13sp"
         android:paddingStart="4dp"
         android:ellipsize="end"

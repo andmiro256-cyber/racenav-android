@@ -35,15 +35,16 @@ class MembersPickerDialog : DialogFragment() {
 
         val ctx = requireContext()
         val density = resources.displayMetrics.density
+        val palette = UiTheme.palette(ctx)
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF1E1E1E.toInt())
+            setBackgroundColor(palette.surface)
             setPadding(0, 0, 0, (8 * density).toInt())
         }
 
         titleLabel = TextView(ctx).apply {
             text = "Добавить в «$groupName»"
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(palette.textPrimary)
             textSize = 16f
             setPadding((16 * density).toInt(), (14 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
         }
@@ -51,9 +52,9 @@ class MembersPickerDialog : DialogFragment() {
 
         val searchEdit = EditText(ctx).apply {
             hint = "Поиск по имени или ID"
-            setHintTextColor(0xFF666666.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF2A2A2A.toInt())
+            setHintTextColor(palette.textHint)
+            setTextColor(palette.textPrimary)
+            setBackgroundColor(palette.surfaceVariant)
             textSize = 14f
             setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
         }
@@ -123,9 +124,10 @@ class MembersPickerDialog : DialogFragment() {
         val offlineFiltered = devicesOffline.filter { matches(it) }
 
         fun sectionHeader(text: String, count: Int) {
+            val palette = UiTheme.palette(ctx)
             val tv = TextView(ctx).apply {
                 this.text = "$text ($count)"
-                setTextColor(0xFF888888.toInt())
+                setTextColor(palette.textMuted)
                 textSize = 10f
                 setPadding((16 * density).toInt(), (10 * density).toInt(), (16 * density).toInt(), (6 * density).toInt())
             }
@@ -133,9 +135,10 @@ class MembersPickerDialog : DialogFragment() {
         }
 
         if (onlineFiltered.isEmpty() && offlineFiltered.isEmpty()) {
+            val palette = UiTheme.palette(ctx)
             val tv = TextView(ctx).apply {
                 text = "Никого не найдено"
-                setTextColor(0xFF666666.toInt())
+                setTextColor(palette.textHint)
                 textSize = 13f
                 setPadding((16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt())
             }
@@ -156,17 +159,24 @@ class MembersPickerDialog : DialogFragment() {
     private fun buildRow(d: LiveUsersPoller.LiveDevice, online: Boolean): View {
         val ctx = requireContext()
         val density = resources.displayMetrics.density
+        val palette = UiTheme.palette(ctx)
+        val selectableAttrs = ctx.obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+        val selectableAttr = selectableAttrs.getResourceId(0, 0)
+        selectableAttrs.recycle()
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             setPadding((16 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt())
             isClickable = true
-            setBackgroundResource(androidx.appcompat.R.drawable.abc_list_selector_holo_dark)
+            setBackgroundColor(palette.surfaceVariant)
+            if (selectableAttr != 0) {
+                foreground = androidx.core.content.ContextCompat.getDrawable(ctx, selectableAttr)
+            }
         }
         val uid = d.uniqueId.uppercase()
         val checkBox = CheckBox(ctx).apply {
             isChecked = uid in selected
-            buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF6F00.toInt())
+            buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
             setOnCheckedChangeListener { _, c ->
                 if (c) selected.add(uid) else selected.remove(uid)
             }
@@ -178,12 +188,12 @@ class MembersPickerDialog : DialogFragment() {
         }
         texts.addView(TextView(ctx).apply {
             text = d.name.ifBlank { uid }
-            setTextColor(if (online) 0xFFFFFFFF.toInt() else 0xFFAAAAAA.toInt())
+            setTextColor(if (online) palette.textPrimary else palette.textSecondary)
             textSize = 14f
         })
         texts.addView(TextView(ctx).apply {
             text = uid
-            setTextColor(0xFF666666.toInt())
+            setTextColor(palette.textHint)
             textSize = 10f
             typeface = android.graphics.Typeface.MONOSPACE
         })

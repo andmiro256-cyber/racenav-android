@@ -58,11 +58,12 @@ class LayerSelectorBottomSheet(
         seekMaxRef = null
 
         val dp = context.resources.displayMetrics.density
+        val palette = UiTheme.palette(context)
         val dialog = BottomSheetDialog(context, com.google.android.material.R.style.Theme_Design_BottomSheetDialog)
 
         // NestedScrollView for proper scroll inside BottomSheet
         val scroll = androidx.core.widget.NestedScrollView(context).apply {
-            setBackgroundColor(0xFF1A1A1A.toInt())
+            setBackgroundColor(palette.surface)
         }
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -72,7 +73,7 @@ class LayerSelectorBottomSheet(
         // Title
         root.addView(TextView(context).apply {
             text = "Скачивание карт"
-            setTextColor(Color.WHITE)
+            setTextColor(palette.textPrimary)
             textSize = 18f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, (4 * dp).toInt())
@@ -81,7 +82,7 @@ class LayerSelectorBottomSheet(
         // Area info
         root.addView(TextView(context).apply {
             text = "Область: ${String.format("%.0f", area.areaKm2)} км² • ${area.polygon.size} точек"
-            setTextColor(0xFFAAAAAA.toInt())
+            setTextColor(palette.textSecondary)
             textSize = 13f
             setPadding(0, 0, 0, (8 * dp).toInt())
         })
@@ -91,11 +92,11 @@ class LayerSelectorBottomSheet(
         val autoName = "Карта $ts"
         nameInput = EditText(context).apply {
             setText(autoName)
-            setTextColor(Color.WHITE)
-            setHintTextColor(0xFF666666.toInt())
+            setTextColor(palette.textPrimary)
+            setHintTextColor(palette.textHint)
             hint = "Название карты"
             textSize = 15f
-            setBackgroundColor(0xFF2A2A2A.toInt())
+            setBackgroundColor(palette.surfaceVariant)
             setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
             selectAll()
             maxLines = 1
@@ -114,9 +115,9 @@ class LayerSelectorBottomSheet(
             baseMaps.entries.forEachIndexed { i, (key, info) ->
                 val rb = RadioButton(context).apply {
                     text = "${info.label} (z${info.maxZoom})"
-                    setTextColor(Color.WHITE)
+                    setTextColor(palette.textPrimary)
                     textSize = 15f
-                    buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF9800.toInt())
+                    buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
                     id = View.generateViewId()
                     tag = key
                 }
@@ -147,9 +148,9 @@ class LayerSelectorBottomSheet(
             for ((key, info) in overlays) {
                 val cb = CheckBox(context).apply {
                     text = "${info.label} (z${info.maxZoom})"
-                    setTextColor(Color.WHITE)
+                    setTextColor(palette.textPrimary)
                     textSize = 15f
-                    buttonTintList = android.content.res.ColorStateList.valueOf(0xFFFF9800.toInt())
+                    buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
                     setOnCheckedChangeListener { _, checked ->
                         if (checked) selectedOverlays.add(key) else selectedOverlays.remove(key)
                         updateEstimate()
@@ -163,7 +164,7 @@ class LayerSelectorBottomSheet(
         root.addView(sectionLabel("ZOOM ДИАПАЗОН", dp))
         val txtZoomRange = TextView(context).apply {
             text = "z$minZoom — z$maxZoom"
-            setTextColor(Color.WHITE)
+            setTextColor(palette.textPrimary)
             textSize = 14f
             gravity = Gravity.CENTER
             setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
@@ -174,7 +175,7 @@ class LayerSelectorBottomSheet(
 
         root.addView(TextView(context).apply {
             text = "Минимум"
-            setTextColor(0xFF888888.toInt()); textSize = 12f
+            setTextColor(palette.textMuted); textSize = 12f
         })
         val seekMin = SeekBar(context).apply {
             max = MAX_ZOOM - MIN_ZOOM
@@ -194,7 +195,7 @@ class LayerSelectorBottomSheet(
 
         root.addView(TextView(context).apply {
             text = "Максимум"
-            setTextColor(0xFF888888.toInt()); textSize = 12f
+            setTextColor(palette.textMuted); textSize = 12f
         })
         seekMaxRef = SeekBar(context).apply {
             max = MAX_ZOOM - MIN_ZOOM
@@ -216,11 +217,11 @@ class LayerSelectorBottomSheet(
         root.addView(View(context).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt())
                 .apply { topMargin = (16 * dp).toInt(); bottomMargin = (8 * dp).toInt() }
-            setBackgroundColor(0xFF333333.toInt())
+            setBackgroundColor(palette.divider)
         })
         txtEstimate = TextView(context).apply {
             textSize = 16f
-            setTextColor(Color.WHITE)
+            setTextColor(palette.textPrimary)
             gravity = Gravity.CENTER
             setPadding(0, (8 * dp).toInt(), 0, (12 * dp).toInt())
         }
@@ -232,7 +233,7 @@ class LayerSelectorBottomSheet(
             textSize = 16f
             isAllCaps = false
             setTextColor(Color.WHITE)
-            setBackgroundColor(0xFFFF6F00.toInt())
+            setBackgroundColor(palette.accent)
             setPadding(0, (14 * dp).toInt(), 0, (14 * dp).toInt())
             setOnClickListener {
                 val mapName = nameInput?.text?.toString()?.trim()?.ifBlank { null } ?: autoName
@@ -255,7 +256,7 @@ class LayerSelectorBottomSheet(
             text = "Отмена"
             textSize = 14f
             isAllCaps = false
-            setTextColor(0xFF888888.toInt())
+            setTextColor(palette.textMuted)
             setBackgroundColor(Color.TRANSPARENT)
             setOnClickListener { dialog.dismiss() }
         })
@@ -267,14 +268,14 @@ class LayerSelectorBottomSheet(
         dialog.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
         dialog.show()
         dialog.window?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-            ?.setBackgroundColor(0xFF1A1A1A.toInt())
+            ?.setBackgroundColor(palette.surface)
 
         updateEstimate()
     }
 
     private fun sectionLabel(text: String, dp: Float) = TextView(context).apply {
         this.text = text
-        setTextColor(0xFF888888.toInt())
+        setTextColor(UiTheme.palette(context).textMuted)
         textSize = 11f
         letterSpacing = 0.1f
         setPadding(0, (16 * dp).toInt(), 0, (6 * dp).toInt())
@@ -286,7 +287,8 @@ class LayerSelectorBottomSheet(
         CoroutineScope(Dispatchers.Main).launch {
             val estimate = SizeEstimator.estimate(area.boundingBox, baseLayers, selectedOverlays.toList(), minZoom, maxZoom, polygonPairs)
             txtEstimate?.text = "${estimate.totalTiles} тайлов • ${estimate.formatSize()}"
-            txtEstimate?.setTextColor(if (estimate.isLarge) 0xFFFF5252.toInt() else Color.WHITE)
+            val palette = UiTheme.palette(context)
+            txtEstimate?.setTextColor(if (estimate.isLarge) palette.error else palette.textPrimary)
             btnDownload?.isEnabled = estimate.totalTiles > 0 && selectedBase.isNotEmpty()
         }
     }
