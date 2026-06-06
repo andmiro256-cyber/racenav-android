@@ -196,6 +196,7 @@ class MapFragment : Fragment() {
     var isScreenLocked = false
         private set
     private val loadedTrackPoints = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
+    private val loadedTrackTimes = mutableListOf<Long?>()
     private data class LoadedTrackImport(val name: String, val pointCount: Int)
     private val loadedTrackImports = mutableListOf<LoadedTrackImport>()
 
@@ -632,6 +633,7 @@ class MapFragment : Fragment() {
         // Persistence of loaded data across restarts
         const val PREF_SAVED_WAYPOINTS_JSON = "saved_waypoints_json"
         const val PREF_SAVED_TRACK_JSON = "saved_track_json"
+        const val PREF_SAVED_TRACK_TIMES_JSON = "saved_track_times_json"
         const val PREF_SAVED_TRACK_META_JSON = "saved_track_meta_json"
         const val PREF_ACTIVE_WP_INDEX = "active_wp_index"
 
@@ -3030,9 +3032,12 @@ class MapFragment : Fragment() {
                 )
             }
             MonitoringAttachmentType.TRACK -> {
-                val loaded = loadedTrackPairsForGpx()
-                val recorded = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+                val (loaded, loadedTimes) = loadedTrackPairsAndTimesForGpx()
+                val (recorded, recordedTimes) = synchronized(TrackingService.trackPoints) {
+                    TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+                }
                 val trackPoints = if (loaded.isNotEmpty()) loaded else recorded
+                val trackTimes = if (loaded.isNotEmpty()) loadedTimes else recordedTimes
                 if (trackPoints.isEmpty()) return null
                 val trackName = if (loaded.isNotEmpty()) {
                     prefs.getString(PREF_LOADED_TRACK_NAME, null)?.ifBlank { null } ?: "Трек $timestamp"
@@ -3042,7 +3047,7 @@ class MapFragment : Fragment() {
                 MonitoringAttachmentDraft(
                     type = type,
                     name = trackName,
-                    payload = GpxParser.writeGpx(trackPoints, trackName)
+                    payload = GpxParser.writeGpx(trackPoints, trackName, trackTimes)
                 )
             }
             MonitoringAttachmentType.WAYPOINTS -> {
@@ -3193,7 +3198,7 @@ class MapFragment : Fragment() {
                         Toast.makeText(ctx, "Во вложении нет трека", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    loadTrackToMap(result.trackPoints, attachment.name)
+                    loadTrackToMap(result.trackPoints, result.trackPointTimes, attachment.name)
                     Toast.makeText(ctx, "Трек загружен: ${attachment.name}", Toast.LENGTH_SHORT).show()
                 }
                 MonitoringAttachmentType.GPX -> {
@@ -3207,7 +3212,7 @@ class MapFragment : Fragment() {
                         loadedAny = true
                     }
                     if (result.trackPoints.isNotEmpty()) {
-                        loadTrackToMap(result.trackPoints, attachment.name)
+                        loadTrackToMap(result.trackPoints, result.trackPointTimes, attachment.name)
                         loadedAny = true
                     }
                     if (loadedAny) {
@@ -4849,12 +4854,15 @@ class MapFragment : Fragment() {
             .setTitle("Сохранить трек")
             .setItems(arrayOf("Заменить «$origName»", "Сохранить как новый файл")) { _, which ->
                 val pts = TrackEditor.editPoints.map { Pair(it.lat, it.lon) }
+                val pointTimes = pts.indices.map { loadedTrackTimes.getOrNull(it) }
                 when (which) {
                     0 -> {
                         // Replace in-memory loaded track and exit editor
                         loadedTrackPoints.clear()
+                        loadedTrackTimes.clear()
                         loadedTrackImports.clear()
                         loadedTrackPoints.addAll(pts.map { com.mapbox.mapboxsdk.geometry.LatLng(it.first, it.second) })
+                        loadedTrackTimes.addAll(pointTimes)
                         loadedTrackImports.add(LoadedTrackImport(origName, pts.size))
                         updateLoadedTrackOnMap()
                         saveTrackToPrefs()
@@ -4862,7 +4870,7 @@ class MapFragment : Fragment() {
                         Toast.makeText(ctx, "Трек обновлён (${pts.size} точек)", Toast.LENGTH_SHORT).show()
                     }
                     1 -> {
-                        val gpx = GpxParser.writeGpx(pts, "${origName}_edited")
+                        val gpx = GpxParser.writeGpx(pts, "${origName}_edited", pointTimes)
                         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
                             .format(java.util.Date())
                         val filename = "track_edited_$timestamp.gpx"
@@ -4884,7 +4892,8 @@ class MapFragment : Fragment() {
 
     private fun saveEditorAsNewFile(ctx: android.content.Context, baseName: String) {
         val pts = TrackEditor.editPoints.map { Pair(it.lat, it.lon) }
-        val gpx = GpxParser.writeGpx(pts, "${baseName}_edited")
+        val pointTimes = pts.indices.map { loadedTrackTimes.getOrNull(it) }
+        val gpx = GpxParser.writeGpx(pts, "${baseName}_edited", pointTimes)
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
         val filename = "track_edited_$timestamp.gpx"
@@ -6485,21 +6494,29 @@ class MapFragment : Fragment() {
     }
 
     fun hasLoadedTrack() = loadedTrackPoints.any { it != SEGMENT_BREAK }
-    private fun loadedTrackPairsForGpx(): List<Pair<Double, Double>> {
-        fun isValidTrackCoordinate(lat: Double, lon: Double): Boolean {
-            if (lat.isNaN() || lon.isNaN() || lat.isInfinite() || lon.isInfinite()) return false
-            if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return false
-            return !(lat == 0.0 && lon == 0.0)
-        }
-        return loadedTrackPoints.mapNotNull { point ->
+    private fun isValidTrackCoordinate(lat: Double, lon: Double): Boolean {
+        if (lat.isNaN() || lon.isNaN() || lat.isInfinite() || lon.isInfinite()) return false
+        if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return false
+        return !(lat == 0.0 && lon == 0.0)
+    }
+
+    private fun loadedTrackPairsAndTimesForGpx(): Pair<List<Pair<Double, Double>>, List<Long?>> {
+        val points = mutableListOf<Pair<Double, Double>>()
+        val times = mutableListOf<Long?>()
+        loadedTrackPoints.forEachIndexed { index, point ->
             if (point == SEGMENT_BREAK) {
-                Double.NaN to Double.NaN
+                points.add(Double.NaN to Double.NaN)
+                times.add(null)
             } else if (isValidTrackCoordinate(point.latitude, point.longitude)) {
-                point.latitude to point.longitude
-            } else {
-                null
+                points.add(point.latitude to point.longitude)
+                times.add(loadedTrackTimes.getOrNull(index))
             }
         }
+        return points to times
+    }
+
+    private fun normalizedTrackTimes(points: List<Pair<Double, Double>>, times: List<Long?>): List<Long?> {
+        return points.indices.map { times.getOrNull(it) }
     }
     fun hasLoadedWaypoints() = waypoints.isNotEmpty()
 
@@ -6582,18 +6599,28 @@ class MapFragment : Fragment() {
         }
     }
 
-    fun loadTrack(points: List<Pair<Double, Double>>, append: Boolean = false, name: String? = null) {
+    fun loadTrack(
+        points: List<Pair<Double, Double>>,
+        pointTimes: List<Long?> = emptyList(),
+        append: Boolean = false,
+        name: String? = null
+    ) {
         val cleanPoints = points.filter { !(it.first.isNaN() || it.second.isNaN()) }
         if (!append || loadedTrackPoints.none { it != SEGMENT_BREAK }) {
             loadedTrackPoints.clear()
+            loadedTrackTimes.clear()
             loadedTrackImports.clear()
         } else if (cleanPoints.isNotEmpty() && loadedTrackPoints.lastOrNull() != SEGMENT_BREAK) {
             loadedTrackPoints.add(SEGMENT_BREAK)
+            loadedTrackTimes.add(null)
         }
-        loadedTrackPoints.addAll(points.map {
-            if (it.first.isNaN() || it.second.isNaN()) SEGMENT_BREAK
-            else LatLng(it.first, it.second)
-        })
+        points.forEachIndexed { index, point ->
+            loadedTrackPoints.add(
+                if (point.first.isNaN() || point.second.isNaN()) SEGMENT_BREAK
+                else LatLng(point.first, point.second)
+            )
+            loadedTrackTimes.add(if (point.first.isNaN() || point.second.isNaN()) null else pointTimes.getOrNull(index))
+        }
         if (cleanPoints.isNotEmpty()) {
             val displayName = name?.ifBlank { null } ?: "Трек ${loadedTrackImports.size + 1}"
             loadedTrackImports.add(LoadedTrackImport(displayName, cleanPoints.size))
@@ -6936,6 +6963,7 @@ class MapFragment : Fragment() {
                     if (parsed.hasTrack) {
                         loadTrack(
                             parsed.trackPoints,
+                            pointTimes = parsed.trackPointTimes,
                             append = hasLoadedTrack(),
                             name = parsed.trackName ?: name.substringBeforeLast('.')
                         )
@@ -7430,6 +7458,7 @@ class MapFragment : Fragment() {
                         .setMessage("«$trackName» (${loadedTrackPoints.size} точек) будет убран с карты")
                         .setPositiveButton("Очистить") { _, _ ->
                             loadedTrackPoints.clear()
+                            loadedTrackTimes.clear()
                             loadedTrackImports.clear()
                             mapboxMap?.style?.getSourceAs<GeoJsonSource>(LOADED_TRACK_SOURCE_ID)
                                 ?.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
@@ -7520,16 +7549,17 @@ class MapFragment : Fragment() {
                     setTextColor(android.graphics.Color.WHITE)
                     setOnClickListener {
                         viewLifecycleOwner.lifecycleScope.launch {
-                            val pts = try {
+                            val result = try {
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                    GpxParser.parseGpxFull(file.inputStream()).trackPoints
+                                    GpxParser.parseGpxFull(file.inputStream())
                                 }
                             } catch (e: Exception) {
                                 Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
                                 return@launch
                             }
+                            val pts = result.trackPoints
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts, append = hasLoadedTrack(), name = trackFileName)
+                                loadTrack(pts, pointTimes = result.trackPointTimes, append = hasLoadedTrack(), name = trackFileName)
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -7553,16 +7583,17 @@ class MapFragment : Fragment() {
                     setTextColor(android.graphics.Color.WHITE)
                     setOnClickListener {
                         viewLifecycleOwner.lifecycleScope.launch {
-                            val pts = try {
+                            val result = try {
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                    GpxParser.parseGpxFull(file.inputStream()).trackPoints
+                                    GpxParser.parseGpxFull(file.inputStream())
                                 }
                             } catch (e: Exception) {
                                 Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
                                 return@launch
                             }
+                            val pts = result.trackPoints
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts, append = false, name = trackFileName)
+                                loadTrack(pts, pointTimes = result.trackPointTimes, append = false, name = trackFileName)
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -7649,10 +7680,12 @@ class MapFragment : Fragment() {
 
         // Count available data
         val routeWps = waypoints.toList()
-        val loadedTrk = loadedTrackPairsForGpx()
+        val (loadedTrk, loadedTrkTimes) = loadedTrackPairsAndTimesForGpx()
         val loadedTrkRealCount = loadedTrk.count { !it.first.isNaN() && !it.second.isNaN() }
         val userPts = userMarkers.map { Waypoint(it.name, it.position.latitude, it.position.longitude, 0, color = it.color, symbol = it.symbol, proximity = it.proximity) }
-        val recordedPts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+        val (recordedPts, recordedTimes) = synchronized(TrackingService.trackPoints) {
+            TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+        }
 
         val cbRoute = android.widget.CheckBox(ctx).apply {
             text = "Маршрутные точки (${routeWps.size} WP)"
@@ -7717,8 +7750,10 @@ class MapFragment : Fragment() {
                 val gpx = GpxParser.writeFullGpx(
                     routeWaypoints = if (cbRoute.isChecked) routeWps else null,
                     trackPoints = if (cbTrack.isChecked) loadedTrk else null,
+                    trackPointTimes = if (cbTrack.isChecked) loadedTrkTimes else null,
                     userPoints = if (cbUserPts.isChecked) userPts else null,
                     recordedTrack = if (cbRecorded.isChecked) recordedPts else null,
+                    recordedTrackTimes = if (cbRecorded.isChecked) recordedTimes else null,
                     name = fileName
                 )
                 val dir = getRaceNavDir(ctx, "export")
@@ -7855,7 +7890,7 @@ class MapFragment : Fragment() {
                                     loadWaypointsToMap(result.routeWaypoints, entry.name)
                                 }
                                 if (result.trackPoints.isNotEmpty()) {
-                                    loadTrackToMap(result.trackPoints, entry.name)
+                                    loadTrackToMap(result.trackPoints, result.trackPointTimes, entry.name)
                                 }
                                 // Ack ONLY after successful parse+load
                                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
@@ -7894,8 +7929,8 @@ class MapFragment : Fragment() {
     }
 
     /** Load track from shared GPX onto map */
-    private fun loadTrackToMap(pts: List<Pair<Double, Double>>, name: String) {
-        loadTrack(pts, append = false, name = name)
+    private fun loadTrackToMap(pts: List<Pair<Double, Double>>, times: List<Long?> = emptyList(), name: String) {
+        loadTrack(pts, pointTimes = times, append = false, name = name)
     }
 
     /** Show picker to select a favorites group for sharing GPX */
@@ -9001,22 +9036,30 @@ class MapFragment : Fragment() {
         if (loadedTrackPoints.isEmpty()) {
             prefs.edit()
                 .remove(PREF_SAVED_TRACK_JSON)
+                .remove(PREF_SAVED_TRACK_TIMES_JSON)
                 .remove(PREF_SAVED_TRACK_META_JSON)
                 .remove(PREF_LOADED_TRACK_NAME)
                 .apply()
             return
         }
         // Save up to 5000 points to avoid prefs size limits
-        val pts = if (loadedTrackPoints.size > 5000) loadedTrackPoints.take(5000) else loadedTrackPoints
+        val saveCount = minOf(loadedTrackPoints.size, 5000)
+        val pts = loadedTrackPoints.take(saveCount)
         val arr = org.json.JSONArray()
-        pts.forEach {
-            if (it == SEGMENT_BREAK) {
+        val timesArr = org.json.JSONArray()
+        pts.forEachIndexed { index, point ->
+            if (point == SEGMENT_BREAK) {
                 arr.put(org.json.JSONObject.NULL)  // segment separator
+                timesArr.put(org.json.JSONObject.NULL)
             } else {
-                arr.put(org.json.JSONArray().put(it.latitude).put(it.longitude))
+                arr.put(org.json.JSONArray().put(point.latitude).put(point.longitude))
+                loadedTrackTimes.getOrNull(index)?.let { timesArr.put(it) } ?: timesArr.put(org.json.JSONObject.NULL)
             }
         }
-        prefs.edit().putString(PREF_SAVED_TRACK_JSON, arr.toString()).apply()
+        prefs.edit()
+            .putString(PREF_SAVED_TRACK_JSON, arr.toString())
+            .putString(PREF_SAVED_TRACK_TIMES_JSON, timesArr.toString())
+            .apply()
         saveLoadedTrackMetaToPrefs(prefs)
     }
 
@@ -9055,19 +9098,31 @@ class MapFragment : Fragment() {
         val json = prefs.getString(PREF_SAVED_TRACK_JSON, null) ?: return
         try {
             val arr = org.json.JSONArray(json)
+            val timesJson = prefs.getString(PREF_SAVED_TRACK_TIMES_JSON, null)
+            val timesArr = timesJson?.let { org.json.JSONArray(it) }
             val pts = mutableListOf<com.mapbox.mapboxsdk.geometry.LatLng>()
+            val times = mutableListOf<Long?>()
             for (i in 0 until arr.length()) {
                 if (arr.isNull(i)) {
                     // Segment separator
                     pts.add(SEGMENT_BREAK)
+                    times.add(null)
                 } else {
                     val pt = arr.getJSONArray(i)
                     pts.add(com.mapbox.mapboxsdk.geometry.LatLng(pt.getDouble(0), pt.getDouble(1)))
+                    val timeMs = if (timesArr != null && i < timesArr.length() && !timesArr.isNull(i)) {
+                        timesArr.optLong(i).takeIf { it > 0L }
+                    } else {
+                        null
+                    }
+                    times.add(timeMs)
                 }
             }
             if (pts.isNotEmpty()) {
                 loadedTrackPoints.clear()
+                loadedTrackTimes.clear()
                 loadedTrackPoints.addAll(pts)
+                loadedTrackTimes.addAll(times)
             }
         } catch (e: Exception) {
             Log.w("MapFragment", "Failed to restore track: ${e.message}")
@@ -9587,7 +9642,9 @@ class MapFragment : Fragment() {
     /** Called when user stops recording — offer to save GPX with name input */
     private fun showSaveTrackDialog() {
         val ctx = context ?: return
-        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+        val (pts, pointTimes) = synchronized(TrackingService.trackPoints) {
+            TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+        }
         val kmStr = String.format("%.1f", TrackingService.trackLengthM / 1000)
         if (pts.size < 2) {
             Toast.makeText(ctx, "⏹ Запись остановлена (нет точек)", Toast.LENGTH_SHORT).show()
@@ -9618,7 +9675,7 @@ class MapFragment : Fragment() {
             .setView(container)
             .setPositiveButton("Сохранить") { _, _ ->
                 val name = input.text.toString().trim().ifBlank { "track_$ts" }
-                saveTrackToFile(pts, name)
+                saveTrackToFile(pts, name, pointTimes)
             }
             .setNegativeButton("Не сохранять") { _, _ -> clearTmpTrack() }
             .setCancelable(false)
@@ -9635,13 +9692,15 @@ class MapFragment : Fragment() {
             prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
             return
         }
-        val savedPoints = try {
-            GpxParser.parseGpxFull(tmpFile.inputStream()).trackPoints
+        val savedTrack = try {
+            GpxParser.parseGpxFull(tmpFile.inputStream())
         } catch (_: Exception) {
             tmpFile.delete()
             prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
             return
         }
+        val savedPoints = savedTrack.trackPoints
+        val savedTimes = normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes)
         if (savedPoints.isEmpty()) {
             tmpFile.delete()
             prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
@@ -9661,7 +9720,9 @@ class MapFragment : Fragment() {
                 // Restore points and resume recording
                 synchronized(TrackingService.trackPoints) {
                     TrackingService.trackPoints.clear()
+                    TrackingService.trackPointTimes.clear()
                     TrackingService.trackPoints.addAll(savedPoints)
+                    TrackingService.trackPointTimes.addAll(savedTimes)
                 }
                 TrackingService.trackLengthM = km * 1000.0
                 val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_RESUME }
@@ -9674,7 +9735,7 @@ class MapFragment : Fragment() {
                 startChronoTicker()
                 updateTrackOnMap()
             }
-            .setNeutralButton("Сохранить") { _, _ -> saveTrackToFile(savedPoints) }
+            .setNeutralButton("Сохранить") { _, _ -> saveTrackToFile(savedPoints, pointTimes = savedTimes) }
             .setNegativeButton("Позже", null)
             .setCancelable(true)
             .show()
@@ -9848,10 +9909,20 @@ class MapFragment : Fragment() {
     }
 
     /** Save track points to GPX file in app's external tracks folder. */
-    fun saveTrackToFile(points: List<Pair<Double, Double>>? = null, trackName: String? = null) {
+    fun saveTrackToFile(
+        points: List<Pair<Double, Double>>? = null,
+        trackName: String? = null,
+        pointTimes: List<Long?>? = null
+    ) {
         val ctx = context ?: return
         if (!LicenseManager.hasFullAccess(ctx)) { LicenseManager.showLicenseRequired(ctx); return }
-        val pts = points ?: synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+        val (pts, times) = if (points != null) {
+            points to pointTimes.orEmpty()
+        } else {
+            synchronized(TrackingService.trackPoints) {
+                TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+            }
+        }
         if (pts.isEmpty()) {
             Toast.makeText(ctx, "Нет точек для сохранения", Toast.LENGTH_SHORT).show()
             return
@@ -9861,7 +9932,7 @@ class MapFragment : Fragment() {
         val rawName = trackName?.trim()?.ifBlank { null } ?: "current_$timestamp"
         val name = rawName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
         val filename = "$name.gpx"
-        val gpxContent = GpxParser.writeGpx(pts, name)
+        val gpxContent = GpxParser.writeGpx(pts, name, times)
         try {
             val dir = getRaceNavDir(ctx, "tracks")
             val file = java.io.File(dir, filename)
@@ -9890,7 +9961,9 @@ class MapFragment : Fragment() {
     fun shareRecordedTrack() {
         val ctx = context ?: return
         if (!LicenseManager.hasFullAccess(ctx)) { LicenseManager.showLicenseRequired(ctx); return }
-        val pts = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.toList() }
+        val (pts, times) = synchronized(TrackingService.trackPoints) {
+            TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+        }
         if (pts.isEmpty()) {
             Toast.makeText(ctx, "Нет точек для отправки", Toast.LENGTH_SHORT).show()
             return
@@ -9898,7 +9971,7 @@ class MapFragment : Fragment() {
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
         val filename = "racenav_$timestamp.gpx"
-        val gpxContent = GpxParser.writeGpx(pts, "RaceNav $timestamp")
+        val gpxContent = GpxParser.writeGpx(pts, "RaceNav $timestamp", times)
         try {
             val dir = ctx.externalCacheDir ?: ctx.cacheDir
             val file = java.io.File(dir, filename)
@@ -9971,7 +10044,10 @@ class MapFragment : Fragment() {
 
     /** Clear recorded track from map and memory */
     fun clearRecordedTrack() {
-        synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.clear() }
+        synchronized(TrackingService.trackPoints) {
+            TrackingService.trackPoints.clear()
+            TrackingService.trackPointTimes.clear()
+        }
         TrackingService.trackLengthM = 0.0
         // Clear track line on map
         mapboxMap?.style?.getSourceAs<GeoJsonSource>(TRACK_SOURCE_ID)?.setGeoJson(
@@ -10127,11 +10203,14 @@ class MapFragment : Fragment() {
         val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
         if (!tmpFile.exists() || tmpFile.length() == 0L) return
         try {
-            val savedPoints = GpxParser.parseGpxFull(tmpFile.inputStream()).trackPoints
+            val savedTrack = GpxParser.parseGpxFull(tmpFile.inputStream())
+            val savedPoints = savedTrack.trackPoints
             if (savedPoints.size < 2) return
             synchronized(TrackingService.trackPoints) {
                 TrackingService.trackPoints.clear()
+                TrackingService.trackPointTimes.clear()
                 TrackingService.trackPoints.addAll(savedPoints)
+                TrackingService.trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
             }
             TrackingService.trackLengthM = calcTrackKm(savedPoints) * 1000.0
             cachedTrackSegments = null

@@ -18,6 +18,7 @@ data class GpxResult(
     val pointWaypoints: List<Waypoint> = emptyList(),
     val routeWaypoints: List<Waypoint> = emptyList(),
     val trackPoints: List<Pair<Double, Double>> = emptyList(),
+    val trackPointTimes: List<Long?> = emptyList(),
     val routeName: String? = null,
     val trackName: String? = null
 ) {
@@ -26,6 +27,23 @@ data class GpxResult(
 }
 
 object GpxParser {
+
+    private fun parseGpxTimeMs(raw: String?): Long? {
+        val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return try {
+            java.time.Instant.parse(value).toEpochMilli()
+        } catch (_: Exception) {
+            try {
+                java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    private fun formatGpxTimeMs(timeMs: Long): String {
+        return java.time.Instant.ofEpochMilli(timeMs).toString()
+    }
 
     private fun parseCoordinate(latRaw: String?, lonRaw: String?): Pair<Double, Double>? {
         val lat = latRaw?.trim()?.toDoubleOrNull() ?: return null
@@ -65,13 +83,15 @@ object GpxParser {
         val wptList = mutableListOf<Waypoint>()   // standalone <wpt>
         val rteptList = mutableListOf<Waypoint>()  // route <rtept>
         val trackPoints = mutableListOf<Pair<Double, Double>>()
+        val trackPointTimes = mutableListOf<Long?>()
         val parser = Xml.newPullParser()
         parser.setInput(inputStream, null)
 
         var eventType = parser.eventType
-        var inWpt = false; var inRtept = false; var inExtensions = false
+        var inWpt = false; var inRtept = false; var inTrkpt = false; var inExtensions = false
         var inRoute = false; var inTrack = false
         var lat = 0.0; var lon = 0.0
+        var trackTimeMs: Long? = null
         var name = ""; var desc = ""; var proximity = 0.0; var color = ""; var symbol = ""
         var routeName = ""
         var trackName = ""
@@ -108,6 +128,7 @@ object GpxParser {
                             if (trackPoints.isNotEmpty() &&
                                 !(trackPoints.last().first.isNaN() && trackPoints.last().second.isNaN())) {
                                 trackPoints.add(Pair(Double.NaN, Double.NaN))
+                                trackPointTimes.add(null)
                             }
                         }
                         "trkseg" -> {
@@ -115,9 +136,12 @@ object GpxParser {
                             if (trackPoints.isNotEmpty() &&
                                 !(trackPoints.last().first.isNaN() && trackPoints.last().second.isNaN())) {
                                 trackPoints.add(Pair(Double.NaN, Double.NaN))
+                                trackPointTimes.add(null)
                             }
                         }
                         "trkpt" -> {
+                            inTrkpt = true
+                            trackTimeMs = null
                             parseCoordinate(
                                 parser.getAttributeValue(null, "lat"),
                                 parser.getAttributeValue(null, "lon")
@@ -132,6 +156,7 @@ object GpxParser {
                             inRoute && routeName.isBlank() -> routeName = parser.nextText()
                             inTrack && trackName.isBlank() -> trackName = parser.nextText()
                         }
+                        "time" -> if (inTrkpt) trackTimeMs = parseGpxTimeMs(parser.nextText())
                         "desc", "cmt" -> if ((inWpt || inRtept) && desc.isEmpty()) desc = parser.nextText()
                         "proximity" -> if (inWpt || inRtept) proximity = parser.nextText().toDoubleOrNull() ?: 0.0
                         "sym" -> if (inWpt || inRtept) symbol = parser.nextText()
@@ -165,7 +190,12 @@ object GpxParser {
                             inRtept = false
                         }
                         "trkpt" -> {
-                            if (isValidCoordinate(lat, lon)) trackPoints.add(Pair(lat, lon))
+                            if (isValidCoordinate(lat, lon)) {
+                                trackPoints.add(Pair(lat, lon))
+                                trackPointTimes.add(trackTimeMs)
+                            }
+                            inTrkpt = false
+                            trackTimeMs = null
                         }
                         "trk" -> inTrack = false
                     }
@@ -177,6 +207,7 @@ object GpxParser {
             pointWaypoints = wptList,
             routeWaypoints = rteptList,
             trackPoints = trackPoints,
+            trackPointTimes = trackPointTimes,
             routeName = routeName.ifBlank { null },
             trackName = trackName.ifBlank { null }
         )
@@ -284,20 +315,29 @@ object GpxParser {
     }
 
     /** Write track points as GPX string, splitting by NaN markers into separate trkseg */
-    fun writeGpx(points: List<Pair<Double, Double>>, name: String = "Трек"): String {
+    fun writeGpx(
+        points: List<Pair<Double, Double>>,
+        name: String = "Трек",
+        pointTimes: List<Long?> = emptyList()
+    ): String {
         val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
             appendLine("<gpx version=\"1.1\" creator=\"TrophyNavigator\" xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:tn=\"http://trophynav.ru/gpx/1\">")
             appendLine("  <trk><name>$safeName</name>")
             var inSeg = false
-            for ((lat, lon) in points) {
+            points.forEachIndexed { index, (lat, lon) ->
                 if (lat.isNaN() || lon.isNaN()) {
                     if (inSeg) { appendLine("  </trkseg>"); inSeg = false }
-                    continue
+                    return@forEachIndexed
                 }
                 if (!inSeg) { appendLine("  <trkseg>"); inSeg = true }
-                appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+                val timeMs = pointTimes.getOrNull(index)
+                if (timeMs != null && timeMs > 0L) {
+                    appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"><time>${formatGpxTimeMs(timeMs)}</time></trkpt>")
+                } else {
+                    appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+                }
             }
             if (inSeg) appendLine("  </trkseg>")
             appendLine("  </trk>")
@@ -330,8 +370,10 @@ object GpxParser {
     fun writeFullGpx(
         routeWaypoints: List<Waypoint>? = null,
         trackPoints: List<Pair<Double, Double>>? = null,
+        trackPointTimes: List<Long?>? = null,
         userPoints: List<Waypoint>? = null,
         recordedTrack: List<Pair<Double, Double>>? = null,
+        recordedTrackTimes: List<Long?>? = null,
         name: String = "Trophy Navigator Export"
     ): String {
         fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -366,23 +408,28 @@ object GpxParser {
             }
 
             // Loaded track as <trk>
-            fun writeTrack(pts: List<Pair<Double, Double>>, trkName: String) {
+            fun writeTrack(pts: List<Pair<Double, Double>>, trkName: String, pointTimes: List<Long?> = emptyList()) {
                 appendLine("  <trk><name>${esc(trkName)}</name>")
                 var inSeg = false
-                for ((lat, lon) in pts) {
+                pts.forEachIndexed { index, (lat, lon) ->
                     if (lat.isNaN() || lon.isNaN()) {
                         if (inSeg) { appendLine("  </trkseg>"); inSeg = false }
-                        continue
+                        return@forEachIndexed
                     }
                     if (!inSeg) { appendLine("  <trkseg>"); inSeg = true }
-                    appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+                    val timeMs = pointTimes.getOrNull(index)
+                    if (timeMs != null && timeMs > 0L) {
+                        appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"><time>${formatGpxTimeMs(timeMs)}</time></trkpt>")
+                    } else {
+                        appendLine("    <trkpt lat=\"$lat\" lon=\"$lon\"/>")
+                    }
                 }
                 if (inSeg) appendLine("  </trkseg>")
                 appendLine("  </trk>")
             }
 
-            if (!trackPoints.isNullOrEmpty()) writeTrack(trackPoints, "Загруженный трек")
-            if (!recordedTrack.isNullOrEmpty()) writeTrack(recordedTrack, "Записанный трек")
+            if (!trackPoints.isNullOrEmpty()) writeTrack(trackPoints, "Загруженный трек", trackPointTimes.orEmpty())
+            if (!recordedTrack.isNullOrEmpty()) writeTrack(recordedTrack, "Записанный трек", recordedTrackTimes.orEmpty())
 
             append("</gpx>")
         }

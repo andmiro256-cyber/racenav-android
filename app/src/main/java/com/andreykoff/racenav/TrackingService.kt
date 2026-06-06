@@ -36,6 +36,7 @@ class TrackingService : Service() {
 
         // Данные трека — читаются из MapFragment
         val trackPoints   = mutableListOf<Pair<Double, Double>>()
+        val trackPointTimes = mutableListOf<Long?>()
         var trackLengthM  = 0.0
         var startTimeMs   = 0L
         var isRunning     = false
@@ -48,6 +49,10 @@ class TrackingService : Service() {
     private var lastLocationTimeMs = 0L
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pendingAutoSaveJob: Job? = null
+
+    private fun normalizedTrackTimes(points: List<Pair<Double, Double>>, times: List<Long?>): List<Long?> {
+        return points.indices.map { times.getOrNull(it) }
+    }
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(loc: Location) {
@@ -79,6 +84,7 @@ class TrackingService : Service() {
 
         val newPoint = Pair(loc.latitude, loc.longitude)
         val now = System.currentTimeMillis()
+        val pointTime = loc.time.takeIf { it > 0L } ?: now
         val dist = if (trackPoints.isEmpty()) Double.MAX_VALUE else distanceM(trackPoints.last(), newPoint)
 
         // Stop filter: standing still (speed < 1 m/s) AND distance < threshold => skip
@@ -88,12 +94,14 @@ class TrackingService : Service() {
         // Segment break: big gap (>200m) + time pause (>30s) → insert NaN marker
         if (trackPoints.isNotEmpty() && dist > 200 && lastLocationTimeMs > 0 && (now - lastLocationTimeMs) > 30_000) {
             trackPoints.add(Pair(Double.NaN, Double.NaN))
+            trackPointTimes.add(null)
         }
 
         // Distance filter
         if (trackPoints.isEmpty() || dist > minDistance) {
             if (trackPoints.isNotEmpty() && !trackPoints.last().first.isNaN()) trackLengthM += dist
             trackPoints.add(newPoint)
+            trackPointTimes.add(pointTime)
             updateNotification()
 
             // Auto-save every 10 points to survive app restarts
@@ -194,6 +202,7 @@ class TrackingService : Service() {
         if (isRunning && !clearPoints) return  // guard against double start on resume
         if (clearPoints) {
             trackPoints.clear()
+            trackPointTimes.clear()
             trackLengthM = 0.0
         } else if (trackPoints.isEmpty()) {
             restoreTrackFromTempIfNeeded()
@@ -230,7 +239,7 @@ class TrackingService : Service() {
     private fun stopTracking() {
         isRunning = false
         NotificationHelper.trackingText = null
-        autoSaveTrack(trackPoints.toList())  // Final save before stopping
+        autoSaveTrack(trackPoints.toList(), trackPointTimes.toList())  // Final save before stopping
         // Clear recording flag so START_STICKY doesn't auto-resume after explicit stop
         getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, false).apply()
@@ -252,10 +261,13 @@ class TrackingService : Service() {
         val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
         if (!file.exists() || file.length() == 0L) return
         try {
-            val savedPoints = GpxParser.parseGpxFull(file.inputStream()).trackPoints
+            val savedTrack = GpxParser.parseGpxFull(file.inputStream())
+            val savedPoints = savedTrack.trackPoints
             if (savedPoints.size < 2) return
             trackPoints.clear()
+            trackPointTimes.clear()
             trackPoints.addAll(savedPoints)
+            trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
             trackLengthM = calcTrackLength(savedPoints)
             Log.d("TrackingService", "Restored ${savedPoints.size} track points from tmp GPX")
         } catch (e: Exception) {
@@ -265,19 +277,23 @@ class TrackingService : Service() {
 
     private fun scheduleAutoSaveTrack() {
         val snapshot = trackPoints.toList()
+        val timeSnapshot = trackPointTimes.toList()
         if (snapshot.isEmpty()) return
         pendingAutoSaveJob?.cancel()
         pendingAutoSaveJob = serviceScope.launch {
-            autoSaveTrack(snapshot)
+            autoSaveTrack(snapshot, timeSnapshot)
         }
     }
 
     /** Save current track to temp file (survives app restart). Synchronous — must complete before stopSelf. */
-    private fun autoSaveTrack(points: List<Pair<Double, Double>> = trackPoints.toList()) {
+    private fun autoSaveTrack(
+        points: List<Pair<Double, Double>> = trackPoints.toList(),
+        pointTimes: List<Long?> = trackPointTimes.toList()
+    ) {
         if (points.isEmpty()) return
         try {
             val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
-            file.writeText(GpxParser.writeGpx(points, "Текущий трек"))
+            file.writeText(GpxParser.writeGpx(points, "Текущий трек", pointTimes))
         } catch (_: Exception) {}
     }
 

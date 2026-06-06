@@ -4387,6 +4387,7 @@ class SettingsFragment : Fragment() {
         if (loadTrack && parsed.trackPoints.isNotEmpty()) {
             mapFrag.loadTrack(
                 parsed.trackPoints,
+                pointTimes = parsed.trackPointTimes,
                 append = mapFrag.hasLoadedTrack(),
                 name = parsed.trackName ?: fileName.substringBeforeLast('.')
             )

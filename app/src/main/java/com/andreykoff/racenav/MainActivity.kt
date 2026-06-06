@@ -143,6 +143,7 @@ class MainActivity : AppCompatActivity() {
                 if (parsed.hasTrack) {
                     mapFrag.loadTrack(
                         parsed.trackPoints,
+                        pointTimes = parsed.trackPointTimes,
                         append = mapFrag.hasLoadedTrack(),
                         name = parsed.trackName ?: fileName.substringBeforeLast('.')
                     )

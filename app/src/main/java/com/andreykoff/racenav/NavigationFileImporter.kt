@@ -4,6 +4,7 @@ data class ParsedNavigationFile(
     val pointWaypoints: List<Waypoint> = emptyList(),
     val routeWaypoints: List<Waypoint> = emptyList(),
     val trackPoints: List<Pair<Double, Double>> = emptyList(),
+    val trackPointTimes: List<Long?> = emptyList(),
     val routeName: String? = null,
     val trackName: String? = null
 ) {
@@ -32,6 +33,7 @@ object NavigationFileImporter {
             pointWaypoints = result.pointWaypoints,
             routeWaypoints = result.routeWaypoints,
             trackPoints = result.trackPoints,
+            trackPointTimes = result.trackPointTimes,
             routeName = result.routeName,
             trackName = result.trackName
         )
@@ -44,6 +46,7 @@ object NavigationFileImporter {
                 pointWaypoints = gpxResult.pointWaypoints,
                 routeWaypoints = gpxResult.routeWaypoints,
                 trackPoints = gpxResult.trackPoints,
+                trackPointTimes = gpxResult.trackPointTimes,
                 routeName = gpxResult.routeName,
                 trackName = gpxResult.trackName
             )

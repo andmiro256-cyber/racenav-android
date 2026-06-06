@@ -141,6 +141,16 @@
   ],
   "beta": [
     {
+      "version": "2.9.91",
+      "versionCode": 400,
+      "date": "2026-06-06",
+      "changes": [
+        "GPX export записанного трека теперь сохраняет время каждой GPS-точки",
+        "GPX import сохраняет <time> у trkpt и не теряет его при повторном экспорте",
+        "Temp autosave и resume записи трека сохраняют timestamp точек"
+      ]
+    },
+    {
       "version": "2.9.90",
       "versionCode": 399,
       "date": "2026-06-06",
