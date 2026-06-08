@@ -1092,6 +1092,7 @@ class SettingsFragment : Fragment() {
                     baseRg.clearCheck()
                     prefs.edit().putString(MapFragment.PREF_TILE_KEY, key).apply()
                     mapFrag?.switchMap(key)
+                    mapFrag?.focusOfflineMapByKey(key)
                 }
                 mapContainer.addView(offlineRg!!)
             }
@@ -1559,11 +1560,31 @@ class SettingsFragment : Fragment() {
         val rowOfflineMapStorage = view.findViewById<View>(R.id.rowOfflineMapStorage)
         val txtOfflineMapStorage = view.findViewById<TextView>(R.id.txtOfflineMapStorage)
         val txtOfflineMapStoragePath = view.findViewById<TextView>(R.id.txtOfflineMapStoragePath)
+        val btnOfflineMapFileAccess = view.findViewById<android.widget.Button>(R.id.btnOfflineMapFileAccess)
+
+        fun hasExternalMapFileAccess(): Boolean {
+            return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R ||
+                android.os.Environment.isExternalStorageManager()
+        }
+
+        fun updateExternalMapFileAccessUi() {
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+                btnOfflineMapFileAccess.visibility = View.GONE
+                return
+            }
+            btnOfflineMapFileAccess.visibility = View.VISIBLE
+            btnOfflineMapFileAccess.text = if (hasExternalMapFileAccess()) {
+                "✅ Внешние карты доступны"
+            } else {
+                "🔓 Разрешить внешние карты"
+            }
+        }
 
         fun updateOfflineMapStorageUi() {
             val option = MapStorageManager.getCurrentOption(requireContext())
             txtOfflineMapStorage.text = option.label
             txtOfflineMapStoragePath.text = option.dir.absolutePath
+            updateExternalMapFileAccessUi()
         }
 
         updateOfflineMapStorageUi()
@@ -1650,6 +1671,27 @@ class SettingsFragment : Fragment() {
         }
         view.findViewById<View>(R.id.btnLoadOfflineMap).setOnClickListener {
             offlineMapPicker.launch(arrayOf("*/*", "application/octet-stream"))
+        }
+        btnOfflineMapFileAccess.setOnClickListener {
+            val ctx = requireContext()
+            if (hasExternalMapFileAccess()) {
+                parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                    ?.reloadOfflineMapsFromStorage()
+                refreshDownloadedAreasUI(view)
+                refreshOfflineMapsUI(view)
+                Toast.makeText(ctx, "Внешние карты доступны", Toast.LENGTH_SHORT).show()
+                updateExternalMapFileAccessUi()
+                return@setOnClickListener
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val appUri = Uri.parse("package:${ctx.packageName}")
+                val intent = Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, appUri)
+                try {
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+            }
         }
 // Download maps button
         view.findViewById<android.widget.Button>(R.id.btnStartDownload)?.setOnClickListener {
@@ -4450,10 +4492,11 @@ class SettingsFragment : Fragment() {
                         saveDataset = false
                     )
                     if (!ds.mapKey.isNullOrBlank()) {
-                        parentFragmentManager.fragments
+                        val mapFragment = parentFragmentManager.fragments
                             .filterIsInstance<MapFragment>()
                             .firstOrNull()
-                            ?.switchMap(ds.mapKey)
+                        mapFragment?.switchMap(ds.mapKey)
+                        mapFragment?.focusOfflineMapByKey(ds.mapKey)
                     }
                     android.widget.Toast.makeText(ctx, "✅ ${ds.name} загружен", android.widget.Toast.LENGTH_SHORT).show()
                 }
@@ -4662,6 +4705,7 @@ class SettingsFragment : Fragment() {
         container.removeAllViews()
         val ctx = requireContext()
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+        mapFrag?.discoverOfflineMapFiles()
         mapFrag?.syncOfflineAreaSources()
         val maps = mapFrag?.getOfflineMaps() ?: emptyList()
         val areas = OfflineAreasManager.loadAreas(ctx)
@@ -4972,13 +5016,7 @@ class SettingsFragment : Fragment() {
     }
 
     private fun getFileName(uri: Uri): String {
-        requireContext().contentResolver.query(uri, null, null, null, null)?.use {
-            if (it.moveToFirst()) {
-                val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0) return it.getString(idx)
-            }
-        }
-        return uri.lastPathSegment ?: "unknown"
+        return MapStorageManager.getDisplayName(requireContext(), uri, fallback = "unknown")
     }
 
     private fun showGpxImportDialog(

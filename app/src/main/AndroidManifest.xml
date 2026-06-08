@@ -11,7 +11,9 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
@@ -35,14 +37,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Open GPX files -->
+            <!-- Open navigation/map files by extension. Keep generic MIME constrained by path. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="file" />
-                <data android:scheme="content" />
-                <data android:mimeType="*/*" />
+                <data android:scheme="content" android:host="*" />
                 <data android:pathPattern=".*\\.gpx" />
                 <data android:pathPattern=".*\\.GPX" />
                 <data android:pathPattern=".*\\.wpt" />
@@ -55,6 +55,45 @@
                 <data android:pathPattern=".*\\.SQLITEDB" />
                 <data android:pathPattern=".*\\.mbtiles" />
                 <data android:pathPattern=".*\\.MBTILES" />
+                <data android:pathPattern=".*\\.db" />
+                <data android:pathPattern=".*\\.DB" />
+            </intent-filter>
+
+            <!-- File managers often mark known file extensions as octet-stream/text/plain. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:host="*" android:mimeType="application/octet-stream" />
+                <data android:pathPattern=".*\\.gpx" />
+                <data android:pathPattern=".*\\.GPX" />
+                <data android:pathPattern=".*\\.wpt" />
+                <data android:pathPattern=".*\\.WPT" />
+                <data android:pathPattern=".*\\.rte" />
+                <data android:pathPattern=".*\\.RTE" />
+                <data android:pathPattern=".*\\.plt" />
+                <data android:pathPattern=".*\\.PLT" />
+                <data android:pathPattern=".*\\.sqlitedb" />
+                <data android:pathPattern=".*\\.SQLITEDB" />
+                <data android:pathPattern=".*\\.mbtiles" />
+                <data android:pathPattern=".*\\.MBTILES" />
+                <data android:pathPattern=".*\\.db" />
+                <data android:pathPattern=".*\\.DB" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:host="*" android:mimeType="text/plain" />
+                <data android:pathPattern=".*\\.gpx" />
+                <data android:pathPattern=".*\\.GPX" />
+                <data android:pathPattern=".*\\.wpt" />
+                <data android:pathPattern=".*\\.WPT" />
+                <data android:pathPattern=".*\\.rte" />
+                <data android:pathPattern=".*\\.RTE" />
+                <data android:pathPattern=".*\\.plt" />
+                <data android:pathPattern=".*\\.PLT" />
             </intent-filter>
 
             <!-- GPX MIME type -->
@@ -65,14 +104,6 @@
                 <data android:scheme="file" />
                 <data android:scheme="content" />
                 <data android:mimeType="application/gpx+xml" />
-            </intent-filter>
-
-            <!-- Open from file managers (generic octet-stream with extensions) -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="content" />
-                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 

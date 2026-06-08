@@ -1006,6 +1006,7 @@ class MapFragment : Fragment() {
             val ctx = context ?: return@getMapAsync
             OfflineAreasManager.cleanupIncomplete(ctx)
             loadOfflineMapsFromPrefs()
+            discoverOfflineMapFiles()
             syncOfflineAreaSources()
             // Apply cached catalog instantly (no network), then load style
             val cachedCatalog = TileCatalogManager.loadCachedCatalog(ctx)
@@ -5394,10 +5395,10 @@ class MapFragment : Fragment() {
         source.setGeoJson(geojson.toString())
     }
 
-    fun updateNavLine() {
+    fun updateNavLine(origin: LatLng? = null) {
         val style = mapboxMap?.style ?: return
         val source = style.getSourceAs<GeoJsonSource>(NAV_LINE_SOURCE_ID) ?: return
-        val gps = lastKnownGpsPoint
+        val gps = origin ?: lastKnownGpsPoint
         if (!navActive || gps == null || waypoints.isEmpty() || activeWpIndex >= waypoints.size) {
             source.setGeoJson("{\"type\":\"FeatureCollection\",\"features\":[]}")
             return
@@ -5800,6 +5801,7 @@ class MapFragment : Fragment() {
             val next = if (current == mapA) mapB else mapA
             val nextName = tileSources[next]?.label ?: next
             loadTileStyle(next, overlayKeys)
+            if (next.startsWith(OFFLINE_TILE_KEY)) focusOfflineMapByKey(next)
             showHint("🗺 $nextName")
         }
 
@@ -5996,7 +5998,7 @@ class MapFragment : Fragment() {
     }
 
     /** Animate camera to geographic bounds of the given offline map. */
-    private fun flyToOfflineMapBounds(index: Int) {
+    private fun flyToOfflineMapBounds(index: Int, warnIfFollowEnabled: Boolean = false) {
         val bounds = tileServer?.getBounds(index) ?: return  // [north, south, east, west]
         val north = bounds[0]; val south = bounds[1]; val east = bounds[2]; val west = bounds[3]
         if (north.isNaN() || south.isNaN() || east.isNaN() || west.isNaN()) return
@@ -6005,13 +6007,46 @@ class MapFragment : Fragment() {
             val ne = com.mapbox.mapboxsdk.geometry.LatLng(north, east)
             val latLngBounds = com.mapbox.mapboxsdk.geometry.LatLngBounds.Builder().include(sw).include(ne).build()
             val padding = (40 * resources.displayMetrics.density).toInt()
+            val animationToken = ++flyAnimationToken
+            flyAnimationActive = true
             mapboxMap?.animateCamera(
                 com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngBounds(latLngBounds, padding),
                 600
             )
+            emergencyHandler.postDelayed({
+                if (animationToken == flyAnimationToken) flyAnimationActive = false
+            }, 700)
+            if (warnIfFollowEnabled && followMode != FollowMode.FREE && isGpsOutsideBounds(south, west, north, east)) {
+                showOfflineMapFollowWarning()
+            }
         } catch (e: Exception) {
+            flyAnimationActive = false
             Log.w("OfflineMap", "flyToBounds failed: ${e.message}")
         }
+    }
+
+    private fun isGpsOutsideBounds(south: Double, west: Double, north: Double, east: Double): Boolean {
+        val gps = lastKnownGpsPoint ?: return false
+        val latInside = gps.latitude in south..north
+        val lonInside = if (west <= east) {
+            gps.longitude in west..east
+        } else {
+            gps.longitude >= west || gps.longitude <= east
+        }
+        return !latInside || !lonInside
+    }
+
+    private fun showOfflineMapFollowWarning() {
+        val ctx = context ?: return
+        Toast.makeText(
+            ctx,
+            "Офлайн-карта вне вашей позиции. Отключите привязку, чтобы остаться на ней",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    fun focusOfflineMapByKey(key: String) {
+        offlineMaps.find { it.key == key }?.let { flyToOfflineMapBounds(it.index, warnIfFollowEnabled = true) }
     }
 
     /** Add an offline map and return its key. Returns null on failure. */
@@ -6086,6 +6121,25 @@ class MapFragment : Fragment() {
                 }
             }
         }
+    }
+
+    fun discoverOfflineMapFiles(): Int {
+        val ctx = context ?: return 0
+        val areaFiles = OfflineAreasManager.loadAreas(ctx).flatMap { area ->
+            listOf(area.baseFile) + area.overlays.map { it.file }
+        }.toSet()
+        var added = 0
+        MapStorageManager.listSupportedMapFiles(ctx).forEach { file ->
+            if (file.name in areaFiles) return@forEach
+            val alreadyKnown = offlineMaps.any { known ->
+                known.path == file.absolutePath || known.name == file.name
+            }
+            if (alreadyKnown) return@forEach
+            if (addOfflineMap(file.absolutePath, file.name) != null) {
+                added++
+            }
+        }
+        return added
     }
 
     fun hasOfflineAreaBase(areaName: String): Boolean = findOfflineAreaBaseInfo(areaName) != null
@@ -6389,6 +6443,7 @@ class MapFragment : Fragment() {
         offlineMaps.forEach { info -> tileSources.remove(info.key) }
         offlineMaps.clear()
         loadOfflineMapsFromPrefs()
+        discoverOfflineMapFiles()
         syncOfflineAreaSources()
 
         val validBase = if (currentBase.startsWith(OFFLINE_TILE_KEY) && offlineMaps.none { it.key == currentBase }) {
@@ -10825,6 +10880,7 @@ class MapFragment : Fragment() {
                             if (ovInfo != null) nextOverlays.add(ovInfo.key)
                         }
                         loadTileStyle(info.key, nextOverlays)
+                        flyToOfflineMapBounds(info.index, warnIfFollowEnabled = true)
                         dialog.dismiss()
                     }
                 }
@@ -12864,6 +12920,9 @@ class MapFragment : Fragment() {
         updateGpsArrow(renderCamLat, renderCamLon, lastGpsBearing, persist = false)
         maybeRefreshAccuracyCircleForCamera()
         maybeRefreshGpsDistanceRingsForCamera()
+        if (navActive && waypoints.isNotEmpty() && activeWpIndex < waypoints.size) {
+            updateNavLine(LatLng(renderCamLat, renderCamLon))
+        }
         if (TrackingService.trackPoints.size >= 2) {
             updateTrackOnMap(extrapolateLat = renderCamLat, extrapolateLon = renderCamLon)
         }

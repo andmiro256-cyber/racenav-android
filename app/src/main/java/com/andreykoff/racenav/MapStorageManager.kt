@@ -1,7 +1,9 @@
 package com.andreykoff.racenav
 
 import android.content.Context
+import android.net.Uri
 import android.os.Environment
+import android.provider.OpenableColumns
 import org.json.JSONArray
 import java.io.File
 
@@ -76,10 +78,44 @@ object MapStorageManager {
         return getCurrentOption(context).dir.also { it.mkdirs() }
     }
 
+    fun listSupportedMapFiles(context: Context): List<File> {
+        val dirs = linkedSetOf<File>()
+        dirs += getMapsDir(context)
+        dirs += publicDocumentsMapsDir()
+        dirs += primaryAppMapsDir(context)
+        getAvailableOptions(context).forEach { dirs += it.dir }
+
+        return dirs.flatMap { dir ->
+            runCatching {
+                dir.listFiles()
+                    ?.filter { it.isFile && isSupportedMapFile(it) }
+                    .orEmpty()
+            }.getOrDefault(emptyList())
+        }
+            .distinctBy { safePath(it) }
+            .sortedBy { it.name.lowercase() }
+    }
+
     fun createManagedMapFile(context: Context, originalName: String): File {
         val dir = getMapsDir(context)
         val sanitized = sanitizeFileName(originalName)
         return uniqueFile(dir, sanitized)
+    }
+
+    fun getDisplayName(context: Context, uri: Uri, fallback: String = "map"): String {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    cursor.getString(idx)?.let { name ->
+                        sanitizeFileName(name).takeIf { it.isNotBlank() }?.let { return it }
+                    }
+                }
+            }
+        }
+        val rawPath = Uri.decode(uri.lastPathSegment ?: "")
+        val rawName = rawPath.substringAfterLast('/').substringAfterLast(':')
+        return sanitizeFileName(rawName.ifBlank { fallback })
     }
 
     fun resolveExistingMapFile(context: Context, storedPath: String): File? {
@@ -287,11 +323,15 @@ object MapStorageManager {
     }
 
     fun isSupportedMapFile(file: File): Boolean {
-        val name = file.name.lowercase()
-        if (name.endsWith("-journal") || name.endsWith("-wal") || name.endsWith("-shm")) {
+        return isSupportedMapFileName(file.name)
+    }
+
+    fun isSupportedMapFileName(name: String): Boolean {
+        val lower = name.lowercase()
+        if (lower.endsWith("-journal") || lower.endsWith("-wal") || lower.endsWith("-shm")) {
             return false
         }
-        val ext = file.extension.lowercase()
+        val ext = lower.substringAfterLast('.', "")
         return ext == "mbtiles" || ext == "sqlitedb" || ext == "db"
     }
 

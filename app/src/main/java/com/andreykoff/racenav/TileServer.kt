@@ -2,6 +2,7 @@ package com.andreykoff.racenav
 
 import android.graphics.Bitmap
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import android.util.LruCache
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
@@ -65,6 +66,7 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             }
 
             if ("tiles" !in tables) {
+                Log.w(TAG, "Rejecting map DB without tiles table: $normalizedPath tables=$tables")
                 opened.close()
                 return false
             }
@@ -82,12 +84,14 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             }
 
             if (format == DbFormat.UNKNOWN) {
+                Log.w(TAG, "Rejecting map DB with unsupported tiles columns: $normalizedPath columns=$cols")
                 opened.close()
                 return false
             }
 
             val sampleTile = sampleTileData(opened, format)
             if (sampleTile == null || !isSupportedRasterTileData(sampleTile)) {
+                Log.w(TAG, "Rejecting map DB without raster tile sample: $normalizedPath format=$format sampleBytes=${sampleTile?.size ?: 0}")
                 opened.close()
                 return false
             }
@@ -95,6 +99,7 @@ class TileServer(port: Int) : NanoHTTPD(port) {
             databases[index] = DbEntry(opened, format, normalizedPath, fileStamp)
             true
         } catch (e: Exception) {
+            Log.w(TAG, "Failed to open map DB: $path error=${e.message}")
             false
         }
     }
@@ -432,6 +437,8 @@ class TileServer(port: Int) : NanoHTTPD(port) {
     }
 
     companion object {
+        private const val TAG = "TileServer"
+
         private val EMPTY_TILE_PNG: ByteArray by lazy {
             val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
             ByteArrayOutputStream().use { output ->

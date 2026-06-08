@@ -105,13 +105,13 @@ class MainActivity : AppCompatActivity() {
                 return@postDelayed
             }
             try {
-                val fileName = uri.lastPathSegment?.lowercase() ?: ""
+                val displayName = MapStorageManager.getDisplayName(this, uri)
+                val fileName = displayName.lowercase()
                 val mapFrag = supportFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
                     ?: return@postDelayed
 
                 // Handle offline maps separately — they can be very large
-                if (fileName.endsWith(".sqlitedb") || fileName.endsWith(".mbtiles") || fileName.endsWith(".db")) {
-                    val displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "map"
+                if (MapStorageManager.isSupportedMapFileName(fileName)) {
                     val dest = MapStorageManager.createManagedMapFile(this, displayName)
                     contentResolver.openInputStream(uri)?.use { input ->
                         dest.outputStream().use { output -> input.copyTo(output) }
