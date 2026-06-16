@@ -2980,15 +2980,19 @@ class SettingsFragment : Fragment() {
                 "• Оффлайн и онлайн карты с кешированием",
                 "• Запись треков и экспорт в GPX",
                 "• Импорт точек, маршрутов и треков (GPX/WPT/RTE/PLT)",
+                "• Встроенный файловый менеджер RaceNav Files с поиском, фильтрами и действиями",
+                "• Копирование импортированных файлов в RaceNav/import/",
                 "• Навигация по маршруту и к отдельным точкам",
                 "• Установка точек на карте с редактированием",
                 "• Настраиваемые виджеты скорости, высоты, курса",
+                "• Отключаемое скрытие виджетов долгим удержанием карты",
                 "• Перекрестие, линия расстояния и направления",
                 "• Координаты центра карты (WGS84)",
                 "• Отображение участников в реальном времени",
                 "• Передача местоположения на сервер",
-                "• Блокировка экрана (кнопка или зажать Громкость+)",
-                "• Автозапись трека при старте приложения"
+                "• Блокировка экрана с разблокировкой по кнопке замка или Громкость+",
+                "• Автозапись трека при старте приложения",
+                "• Надёжное восстановление несохранённого трека после сбоя или потерянного диалога"
             ).joinToString("\n")
         } catch (e: Exception) { }
 
@@ -3345,6 +3349,12 @@ class SettingsFragment : Fragment() {
     private fun applySettingsThemeRecursive(view: View, palette: SettingsPalette) {
         val colorDrawable = view.background as? ColorDrawable
         remapBackgroundColor(colorDrawable?.color ?: Int.MIN_VALUE, palette)?.let { view.setBackgroundColor(it) }
+        // Read via ViewCompat: AppCompat buttons store android:backgroundTint in the support
+        // tint slot (getSupportBackgroundTintList), so view.backgroundTintList returns null for them.
+        val backgroundTint = ViewCompat.getBackgroundTintList(view)?.defaultColor
+        remapBackgroundColor(backgroundTint ?: Int.MIN_VALUE, palette)?.let {
+            ViewCompat.setBackgroundTintList(view, android.content.res.ColorStateList.valueOf(it))
+        }
 
         when (view) {
             is TextView -> {
@@ -3612,6 +3622,7 @@ class SettingsFragment : Fragment() {
 
     private fun showReadme() {
         val ctx = context ?: return
+        val palette = settingsPalette()
         val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
         val pad = (24 * resources.displayMetrics.density).toInt()
 
@@ -3629,7 +3640,7 @@ class SettingsFragment : Fragment() {
 • Свои источники карт: добавляйте в Настройках → Источники карт
 • Оффлайн карты: загружайте .sqlitedb / .mbtiles файлы
 • Зум: кнопками +/−, жестами или кнопками громкости
-• Долгое нажатие на карту — скрыть/показать панели
+• Долгое нажатие на карту может скрывать панели, если включено в настройках
 """.trimIndent(),
 
             "🧭 Компас и режимы следования" to """
@@ -3641,7 +3652,7 @@ class SettingsFragment : Fragment() {
 """.trimIndent(),
 
             "📍 Навигация по маршруту" to """
-• Загрузите GPX файл с точками через Настройки → Загрузить файл
+• Откройте GPX/WPT/RTE/PLT через ⋮ → Files или кнопку «Импорт с устройства»
 • Или создайте маршрут вручную: кнопка ⋮ → Редактор маршрута
 • Запуск навигации: ⋮ → ▶ Старт
 • Переключение WP: кнопки ◀ ▶ в навбаре
@@ -3658,6 +3669,7 @@ class SettingsFragment : Fragment() {
             "⏺ Запись трека" to """
 • Кнопка REC начинает запись в фоне (работает при выключенном экране)
 • При остановке — сохранение как GPX с возможностью отправки
+• Несохранённый трек восстанавливается при возврате в приложение
 • Виджеты: скорость, длина трека, хронометр
 """.trimIndent(),
 
@@ -3675,11 +3687,12 @@ class SettingsFragment : Fragment() {
 • Включение/выключение и порядок — в Настройках → Виджеты
 • Доступно: скорость, курс, трек, до WP, высота, хронометр, время, остаток км, имя WP, триппмастер
 • Триппмастер: тап сбрасывает счётчик
+• Скрытие панелей долгим удержанием карты включается отдельной настройкой
 """.trimIndent(),
 
             "🔒 Блокировка экрана" to """
 • Кнопка 🔒 блокирует экран от случайных нажатий
-• Для разблокировки — удерживайте кнопку Громкость+
+• Для разблокировки — удерживайте кнопку замка или кнопку Громкость+
 """.trimIndent(),
 
             "💡 Подсказки" to """
@@ -3689,13 +3702,16 @@ class SettingsFragment : Fragment() {
 
             "📁 Файлы и папки" to """
 • Приложение создаёт папку Documents/RaceNav/ с подпапками:
-  📂 maps/ — треки/точки/маршруты и, при выборе этого хранилища, офлайн карты
+  📂 maps/ — офлайн карты
   📂 tracks/ — записанные и сохранённые треки (.gpx)
   📂 points/ — экспортированные точки (.gpx, .wpt)
   📂 routes/ — маршруты (.gpx, .rte)
+  📂 export/ — собранные GPX для отправки
+  📂 import/ — файлы, импортированные из Telegram/Downloads/пикера
 • Папка офлайн-карт выбирается в Настройки → Карты → Хранилище карт
 • Вы можете вручную копировать файлы в эти папки
-• Загрузка файлов: Настройки → Файлы → 📂 Загрузить файл
+• Браузер файлов: кнопка ⋮ → Files, поиск и фильтры Все/Треки/Точки/Маршруты
+• Загрузка извне: ⋮ → Files → 📥 Импорт с устройства
 • Офлайн карты: Настройки → Карты → 📥 Загрузить карту
 """.trimIndent(),
 
@@ -3708,28 +3724,28 @@ class SettingsFragment : Fragment() {
 • Файлы оффлайн-карт не включаются в бэкап (слишком большие)
 """.trimIndent(),
 
-            "🆕 Что нового (v2.2.3)" to """
-• Бэкап настроек, треков и маршрутов в облако по email
-• Восстановление на новом устройстве по email
-• Загрузка оффлайн-карт прямо из приложения (выбор области на карте)
-• Мониторинг участников и GPS-сервер — взаимная функция
-• Тумблер мониторинга недоступен пока сервер выключен
-• Стабильный ID устройства (не меняется при переустановке)
-• 20+ источников карт: Google, Яндекс, ESRI, 2GIS, Thunderforest и др.
+            "🆕 Что нового (v2.9.93)" to """
+• Вкладка Files стала встроенным браузером файлов RaceNav
+• Импортированные GPX/WPT/RTE/PLT копируются в RaceNav/import/
+• Тап по файлу открывает его на карте без системного пикера
+• Фильтры, поиск, переименование, удаление и отправка файлов
+• Надёжнее восстановление несохранённого трека после сбоя
+• Исправлена разблокировка экрана плавающей кнопкой
+• Светлая тема лучше перекрашивает кнопки настроек
 """.trimIndent()
         )
 
         sections.forEach { (title, body) ->
             root.addView(TextView(ctx).apply {
                 text = title
-                setTextColor(0xFFFF6F00.toInt())
+                setTextColor(palette.accent)
                 textSize = 16f
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 setPadding(0, 16, 0, 4)
             })
             root.addView(TextView(ctx).apply {
                 text = body
-                setTextColor(0xFFCCCCCC.toInt())
+                setTextColor(palette.textSecondary)
                 textSize = 14f
                 setPadding(0, 0, 0, 8)
             })
@@ -3737,11 +3753,11 @@ class SettingsFragment : Fragment() {
 
         val scroll = android.widget.ScrollView(ctx).apply {
             addView(root)
-            setBackgroundColor(0xFF121212.toInt())
+            setBackgroundColor(palette.background)
         }
         dialog.setContentView(scroll)
-        dialog.window?.navigationBarColor = 0xFF121212.toInt()
-        (scroll.parent as? android.view.View)?.setBackgroundColor(0xFF121212.toInt())
+        dialog.window?.navigationBarColor = palette.background
+        (scroll.parent as? android.view.View)?.setBackgroundColor(palette.background)
         // Expand to full height
         dialog.behavior.peekHeight = resources.displayMetrics.heightPixels
         dialog.show()

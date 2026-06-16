@@ -40,6 +40,10 @@ class NavigationCompassView @JvmOverloads constructor(
     var compassAlpha: Float = 0.7f
         set(value) { field = value.coerceIn(0f, 1f); invalidate() }
 
+    /** When true, draw for a light map theme (light face, dark ticks/letters/arrow outline). */
+    var isLightTheme: Boolean = false
+        set(value) { field = value; invalidate() }
+
     // ── Pre-allocated drawing objects ────────────────────────────────
 
     private val paintBgFill    = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -60,8 +64,10 @@ class NavigationCompassView @JvmOverloads constructor(
         const val COLOR_ORANGE   = 0xFFFF8F00.toInt()  // brighter orange
         const val COLOR_GRAY     = 0xFF666666.toInt()
         const val COLOR_BG       = 0xBF111111.toInt()  // #111111 at 75% alpha
+        const val COLOR_BG_LIGHT = 0xCCF2F4F7.toInt()  // light face for light theme
+        const val COLOR_DARK     = 0xFF222222.toInt()  // dark ticks/letters for light theme
         const val COLOR_RED      = 0xFFF44336.toInt()
-        const val COLOR_BLUE     = 0xFF2196F3.toInt()
+        const val COLOR_BLUE     = 0xFF1565C0.toInt()  // darker blue — readable on both themes
         const val COLOR_TICK     = 0xFFFFFFFF.toInt()  // white ticks
         const val COLOR_WHITE    = 0xFFFFFFFF.toInt()
         const val COLOR_GREEN    = 0xFF4CAF50.toInt()
@@ -122,11 +128,15 @@ class NavigationCompassView @JvmOverloads constructor(
         // Apply overall transparency
         val alphaInt = (compassAlpha * 255).toInt()
 
-        val accentColor = if (isNavActive) COLOR_ORANGE else COLOR_WHITE
+        // Theme-resolved neutral color for ticks/letters/arrow-outline/text and the light/dark face.
+        val neutral = if (isLightTheme) COLOR_DARK else COLOR_WHITE
+        val bgColor = if (isLightTheme) COLOR_BG_LIGHT else COLOR_BG
+
+        val accentColor = if (isNavActive) COLOR_ORANGE else neutral
         val ringColor = if (isNavActive && flashAnimator?.isRunning == true) currentRingColor else accentColor
 
         // ─ 1. Background circle ─────────────────────────────────────
-        paintBgFill.color = COLOR_BG
+        paintBgFill.color = bgColor
         paintBgFill.style = Paint.Style.FILL
         paintBgFill.alpha = alphaInt
         canvas.drawCircle(cx, cy, radius, paintBgFill)
@@ -157,12 +167,12 @@ class NavigationCompassView @JvmOverloads constructor(
                 innerR = radius * 0.78f
                 outerR = radius * 0.92f
                 paintTick.strokeWidth = radius * 0.04f
-                paintTick.color = COLOR_TICK
+                paintTick.color = neutral
             } else {
                 innerR = radius * 0.84f
                 outerR = radius * 0.92f
                 paintTick.strokeWidth = radius * 0.02f
-                paintTick.color = COLOR_TICK
+                paintTick.color = neutral
             }
             paintTick.alpha = alphaInt
 
@@ -200,8 +210,8 @@ class NavigationCompassView @JvmOverloads constructor(
         paintCardinal.color = COLOR_RED
         canvas.drawText("S", cx, cy + radius * 0.72f, paintCardinal)
 
-        // "E" letter at east (white)
-        paintCardinal.color = COLOR_WHITE
+        // "E" letter at east (neutral — dark on light theme, white on dark)
+        paintCardinal.color = neutral
         paintCardinal.textSize = radius * 0.14f
         canvas.drawText("E", cx + radius * 0.66f, cy + radius * 0.06f, paintCardinal)
 
@@ -236,8 +246,8 @@ class NavigationCompassView @JvmOverloads constructor(
         arrowPath.lineTo(cx - arrowHalfW, cy + arrowLen * 0.25f)  // left
         arrowPath.close()
 
-        // White outline/shadow for contrast on any background
-        paintArrowOutline.color = COLOR_WHITE
+        // Outline/shadow for contrast — dark on light theme, white on dark
+        paintArrowOutline.color = neutral
         paintArrowOutline.style = Paint.Style.STROKE
         paintArrowOutline.strokeWidth = radius * 0.025f
         paintArrowOutline.strokeJoin = Paint.Join.ROUND
@@ -253,14 +263,14 @@ class NavigationCompassView @JvmOverloads constructor(
         canvas.restore()
 
         // ─ 5. Center dot ────────────────────────────────────────────
-        paintCenter.color = COLOR_WHITE
+        paintCenter.color = neutral
         paintCenter.style = Paint.Style.FILL
         paintCenter.alpha = alphaInt
         canvas.drawCircle(cx, cy, radius * 0.045f, paintCenter)
 
         // ─ 6. Distance text ─────────────────────────────────────────
         if (distanceText.isNotEmpty()) {
-            paintText.color = COLOR_WHITE
+            paintText.color = neutral
             paintText.textSize = radius * 0.22f
             paintText.textAlign = Paint.Align.CENTER
             paintText.typeface = boldTypeface

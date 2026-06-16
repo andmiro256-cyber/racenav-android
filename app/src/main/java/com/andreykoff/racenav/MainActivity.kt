@@ -127,32 +127,9 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // Track/waypoint files — small enough to read into memory
-                val inputStream = contentResolver.openInputStream(uri) ?: return@postDelayed
-                val bytes = inputStream.readBytes()
-                inputStream.close()
-
-                val parsed = NavigationFileImporter.parse(fileName, bytes)
-                if (parsed.hasPointSet) {
-                    mapFrag.loadPointSet(parsed.pointWaypoints, fileName.substringBeforeLast('.'))
-                    android.widget.Toast.makeText(this, "📍 Загружены точки: ${parsed.pointWaypoints.size}", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                if (parsed.hasRoute) {
-                    mapFrag.loadRoute(parsed.routeWaypoints, parsed.routeName ?: fileName.substringBeforeLast('.'))
-                    android.widget.Toast.makeText(this, "🗺 Загружен маршрут: ${parsed.routeWaypoints.size} КП", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                if (parsed.hasTrack) {
-                    mapFrag.loadTrack(
-                        parsed.trackPoints,
-                        pointTimes = parsed.trackPointTimes,
-                        append = mapFrag.hasLoadedTrack(),
-                        name = parsed.trackName ?: fileName.substringBeforeLast('.')
-                    )
-                    val pointCount = parsed.trackPoints.count { !it.first.isNaN() && !it.second.isNaN() }
-                    android.widget.Toast.makeText(this, "🛤 Загружен трек: $pointCount точек", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                if (!parsed.hasAnything) {
-                    android.widget.Toast.makeText(this, "Файл пустой или формат не распознан", android.widget.Toast.LENGTH_SHORT).show()
-                }
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: return@postDelayed
+                mapFrag.importAndOpenNavigationFile(displayName, bytes)
             } catch (e: Exception) {
                 android.widget.Toast.makeText(this, "Ошибка открытия файла: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             }

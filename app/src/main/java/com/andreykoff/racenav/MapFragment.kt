@@ -1604,6 +1604,11 @@ class MapFragment : Fragment() {
             (barVerticalPaddingDp * density + 0.5f).toInt()
         )
 
+        // Waypoint nav bar sits directly above the bottom bar — match its theme.
+        b.waypointNavBar.setBackgroundColor(palette.barColor)
+        b.btnPrevWp.imageTintList = android.content.res.ColorStateList.valueOf(palette.primaryText)
+        b.btnNextWp.imageTintList = android.content.res.ColorStateList.valueOf(palette.primaryText)
+
         for (i in 0 until b.bottomBar.childCount) {
             val child = b.bottomBar.getChildAt(i)
             val container = child as? android.view.ViewGroup ?: continue
@@ -5666,6 +5671,7 @@ class MapFragment : Fragment() {
         val compass = b.navCompass
         val ctx = context ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        compass.isLightTheme = !AppThemeHelper.isDarkTheme(ctx)
         val enabled = prefs.getBoolean(PREF_NAV_COMPASS_ENABLED, false)
         compass.visibility = if (enabled) View.VISIBLE else View.GONE
         if (!enabled) return
@@ -7033,6 +7039,260 @@ class MapFragment : Fragment() {
         editor.apply()
     }
 
+    private enum class NavFileFilter { ALL, TRACKS, POINTS, ROUTES }
+
+    private data class NavFileEntry(
+        val file: java.io.File,
+        val folder: String
+    )
+
+    private data class NavFileMetadata(
+        val hasTrack: Boolean = false,
+        val hasPoints: Boolean = false,
+        val hasRoute: Boolean = false,
+        val summary: String = "..."
+    ) {
+        val hasAnything: Boolean get() = hasTrack || hasPoints || hasRoute
+        val icon: String get() {
+            val count = listOf(hasTrack, hasPoints, hasRoute).count { it }
+            return when {
+                count > 1 -> "📦"
+                hasTrack -> "📏"
+                hasPoints -> "📍"
+                hasRoute -> "🗺"
+                else -> "📄"
+            }
+        }
+    }
+
+    private val navigationFileExtensions = setOf("gpx", "wpt", "rte", "plt")
+
+    private fun fallbackMetadataForFolder(folder: String): NavFileMetadata = when (folder) {
+        "tracks" -> NavFileMetadata(hasTrack = true)
+        "points" -> NavFileMetadata(hasPoints = true)
+        "routes" -> NavFileMetadata(hasRoute = true)
+        else -> NavFileMetadata()
+    }
+
+    private fun navigationFileMimeType(file: java.io.File): String = when (file.extension.lowercase()) {
+        "gpx" -> "application/gpx+xml"
+        "wpt", "rte", "plt" -> "text/plain"
+        else -> "application/octet-stream"
+    }
+
+    private fun isSupportedNavigationFile(file: java.io.File): Boolean =
+        file.isFile && file.extension.lowercase() in navigationFileExtensions
+
+    private fun sanitizeNavigationFileName(displayName: String): String {
+        val fallback = "import_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())}.gpx"
+        val rawName = displayName.substringAfterLast('/').substringAfterLast('\\').trim().ifBlank { fallback }
+        val cleaned = rawName.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { fallback }
+        return if (cleaned.substringAfterLast('.', "").isBlank()) "$cleaned.gpx" else cleaned
+    }
+
+    private fun uniqueFileInDir(dir: java.io.File, displayName: String): java.io.File {
+        val safeName = sanitizeNavigationFileName(displayName)
+        val base = safeName.substringBeforeLast('.', safeName)
+        val ext = safeName.substringAfterLast('.', "")
+        var candidate = java.io.File(dir, safeName)
+        var index = 1
+        while (candidate.exists()) {
+            val nextName = if (ext.isBlank()) "$base ($index)" else "$base ($index).$ext"
+            candidate = java.io.File(dir, nextName)
+            index += 1
+        }
+        return candidate
+    }
+
+    private fun copyNavigationFileToImport(ctx: android.content.Context, displayName: String, bytes: ByteArray): java.io.File {
+        val dir = getRaceNavDir(ctx, "import")
+        val dest = uniqueFileInDir(dir, displayName)
+        dest.outputStream().use { it.write(bytes) }
+        return dest
+    }
+
+    private fun isRaceNavUri(ctx: android.content.Context, uri: Uri): Boolean {
+        val raw = uri.toString()
+        if (raw.contains("RaceNav%2F", ignoreCase = true) || raw.contains("/RaceNav/", ignoreCase = true)) {
+            return true
+        }
+        if (uri.scheme == "file") {
+            val path = uri.path ?: return false
+            return runCatching {
+                val file = java.io.File(path).canonicalFile
+                val base = java.io.File(
+                    android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
+                    "RaceNav"
+                ).canonicalFile
+                file.path.startsWith(base.path)
+            }.getOrDefault(false)
+        }
+        return false
+    }
+
+    private fun collectNavigationFiles(ctx: android.content.Context): List<NavFileEntry> {
+        // Recursively scan the whole Documents/RaceNav tree so existing files in any
+        // subfolder (incl. race folders the user copied in) are visible — not just the
+        // 5 app-managed subfolders. Skip the offline-map tile folder (large .mbtiles).
+        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return emptyList()
+        return base.walkTopDown()
+            .onEnter { dir -> !dir.name.equals("maps", ignoreCase = true) }
+            .maxDepth(5)
+            .filter { isSupportedNavigationFile(it) }
+            .take(1000)
+            .map { NavFileEntry(it, it.parentFile?.name ?: "") }
+            .toList()
+            .sortedByDescending { it.file.lastModified() }
+    }
+
+    private fun navigationTrackDistanceM(points: List<Pair<Double, Double>>): Double {
+        var total = 0.0
+        var prev: Pair<Double, Double>? = null
+        points.forEach { current ->
+            if (!isValidTrackCoordinate(current.first, current.second)) {
+                prev = null
+                return@forEach
+            }
+            val p = prev
+            if (p != null) {
+                total += distanceM(LatLng(p.first, p.second), LatLng(current.first, current.second))
+            }
+            prev = current
+        }
+        return total
+    }
+
+    private fun metadataFromParsed(parsed: ParsedNavigationFile, fallback: NavFileMetadata = NavFileMetadata()): NavFileMetadata {
+        if (!parsed.hasAnything) return fallback.copy(summary = "Файл пустой")
+        val trackCount = parsed.trackPoints.count { isValidTrackCoordinate(it.first, it.second) }
+        val parts = mutableListOf<String>()
+        if (parsed.hasRoute) parts.add("маршрут ${parsed.routeWaypoints.size} КП")
+        if (parsed.hasPointSet) parts.add("${parsed.pointWaypoints.size} точек")
+        if (parsed.hasTrack) {
+            val km = navigationTrackDistanceM(parsed.trackPoints) / 1000.0
+            parts.add("трек $trackCount т. · ${"%.1f".format(km)} км")
+        }
+        return NavFileMetadata(
+            hasTrack = parsed.hasTrack,
+            hasPoints = parsed.hasPointSet,
+            hasRoute = parsed.hasRoute,
+            summary = parts.joinToString(" · ")
+        )
+    }
+
+    private fun computeNavigationFileMetadata(entry: NavFileEntry): NavFileMetadata {
+        val fallback = fallbackMetadataForFolder(entry.folder)
+        return try {
+            val parsed = NavigationFileImporter.parse(entry.file.name, entry.file.readBytes())
+            metadataFromParsed(parsed, fallback)
+        } catch (_: Exception) {
+            fallback.copy(summary = "Ошибка чтения")
+        }
+    }
+
+    private fun matchesNavigationFileFilter(metadata: NavFileMetadata, filter: NavFileFilter): Boolean = when (filter) {
+        NavFileFilter.ALL -> true
+        NavFileFilter.TRACKS -> metadata.hasTrack
+        NavFileFilter.POINTS -> metadata.hasPoints
+        NavFileFilter.ROUTES -> metadata.hasRoute
+    }
+
+    private suspend fun openNavigationFile(displayName: String, bytes: ByteArray): Boolean {
+        val safeName = sanitizeNavigationFileName(displayName)
+        val parsed = withContext(Dispatchers.IO) {
+            NavigationFileImporter.parse(safeName, bytes)
+        }
+        return withContext(Dispatchers.Main) {
+            applyParsedNavigationFile(safeName, parsed)
+        }
+    }
+
+    private fun applyParsedNavigationFile(displayName: String, parsed: ParsedNavigationFile): Boolean {
+        val ctx = context ?: return false
+        if (!parsed.hasAnything) {
+            Toast.makeText(ctx, "Файл пустой: $displayName", Toast.LENGTH_SHORT).show()
+            return false
+        }
+
+        val baseName = displayName.substringBeforeLast('.', displayName)
+        if (parsed.hasPointSet) {
+            loadPointSet(parsed.pointWaypoints, baseName)
+        }
+        if (parsed.hasRoute) {
+            loadRoute(parsed.routeWaypoints, parsed.routeName ?: baseName)
+        }
+        if (parsed.hasTrack) {
+            loadTrack(
+                parsed.trackPoints,
+                pointTimes = parsed.trackPointTimes,
+                append = hasLoadedTrack(),
+                name = parsed.trackName ?: baseName
+            )
+        }
+
+        // Move camera to the loaded geometry so the user actually sees it.
+        val focusCoords = ArrayList<Pair<Double, Double>>()
+        if (parsed.hasRoute) parsed.routeWaypoints.forEach { focusCoords.add(it.lat to it.lon) }
+        if (parsed.hasPointSet) parsed.pointWaypoints.forEach { focusCoords.add(it.lat to it.lon) }
+        if (parsed.hasTrack) focusCoords.addAll(parsed.trackPoints)
+        fitCameraToPoints(focusCoords)
+
+        val parts = mutableListOf<String>()
+        if (parsed.hasRoute) parts.add("маршрут ${parsed.routeWaypoints.size} КП")
+        if (parsed.hasPointSet) parts.add("${parsed.pointWaypoints.size} точек")
+        if (parsed.hasTrack) {
+            val trackCount = parsed.trackPoints.count { isValidTrackCoordinate(it.first, it.second) }
+            parts.add("трек $trackCount т.")
+        }
+        Toast.makeText(ctx, "Загружено: ${parts.joinToString(" · ")}", Toast.LENGTH_SHORT).show()
+        return true
+    }
+
+    /** Animate the camera to fit the given lat/lon points (track/route/point set). */
+    private fun fitCameraToPoints(points: List<Pair<Double, Double>>) {
+        val valid = points.filter { isValidTrackCoordinate(it.first, it.second) }
+        if (valid.isEmpty()) return
+        // Leave follow mode so the camera doesn't snap back to GPS.
+        if (followMode != FollowMode.FREE) interruptCameraAutomationForGesture("show_on_map")
+        try {
+            if (valid.size == 1) {
+                mapboxMap?.animateCamera(
+                    com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngZoom(
+                        LatLng(valid[0].first, valid[0].second), 15.0
+                    ), 600
+                )
+                return
+            }
+            val builder = com.mapbox.mapboxsdk.geometry.LatLngBounds.Builder()
+            valid.forEach { builder.include(LatLng(it.first, it.second)) }
+            val bounds = builder.build()
+            val padding = (60 * resources.displayMetrics.density).toInt()
+            flyAnimationActive = true
+            val token = ++flyAnimationToken
+            mapboxMap?.animateCamera(
+                com.mapbox.mapboxsdk.camera.CameraUpdateFactory.newLatLngBounds(bounds, padding), 600
+            )
+            emergencyHandler.postDelayed({ if (token == flyAnimationToken) flyAnimationActive = false }, 700)
+        } catch (e: Exception) {
+            Log.w("RaceNav", "fitCameraToPoints failed: ${e.message}")
+        }
+    }
+
+    fun importAndOpenNavigationFile(displayName: String, bytes: ByteArray) {
+        val ctx = context ?: return
+        lifecycleScope.launch {
+            try {
+                val copiedFile = withContext(Dispatchers.IO) {
+                    copyNavigationFileToImport(ctx, displayName, bytes)
+                }
+                val copiedBytes = withContext(Dispatchers.IO) { copiedFile.readBytes() }
+                openNavigationFile(copiedFile.name, copiedBytes)
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Ошибка загрузки: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun loadFileFromPicker(uri: Uri) {
         val ctx = context ?: return
         val cursor = ctx.contentResolver.query(uri, null, null, null, null)
@@ -7041,37 +7301,22 @@ class MapFragment : Fragment() {
             else null
         } ?: uri.lastPathSegment ?: "file"
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch {
             try {
-                val inputStream = ctx.contentResolver.openInputStream(uri)
-                    ?: throw Exception("Не удалось открыть файл")
-                val bytes = inputStream.buffered(65536).use { it.readBytes() }
-                val parsed = NavigationFileImporter.parse(name, bytes)
-                withContext(Dispatchers.Main) {
-                    if (!parsed.hasAnything) {
-                        Toast.makeText(ctx, "Файл пустой: $name", Toast.LENGTH_SHORT).show()
-                        return@withContext
+                val (displayName, bytes) = withContext(Dispatchers.IO) {
+                    val inputStream = ctx.contentResolver.openInputStream(uri)
+                        ?: throw Exception("Не удалось открыть файл")
+                    val originalBytes = inputStream.buffered(65536).use { it.readBytes() }
+                    if (isRaceNavUri(ctx, uri)) {
+                        name to originalBytes
+                    } else {
+                        val copiedFile = copyNavigationFileToImport(ctx, name, originalBytes)
+                        copiedFile.name to copiedFile.readBytes()
                     }
-                    if (parsed.hasPointSet) {
-                        loadPointSet(parsed.pointWaypoints, name.substringBeforeLast('.'))
-                    }
-                    if (parsed.hasRoute) {
-                        loadRoute(parsed.routeWaypoints, parsed.routeName ?: name.substringBeforeLast('.'))
-                    }
-                    if (parsed.hasTrack) {
-                        loadTrack(
-                            parsed.trackPoints,
-                            pointTimes = parsed.trackPointTimes,
-                            append = hasLoadedTrack(),
-                            name = parsed.trackName ?: name.substringBeforeLast('.')
-                        )
-                    }
-                    Toast.makeText(ctx, "Загружено: $name", Toast.LENGTH_SHORT).show()
                 }
+                openNavigationFile(displayName, bytes)
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(ctx, "Ошибка загрузки: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+                Toast.makeText(ctx, "Ошибка загрузки: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -7749,15 +7994,554 @@ class MapFragment : Fragment() {
         }
     }
 
-    private fun buildGpxContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
-        // ── LOAD ──
+    private fun buildNavigationFilesBrowser(ctx: android.content.Context, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        val palette = currentModalPalette()
+        val files = collectNavigationFiles(ctx).toMutableList()
+        val metadataCache = mutableMapOf<String, NavFileMetadata>()
+        fun seedFallbackMetadata() {
+            metadataCache.clear()
+            files.forEach { entry ->
+                val fallback = fallbackMetadataForFolder(entry.folder)
+                if (fallback.hasAnything) metadataCache[entry.file.absolutePath] = fallback
+            }
+        }
+        seedFallbackMetadata()
+
+        var activeFilter = NavFileFilter.ALL
+
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "ФАЙЛЫ RACENAV"
+            setTextColor(palette.textMuted)
+            textSize = 11f
+            setPadding(0, (4 * dp).toInt(), 0, (8 * dp).toInt())
+        })
+
+        // Without "All files access" the app can't read files it didn't create itself
+        // (scoped storage) — File.listFiles() returns nothing. Prompt the user to grant it.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            !android.os.Environment.isExternalStorageManager()) {
+            root.addView(android.widget.Button(ctx).apply {
+                text = "⚠️ Разрешить доступ ко всем файлам"
+                textSize = 13f; isAllCaps = false
+                backgroundTintList = android.content.res.ColorStateList.valueOf(palette.warning)
+                setTextColor(0xFF111111.toInt())
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = (8 * dp).toInt() }
+                setOnClickListener {
+                    try {
+                        startActivity(Intent(
+                            android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:${ctx.packageName}")
+                        ))
+                    } catch (_: Exception) {
+                        try {
+                            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                        } catch (_: Exception) {}
+                    }
+                    dialog.dismiss()
+                }
+            })
+        }
+
+        val filterButtons = mutableMapOf<NavFileFilter, android.widget.Button>()
+        val filterRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, (8 * dp).toInt())
+        }
+        fun updateFilterButtons() {
+            filterButtons.forEach { (filter, button) ->
+                val selected = filter == activeFilter
+                button.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    if (selected) palette.accent else palette.surfaceVariant
+                )
+                button.setTextColor(if (selected) 0xFF111111.toInt() else palette.textSecondary)
+            }
+        }
+        fun addFilterButton(label: String, filter: NavFileFilter) {
+            filterRow.addView(android.widget.Button(ctx).apply {
+                text = label
+                textSize = 12f
+                isAllCaps = false
+                minHeight = (34 * dp).toInt()
+                minimumHeight = (34 * dp).toInt()
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, (38 * dp).toInt(), 1f).apply {
+                    marginEnd = (4 * dp).toInt()
+                }
+                filterButtons[filter] = this
+            })
+        }
+
+        addFilterButton("Все", NavFileFilter.ALL)
+        addFilterButton("Треки", NavFileFilter.TRACKS)
+        addFilterButton("Точки", NavFileFilter.POINTS)
+        addFilterButton("Маршруты", NavFileFilter.ROUTES)
+        root.addView(filterRow)
+
+        val searchInput = android.widget.EditText(ctx).apply {
+            hint = "Поиск по имени"
+            textSize = 13f
+            setSingleLine(true)
+            setPadding((10 * dp).toInt(), (8 * dp).toInt(), (10 * dp).toInt(), (8 * dp).toInt())
+            styleModalInput(this)
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = (8 * dp).toInt() }
+        }
+        root.addView(searchInput)
+
+        var reloadFilesAction: () -> Unit = {}
+
         root.addView(android.widget.Button(ctx).apply {
-            text = "📂 Загрузить файл"
+            text = "📁 Новая папка"
+            textSize = 13f; isAllCaps = false
+            backgroundTintList = android.content.res.ColorStateList.valueOf(palette.surfaceVariant)
+            setTextColor(palette.textSecondary)
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = (8 * dp).toInt() }
+            setOnClickListener {
+                showCreateFolderDialog(ctx) { dir ->
+                    Toast.makeText(ctx, "Папка создана: ${dir.name}", Toast.LENGTH_SHORT).show()
+                    reloadFilesAction()
+                }
+            }
+        })
+
+        // List goes directly into the sheet's outer NestedScrollView — wrapping it in its
+        // own ScrollView caused a nested-scroll conflict so the list wouldn't scroll.
+        val listContainer = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        root.addView(listContainer)
+
+        fun refreshList() {
+            renderNavigationFileList(
+                ctx = ctx,
+                files = files,
+                metadataCache = metadataCache,
+                activeFilter = activeFilter,
+                searchInputText = searchInput.text?.toString(),
+                container = listContainer,
+                dialog = dialog,
+                dp = dp,
+                onChanged = { reloadFilesAction() }
+            )
+        }
+        fun parseMetadataAsync() {
+            val snapshot = files.toList()
+            viewLifecycleOwner.lifecycleScope.launch {
+                val parsed = withContext(Dispatchers.IO) {
+                    snapshot.associate { it.file.absolutePath to computeNavigationFileMetadata(it) }
+                }
+                metadataCache.putAll(parsed)
+                refreshList()
+            }
+        }
+        fun reloadFiles() {
+            files.clear()
+            files.addAll(collectNavigationFiles(ctx))
+            seedFallbackMetadata()
+            refreshList()
+            parseMetadataAsync()
+        }
+        reloadFilesAction = { reloadFiles() }
+
+        filterButtons.forEach { (filter, button) ->
+            button.setOnClickListener {
+                activeFilter = filter
+                updateFilterButtons()
+                refreshList()
+            }
+        }
+        updateFilterButtons()
+        searchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = refreshList()
+            override fun afterTextChanged(s: android.text.Editable?) = Unit
+        })
+        refreshList()
+
+        parseMetadataAsync()
+    }
+
+    private fun renderNavigationFileList(
+        ctx: android.content.Context,
+        files: List<NavFileEntry>,
+        metadataCache: Map<String, NavFileMetadata>,
+        activeFilter: NavFileFilter,
+        searchInputText: String?,
+        container: android.widget.LinearLayout?,
+        dialog: BottomSheetDialog,
+        dp: Float,
+        onChanged: () -> Unit
+    ) {
+        val target = container ?: return
+        val palette = currentModalPalette()
+        target.removeAllViews()
+        val query = searchInputText?.trim()?.lowercase().orEmpty()
+        val shown = files.filter { entry ->
+            if (!entry.file.exists()) return@filter false
+            val metadata = metadataCache[entry.file.absolutePath] ?: fallbackMetadataForFolder(entry.folder)
+            val nameMatches = query.isBlank() ||
+                entry.file.name.lowercase().contains(query) ||
+                folderLabel(entry.folder).lowercase().contains(query)
+            nameMatches && matchesNavigationFileFilter(metadata, activeFilter)
+        }
+
+        if (shown.isEmpty()) {
+            target.addView(android.widget.TextView(ctx).apply {
+                text = if (files.isEmpty()) {
+                    "Нет файлов. Импортируйте с устройства или запишите трек."
+                } else {
+                    "Нет файлов под выбранный фильтр."
+                }
+                setTextColor(palette.textMuted)
+                textSize = 13f
+                setPadding(0, (16 * dp).toInt(), 0, (16 * dp).toInt())
+            })
+            return
+        }
+
+        val sdf = java.text.SimpleDateFormat("dd.MM.yy HH:mm", java.util.Locale.getDefault())
+        shown.forEachIndexed { index, entry ->
+            val metadata = metadataCache[entry.file.absolutePath] ?: fallbackMetadataForFolder(entry.folder)
+            val row = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((6 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt())
+                if (index % 2 == 0) setBackgroundColor(palette.surfaceVariant)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { openNavigationFileFromFile(entry.file, dialog) }
+                setOnLongClickListener {
+                    showNavigationFileActions(ctx, entry, metadata, dialog, this, onChanged)
+                    true
+                }
+            }
+
+            row.addView(android.widget.TextView(ctx).apply {
+                text = metadata.icon
+                textSize = 18f
+                setPadding(0, 0, (8 * dp).toInt(), 0)
+            })
+
+            val info = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            info.addView(android.widget.TextView(ctx).apply {
+                text = entry.file.name
+                setTextColor(palette.textPrimary)
+                textSize = 13f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            info.addView(android.widget.TextView(ctx).apply {
+                val date = sdf.format(java.util.Date(entry.file.lastModified()))
+                val summary = metadata.summary.takeIf { it.isNotBlank() } ?: "..."
+                text = "${folderLabel(entry.folder)} · $date · $summary"
+                setTextColor(palette.textMuted)
+                textSize = 11f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            row.addView(info)
+
+            row.addView(android.widget.TextView(ctx).apply {
+                text = "⋮"
+                textSize = 24f
+                gravity = android.view.Gravity.CENTER
+                setTextColor(palette.textSecondary)
+                layoutParams = android.widget.LinearLayout.LayoutParams((42 * dp).toInt(), (42 * dp).toInt())
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { anchor ->
+                    showNavigationFileActions(ctx, entry, metadata, dialog, anchor, onChanged)
+                }
+            })
+
+            target.addView(row)
+            target.addView(View(ctx).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    1
+                )
+                setBackgroundColor(palette.divider)
+            })
+        }
+    }
+
+    private fun folderLabel(folder: String): String = when (folder) {
+        "tracks" -> "Треки"
+        "points" -> "Точки"
+        "routes" -> "Маршруты"
+        "export" -> "Export"
+        "import" -> "Import"
+        else -> folder
+    }
+
+    private fun openNavigationFileFromFile(file: java.io.File, dialog: BottomSheetDialog? = null) {
+        val ctx = context ?: return
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                val loaded = openNavigationFile(file.name, bytes)
+                if (loaded) dialog?.dismiss()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun showTrackFromNavigationFile(file: java.io.File, dialog: BottomSheetDialog) {
+        val ctx = context ?: return
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val parsed = withContext(Dispatchers.IO) {
+                    NavigationFileImporter.parse(file.name, file.readBytes())
+                }
+                if (!parsed.hasTrack) {
+                    Toast.makeText(ctx, "В файле нет трека", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                loadTrack(
+                    parsed.trackPoints,
+                    pointTimes = parsed.trackPointTimes,
+                    append = false,
+                    name = parsed.trackName ?: file.nameWithoutExtension
+                )
+                fitCameraToPoints(parsed.trackPoints)
+                dialog.dismiss()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun showNavigationFileActions(
+        ctx: android.content.Context,
+        entry: NavFileEntry,
+        metadata: NavFileMetadata,
+        dialog: BottomSheetDialog,
+        anchor: View,
+        onChanged: () -> Unit
+    ) {
+        val popup = android.widget.PopupMenu(android.view.ContextThemeWrapper(ctx, androidx.appcompat.R.style.Theme_AppCompat_DayNight), anchor)
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val layerShown = navigationFileLayerShown(metadata, prefs)
+        popup.menu.add(0, 1, 0, "Открыть")
+        if (metadata.hasTrack || entry.folder == "tracks") {
+            popup.menu.add(0, 2, 1, "Показать на карте")
+        }
+        if (metadata.hasAnything) {
+            popup.menu.add(0, 6, 2, if (layerShown) "🙈 Скрыть с карты" else "👁 Вернуть на карту")
+        }
+        popup.menu.add(0, 7, 3, "📂 Переместить в папку")
+        popup.menu.add(0, 3, 4, "Переименовать")
+        popup.menu.add(0, 4, 5, "Удалить")
+        popup.menu.add(0, 5, 6, "Поделиться (Telegram…)")
+        popup.menu.add(0, 8, 7, "👥 Отправить в группу")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> openNavigationFileFromFile(entry.file, dialog)
+                2 -> showTrackFromNavigationFile(entry.file, dialog)
+                6 -> {
+                    setNavigationFileLayerVisible(metadata, !layerShown)
+                    Toast.makeText(
+                        ctx,
+                        if (!layerShown) "Показано на карте" else "Скрыто с карты (не удалено)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                7 -> showMoveNavigationFileDialog(ctx, entry.file, onChanged)
+                3 -> showRenameNavigationFileDialog(ctx, entry.file, onChanged)
+                4 -> showDeleteNavigationFileDialog(ctx, entry.file, onChanged)
+                5 -> shareNavigationFile(ctx, entry.file)
+                8 -> shareNavigationFileToGroup(ctx, entry.file)
+            }
+            true
+        }
+        popup.show()
+    }
+
+    /** Send a file through the in-app monitoring group-share system. */
+    private fun shareNavigationFileToGroup(ctx: android.content.Context, file: java.io.File) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val content = withContext(Dispatchers.IO) { file.readText() }
+                showGroupSharePicker(ctx, file.nameWithoutExtension, content)
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Не удалось прочитать файл: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /** List existing subfolders under Documents/RaceNav (depth 1) for the move dialog. */
+    private fun raceNavSubfolders(ctx: android.content.Context): List<java.io.File> {
+        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return emptyList()
+        return base.listFiles { f -> f.isDirectory && !f.name.equals("maps", ignoreCase = true) }
+            ?.sortedBy { it.name.lowercase() } ?: emptyList()
+    }
+
+    /** Move a file into an existing or newly-created subfolder of RaceNav. */
+    private fun showMoveNavigationFileDialog(ctx: android.content.Context, file: java.io.File, onChanged: () -> Unit) {
+        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return
+        val folders = raceNavSubfolders(ctx)
+        val labels = (listOf("➕ Новая папка…", "📁 RaceNav (корень)") + folders.map { "📂 ${it.name}" }).toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Переместить «${file.name}» в…")
+            .setItems(labels) { _, which ->
+                when (which) {
+                    0 -> showCreateFolderDialog(ctx) { newDir -> moveFileTo(ctx, file, newDir, onChanged) }
+                    1 -> moveFileTo(ctx, file, base, onChanged)
+                    else -> moveFileTo(ctx, file, folders[which - 2], onChanged)
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showCreateFolderDialog(ctx: android.content.Context, onCreated: (java.io.File) -> Unit) {
+        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return
+        val input = android.widget.EditText(ctx).apply {
+            hint = "Название папки"
+            styleModalInput(this)
+            setPadding(24, 16, 24, 16)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Новая папка")
+            .setView(input)
+            .setPositiveButton("Создать") { _, _ ->
+                val raw = input.text.toString().trim().replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                if (raw.isBlank()) {
+                    Toast.makeText(ctx, "Имя не задано", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val dir = java.io.File(base, raw)
+                if (dir.exists() || dir.mkdirs()) onCreated(dir)
+                else Toast.makeText(ctx, "Не удалось создать папку", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun moveFileTo(ctx: android.content.Context, file: java.io.File, destDir: java.io.File, onChanged: () -> Unit) {
+        if (!destDir.exists()) destDir.mkdirs()
+        val target = java.io.File(destDir, file.name)
+        if (target.absolutePath == file.absolutePath) { onChanged(); return }
+        if (target.exists()) {
+            Toast.makeText(ctx, "В папке уже есть такой файл", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ok = file.renameTo(target) || run {
+            // renameTo can fail across mount points — fall back to copy+delete
+            try { target.writeBytes(file.readBytes()); file.delete(); true } catch (_: Exception) { false }
+        }
+        if (ok) {
+            Toast.makeText(ctx, "Перемещено в «${destDir.name}»", Toast.LENGTH_SHORT).show()
+            onChanged()
+        } else {
+            Toast.makeText(ctx, "Не удалось переместить", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Whether the on-map layer(s) for this file's type(s) are currently visible. */
+    private fun navigationFileLayerShown(metadata: NavFileMetadata, prefs: android.content.SharedPreferences): Boolean {
+        var shown = false
+        if (metadata.hasRoute &&
+            (prefs.getBoolean(PREF_LOADED_WP_VISIBLE, true) || prefs.getBoolean(PREF_ROUTE_LINE_VISIBLE, true))) shown = true
+        if (metadata.hasPoints && prefs.getBoolean(PREF_USER_POINTS_VISIBLE, true)) shown = true
+        if (metadata.hasTrack && prefs.getBoolean(PREF_LOADED_TRACK_VISIBLE, true)) shown = true
+        return shown
+    }
+
+    /** Hide/show the map layer(s) matching this file's type(s) without unloading the data. */
+    private fun setNavigationFileLayerVisible(metadata: NavFileMetadata, visible: Boolean) {
+        if (metadata.hasRoute) { setLoadedWpVisible(visible); setRouteLineVisible(visible) }
+        if (metadata.hasPoints) setUserPointsVisible(visible)
+        if (metadata.hasTrack) setLoadedTrackVisible(visible)
+    }
+
+    private fun showRenameNavigationFileDialog(ctx: android.content.Context, file: java.io.File, onChanged: () -> Unit) {
+        val input = android.widget.EditText(ctx).apply {
+            setText(file.name)
+            selectAll()
+            styleModalInput(this)
+            setPadding(24, 16, 24, 16)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Переименовать файл")
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val raw = input.text.toString().trim()
+                if (raw.isBlank()) {
+                    Toast.makeText(ctx, "Имя не задано", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val withExt = if (raw.substringAfterLast('.', "").isBlank() && file.extension.isNotBlank()) {
+                    "$raw.${file.extension}"
+                } else raw
+                val safeName = sanitizeNavigationFileName(withExt)
+                val target = java.io.File(file.parentFile, safeName)
+                when {
+                    target == file -> Unit
+                    target.exists() -> Toast.makeText(ctx, "Файл уже существует", Toast.LENGTH_SHORT).show()
+                    file.renameTo(target) -> {
+                        Toast.makeText(ctx, "Переименовано: ${target.name}", Toast.LENGTH_SHORT).show()
+                        onChanged()
+                    }
+                    else -> Toast.makeText(ctx, "Не удалось переименовать", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showDeleteNavigationFileDialog(ctx: android.content.Context, file: java.io.File, onChanged: () -> Unit) {
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Удалить файл?")
+            .setMessage("«${file.name}» будет удалён без возможности восстановления.")
+            .setPositiveButton("Удалить") { _, _ ->
+                if (file.delete()) {
+                    Toast.makeText(ctx, "Удалён: ${file.name}", Toast.LENGTH_SHORT).show()
+                    onChanged()
+                } else {
+                    Toast.makeText(ctx, "Не удалось удалить файл", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun shareNavigationFile(ctx: android.content.Context, file: java.io.File) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = navigationFileMimeType(file)
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            ctx.startActivity(Intent.createChooser(intent, "Отправить файл"))
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Не удалось поделиться: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun buildGpxContent(ctx: android.content.Context, prefs: android.content.SharedPreferences, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
+        buildNavigationFilesBrowser(ctx, root, dialog, dp)
+
+        // ── IMPORT ──
+        root.addView(android.widget.Button(ctx).apply {
+            text = "📥 Импорт с устройства"
             textSize = 14f; isAllCaps = false
             setPadding(0, (12 * dp).toInt(), 0, 0)
             setOnClickListener {
                 dialog.dismiss()
-                filePickerLauncher.launch(arrayOf("*/*", "application/gpx+xml", "application/octet-stream"))
+                filePickerLauncher.launch(arrayOf("application/gpx+xml", "application/octet-stream", "text/*", "application/xml"))
             }
         })
 
