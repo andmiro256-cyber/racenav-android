@@ -57,6 +57,7 @@ import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_COLOR
 import com.andreykoff.racenav.MapFragment.Companion.DEFAULT_LOADED_TRACK_WIDTH
 import com.andreykoff.racenav.MapFragment.Companion.PREF_3D_TILT
 import com.andreykoff.racenav.MapFragment.Companion.PREF_MAP_TILT_ENABLED
+import com.andreykoff.racenav.MapFragment.Companion.PREF_HIDE_WIDGETS_ON_HOLD
 import com.andreykoff.racenav.MapFragment.Companion.PREF_AUTO_ZOOM
 import com.andreykoff.racenav.MapFragment.Companion.PREF_SYNC_API_KEY
 import com.andreykoff.racenav.MapFragment.Companion.PREF_WP_APPROACH_RADIUS
@@ -247,6 +248,14 @@ class SettingsFragment : Fragment() {
         switchVolMapSwitch.isChecked = prefs.getBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, true)
         switchVolMapSwitch.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(MapFragment.PREF_VOLUME_MAP_SWITCH, checked).apply()
+        }
+
+        val switchHideWidgetsOnHold = view.findViewById<SwitchCompat>(R.id.switchHideWidgetsOnHold)
+        switchHideWidgetsOnHold.isChecked = prefs.getBoolean(PREF_HIDE_WIDGETS_ON_HOLD, false)
+        switchHideWidgetsOnHold.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_HIDE_WIDGETS_ON_HOLD, checked).apply()
+            parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull()
+                ?.applyHideWidgetsOnHoldPref()
         }
 
         // Lock button settings

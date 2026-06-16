@@ -228,6 +228,8 @@ class MapFragment : Fragment() {
     private var renderedOverlayCount = 0
     // Pending unlock runnable — stored so unlockScreen() can cancel it regardless of how unlock happens
     private var pendingUnlockAction: Runnable? = null
+    private var saveTrackDialog: androidx.appcompat.app.AlertDialog? = null
+    private var unfinishedTrackDialog: androidx.appcompat.app.AlertDialog? = null
     private var flyAnimationActive = false
     private var flyAnimationToken = 0
     private var pendingNavResumeCheck = false
@@ -453,6 +455,7 @@ class MapFragment : Fragment() {
         const val PREF_AUTO_RECORD    = "auto_record"        // bool: auto-start recording, default true
         const val PREF_WAS_RECORDING  = "was_recording"     // bool: app was closed during recording
         const val TRACK_TMP_FILENAME  = "current_track_tmp.gpx" // temp file while recording
+        const val PREF_HIDE_WIDGETS_ON_HOLD = "hide_widgets_on_hold" // bool, default false
         const val OFFLINE_TILE_KEY = "offline"
         const val TILE_SERVER_PORT = 18564
 
@@ -1108,14 +1111,19 @@ class MapFragment : Fragment() {
                         }
 
                         if (!isDownloadSelecting) {
-                            panelRunnable = Runnable {
-                                val nowVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
-                                isWidgetFreeMode = nowVisible
-                                _binding?.topBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
-                                _binding?.bottomBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
-                                applyNavCompassPrefs()
+                            val hideWidgetsOnHold = context
+                                ?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                ?.getBoolean(PREF_HIDE_WIDGETS_ON_HOLD, false) == true
+                            if (hideWidgetsOnHold) {
+                                panelRunnable = Runnable {
+                                    val nowVisible = _binding?.topBar?.visibility == android.view.View.VISIBLE
+                                    isWidgetFreeMode = nowVisible
+                                    _binding?.topBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
+                                    _binding?.bottomBar?.visibility = if (nowVisible) android.view.View.GONE else android.view.View.VISIBLE
+                                    applyNavCompassPrefs()
+                                }
+                                emergencyHandler.postDelayed(panelRunnable!!, 1500L)
                             }
-                            emergencyHandler.postDelayed(panelRunnable!!, 1500L)
                             emergencyRunnable = Runnable {
                                 _binding?.btnEmergencySettings?.visibility = android.view.View.VISIBLE
                             }
@@ -1186,7 +1194,10 @@ class MapFragment : Fragment() {
         if (savedInstanceState?.getBoolean("screen_locked", false) == true) {
             lockScreen()
         }
-        if (savedInstanceState?.getBoolean("widget_free_mode", false) == true) {
+        val restoreWidgetFreeMode = savedInstanceState?.getBoolean("widget_free_mode", false) == true &&
+            context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.getBoolean(PREF_HIDE_WIDGETS_ON_HOLD, false) == true
+        if (restoreWidgetFreeMode) {
             isWidgetFreeMode = true
             _binding?.topBar?.visibility = View.GONE
             _binding?.bottomBar?.visibility = View.GONE
@@ -1226,6 +1237,16 @@ class MapFragment : Fragment() {
             _binding?.topBar?.visibility = View.VISIBLE
             _binding?.bottomBar?.visibility = View.VISIBLE
         }
+    }
+
+    fun applyHideWidgetsOnHoldPref() {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        if (prefs.getBoolean(PREF_HIDE_WIDGETS_ON_HOLD, false)) return
+        isWidgetFreeMode = false
+        _binding?.topBar?.visibility = View.VISIBLE
+        _binding?.bottomBar?.visibility = View.VISIBLE
+        _binding?.btnEmergencySettings?.visibility = View.GONE
+        applyNavCompassPrefs()
     }
 
     private data class WidgetDef(val key: String, val prefKey: String, val defaultOn: Boolean)
@@ -5551,10 +5572,10 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** Drag to move, tap to lock, long-press to unlock (when fixed).
+    /** Drag to move, tap to lock, long-press to unlock.
      *  Gesture rules:
      *  NOT fixed + NOT locked: tap=lock, drag=move
-     *  NOT fixed + locked: nothing (use Volume+ to unlock)
+     *  NOT fixed + locked: long-press=unlock
      *  Fixed + NOT locked: tap=lock
      *  Fixed + locked: long-press=unlock */
     private fun setupLockButtonDrag(btnLock: View) {
@@ -5570,9 +5591,7 @@ class MapFragment : Fragment() {
         var isDragging = false; var longPressTriggered = false
 
         val longPressRunnable = Runnable {
-            val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val isFixed = prefs?.getBoolean(PREF_LOCK_BUTTON_FIXED, false) ?: false
-            if (isScreenLocked && isFixed && !isDragging) {
+            if (isScreenLocked && !isDragging) {
                 longPressTriggered = true
                 unlockScreen()
             }
@@ -5589,7 +5608,7 @@ class MapFragment : Fragment() {
                     startX = v.translationX; startY = v.translationY
                     isDragging = false; longPressTriggered = false
                     v.removeCallbacks(longPressRunnable)
-                    if (isScreenLocked && isFixed) v.postDelayed(longPressRunnable, getLongPressMs())
+                    if (isScreenLocked) v.postDelayed(longPressRunnable, getLongPressMs())
                     v.parent?.requestDisallowInterceptTouchEvent(true)
                     true
                 }
@@ -5972,22 +5991,46 @@ class MapFragment : Fragment() {
         showHint("🗺 $nextName")
     }
 
-        fun lockScreen() {
+    fun lockScreen() {
         isScreenLocked = true
         val b = _binding ?: return
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val lockButtonVisible = prefs?.getBoolean(PREF_BTN_LOCK, true) ?: true
+        val volumeUnlockEnabled = prefs?.getBoolean(PREF_VOLUME_LOCK, true) ?: true
+        val unlockDelaySec = prefs?.getInt(PREF_LOCK_UNLOCK_DELAY, DEFAULT_LOCK_UNLOCK_DELAY)
+            ?.coerceIn(1, 5) ?: DEFAULT_LOCK_UNLOCK_DELAY
+        pendingUnlockAction?.let { emergencyHandler.removeCallbacks(it) }
+        pendingUnlockAction = null
         b.lockOverlay.visibility = View.VISIBLE  // Always show overlay (blocks touches)
         // Always show small yellow lock icon in top-right corner
         val lockIcon = b.lockOverlay.getChildAt(0) as? android.widget.ImageView
         lockIcon?.visibility = View.VISIBLE
-        // Long-press anywhere on overlay for 3s → unlock
-        val unlockAction = Runnable { unlockScreen() }
-        pendingUnlockAction = unlockAction
-        b.lockOverlay.setOnTouchListener { _, event ->
-            when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> emergencyHandler.postDelayed(unlockAction, 3000)
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> emergencyHandler.removeCallbacks(unlockAction)
+        if (lockButtonVisible) {
+            // The overlay only blocks accidental map touches. Unlock goes through btnLock or Volume+.
+            b.lockOverlay.setOnTouchListener { _, _ -> true }
+            b.btnLock.bringToFront()
+            Toast.makeText(
+                context,
+                "🔒 Экран заблокирован. Разблокировка — удержание кнопки замка ${unlockDelaySec} с",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            // Fallback when the lock button is hidden: never leave the user without an unlock path.
+            val unlockAction = Runnable { unlockScreen() }
+            pendingUnlockAction = unlockAction
+            b.lockOverlay.setOnTouchListener { _, event ->
+                when (event.action) {
+                    android.view.MotionEvent.ACTION_DOWN -> emergencyHandler.postDelayed(unlockAction, unlockDelaySec * 1000L)
+                    android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> emergencyHandler.removeCallbacks(unlockAction)
+                }
+                true
             }
-            true
+            val hint = if (volumeUnlockEnabled) {
+                "🔒 Экран заблокирован. Разблокировка — Volume+ или удержание экрана ${unlockDelaySec} с"
+            } else {
+                "🔒 Экран заблокирован. Разблокировка — удержание экрана ${unlockDelaySec} с"
+            }
+            Toast.makeText(context, hint, Toast.LENGTH_SHORT).show()
         }
         ImageViewCompat.setImageTintList(
             b.btnLock,
@@ -9670,17 +9713,9 @@ class MapFragment : Fragment() {
             LicenseManager.showLicenseRequired(ctx); return
         }
         if (!isRecording) {
-            // Старт — запускаем foreground service
-            val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_START }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
-                else ctx.startService(intent)
-            } catch (e: Exception) { Log.w("RaceNav", "startForegroundService failed: ${e.message}") }
-            _binding?.btnRec?.setImageResource(R.drawable.ic_rec)
-            _binding?.widgetTrackLen?.text = "0.0"
-            _binding?.widgetChrono?.text = "0:00"
-            startChronoTicker()
-            Toast.makeText(ctx, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
+            if (hasUnfinishedTrack(ctx, includeOrphanTemp = true) &&
+                checkForUnfinishedTrack(allowStartNew = true)) return
+            startNewRecording(ctx)
         } else {
             // Стоп — останавливаем сервис (он сделает финальный авто-сейв в tmp файл)
             ctx.startService(Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_STOP })
@@ -9694,9 +9729,29 @@ class MapFragment : Fragment() {
 
     // ─── Track save / resume ──────────────────────────────────────────────────
 
+    private fun startNewRecording(ctx: Context) {
+        val intent = Intent(ctx, TrackingService::class.java).apply { action = TrackingService.ACTION_START }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+            else ctx.startService(intent)
+        } catch (e: Exception) { Log.w("RaceNav", "startForegroundService failed: ${e.message}") }
+        _binding?.btnRec?.setImageResource(R.drawable.ic_rec)
+        _binding?.widgetTrackLen?.text = "0.0"
+        _binding?.widgetChrono?.text = "0:00"
+        startChronoTicker()
+        Toast.makeText(ctx, "⏺ Запись трека начата", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun hasUnfinishedTrack(ctx: Context, includeOrphanTemp: Boolean = false): Boolean {
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(PREF_WAS_RECORDING, false) ||
+            (includeOrphanTemp && TrackTempStore.hasAny(ctx))
+    }
+
     /** Called when user stops recording — offer to save GPX with name input */
     private fun showSaveTrackDialog() {
         val ctx = context ?: return
+        if (saveTrackDialog?.isShowing == true) return
         val (pts, pointTimes) = synchronized(TrackingService.trackPoints) {
             TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
         }
@@ -9725,7 +9780,7 @@ class MapFragment : Fragment() {
             })
             addView(input)
         }
-        androidx.appcompat.app.AlertDialog.Builder(ctx)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("💾 Сохранить трек")
             .setView(container)
             .setPositiveButton("Сохранить") { _, _ ->
@@ -9735,40 +9790,52 @@ class MapFragment : Fragment() {
             .setNegativeButton("Не сохранять") { _, _ -> clearTmpTrack() }
             .setCancelable(false)
             .show()
+        saveTrackDialog = dialog
+        dialog.setOnDismissListener {
+            if (saveTrackDialog === dialog) saveTrackDialog = null
+        }
     }
 
     /** Check if app was killed during recording — offer resume / save / discard */
-    private fun checkForUnfinishedTrack() {
-        val ctx = context ?: return
+    private fun checkForUnfinishedTrack(allowStartNew: Boolean = false): Boolean {
+        val ctx = context ?: return false
+        if (saveTrackDialog?.isShowing == true || unfinishedTrackDialog?.isShowing == true) return true
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(PREF_WAS_RECORDING, false)) return
-        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
-        if (!tmpFile.exists() || tmpFile.length() == 0L) {
-            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
-            return
+        if (!hasUnfinishedTrack(ctx, includeOrphanTemp = allowStartNew)) return false
+        val hasTemp = TrackTempStore.hasAny(ctx)
+        val savedTrack = if (hasTemp) TrackTempStore.readBest(ctx, "TrackRestore")?.result else null
+        val savedPoints: List<Pair<Double, Double>>
+        val savedTimes: List<Long?>
+        if (savedTrack != null) {
+            savedPoints = savedTrack.trackPoints
+            savedTimes = normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes)
+        } else {
+            if (hasTemp) {
+                Log.w("TrackRestore", "No valid temp track candidate found; corrupt files left in app storage")
+            }
+            val (memoryPoints, memoryTimes) = synchronized(TrackingService.trackPoints) {
+                TrackingService.trackPoints.toList() to TrackingService.trackPointTimes.toList()
+            }
+            if (memoryPoints.size < 2) {
+                prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
+                return false
+            }
+            savedPoints = memoryPoints
+            savedTimes = normalizedTrackTimes(memoryPoints, memoryTimes)
         }
-        val savedTrack = try {
-            GpxParser.parseGpxFull(tmpFile.inputStream())
-        } catch (_: Exception) {
-            tmpFile.delete()
-            prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
-            return
-        }
-        val savedPoints = savedTrack.trackPoints
-        val savedTimes = normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes)
         if (savedPoints.isEmpty()) {
-            tmpFile.delete()
+            TrackTempStore.deleteAll(ctx)
             prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
-            return
+            return false
         }
         val km = calcTrackKm(savedPoints)
         // Don't offer to resume a track with essentially 0 distance
         if (km < 0.05) {
-            tmpFile.delete()
+            TrackTempStore.deleteAll(ctx)
             prefs.edit().putBoolean(PREF_WAS_RECORDING, false).apply()
-            return
+            return false
         }
-        androidx.appcompat.app.AlertDialog.Builder(ctx)
+        val builder = androidx.appcompat.app.AlertDialog.Builder(ctx)
             .setTitle("Незаконченная запись")
             .setMessage("Найден трек: ${savedPoints.size} точек, ${String.format("%.1f", km)} км\n\nЧто сделать?")
             .setPositiveButton("Продолжить запись") { _, _ ->
@@ -9791,9 +9858,21 @@ class MapFragment : Fragment() {
                 updateTrackOnMap()
             }
             .setNeutralButton("Сохранить") { _, _ -> saveTrackToFile(savedPoints, pointTimes = savedTimes) }
-            .setNegativeButton("Позже", null)
             .setCancelable(true)
-            .show()
+        if (allowStartNew) {
+            builder.setNegativeButton("Начать новый") { _, _ ->
+                clearTmpTrack()
+                startNewRecording(ctx)
+            }
+        } else {
+            builder.setNegativeButton("Позже", null)
+        }
+        val dialog = builder.show()
+        unfinishedTrackDialog = dialog
+        dialog.setOnDismissListener {
+            if (unfinishedTrackDialog === dialog) unfinishedTrackDialog = null
+        }
+        return true
     }
 
     /** Prompt user to enter email if not set (with 3-day cooldown) */
@@ -10117,7 +10196,7 @@ class MapFragment : Fragment() {
     }
     private fun clearTmpTrack() {
         val ctx = context ?: return
-        java.io.File(ctx.filesDir, TRACK_TMP_FILENAME).takeIf { it.exists() }?.delete()
+        TrackTempStore.deleteAll(ctx)
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(PREF_WAS_RECORDING, false).apply()
     }
@@ -10255,37 +10334,30 @@ class MapFragment : Fragment() {
         val ctx = context ?: return
         val liveCount = synchronized(TrackingService.trackPoints) { TrackingService.trackPoints.size }
         if (liveCount >= 2) return
-        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
-        if (!tmpFile.exists() || tmpFile.length() == 0L) return
-        try {
-            val savedTrack = GpxParser.parseGpxFull(tmpFile.inputStream())
-            val savedPoints = savedTrack.trackPoints
-            if (savedPoints.size < 2) return
-            synchronized(TrackingService.trackPoints) {
-                TrackingService.trackPoints.clear()
-                TrackingService.trackPointTimes.clear()
-                TrackingService.trackPoints.addAll(savedPoints)
-                TrackingService.trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
-            }
-            TrackingService.trackLengthM = calcTrackKm(savedPoints) * 1000.0
-            cachedTrackSegments = null
-            cachedTrackPointCount = 0
-            cachedTrackGeoJson = null
-            lastAppliedTrackGeoJson = null
-            lastAppliedTrackSourceIdentity = 0
-            lastTrackExtrapolatedUpdateMs = 0L
-            Log.d("TrackDebug", "Restored live track from tmp GPX: ${savedPoints.size} points")
-        } catch (e: Exception) {
-            Log.w("TrackDebug", "Failed to restore live track from tmp GPX: ${e.message}")
+        val savedTrack = TrackTempStore.readBest(ctx, "TrackDebug")?.result ?: return
+        val savedPoints = savedTrack.trackPoints
+        if (savedPoints.size < 2) return
+        synchronized(TrackingService.trackPoints) {
+            TrackingService.trackPoints.clear()
+            TrackingService.trackPointTimes.clear()
+            TrackingService.trackPoints.addAll(savedPoints)
+            TrackingService.trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
         }
+        TrackingService.trackLengthM = calcTrackKm(savedPoints) * 1000.0
+        cachedTrackSegments = null
+        cachedTrackPointCount = 0
+        cachedTrackGeoJson = null
+        lastAppliedTrackGeoJson = null
+        lastAppliedTrackSourceIdentity = 0
+        lastTrackExtrapolatedUpdateMs = 0L
+        Log.d("TrackDebug", "Restored live track from tmp GPX: ${savedPoints.size} points")
     }
 
     private fun hasExpectedLiveTrackOnResume(): Boolean {
         val ctx = context ?: return false
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getBoolean(PREF_WAS_RECORDING, false)) return true
-        val tmpFile = java.io.File(ctx.filesDir, TRACK_TMP_FILENAME)
-        return tmpFile.exists() && tmpFile.length() > 0L
+        return TrackTempStore.hasAny(ctx)
     }
 
     private fun restoreTrackSourcesAfterResume(attempt: Int = 0) {
@@ -11539,6 +11611,7 @@ class MapFragment : Fragment() {
         _binding?.mapView?.onResume()
         startMagnetometer()
         applyFullscreenPref()
+        applyHideWidgetsOnHoldPref()
         // Register favorites-groups pref listener — re-render markers when active group changes
         val ctx = context
         if (ctx != null && favoritesPrefListener == null) {
@@ -11586,6 +11659,7 @@ class MapFragment : Fragment() {
         // Restore track sources after resume; MapLibre can recreate style/source after onResume, so do a few passes.
         cancelPendingResumeTrackRestore()
         restoreTrackSourcesAfterResume()
+        if (!isRecording) checkForUnfinishedTrack()
         // Синхронизируем UI если сервис пишет трек в фоне
         if (isRecording) {
             binding.btnRec.setImageResource(R.drawable.ic_rec)
@@ -11660,6 +11734,12 @@ class MapFragment : Fragment() {
         stopCameraLoop()
         stopMonitoringMessagesPolling()
         hideIncomingMessagePreview(immediate = true)
+        saveTrackDialog?.setOnDismissListener(null)
+        saveTrackDialog?.dismiss()
+        saveTrackDialog = null
+        unfinishedTrackDialog?.setOnDismissListener(null)
+        unfinishedTrackDialog?.dismiss()
+        unfinishedTrackDialog = null
         customCheckpointPlayers.toList().forEach {
             try { it.stop() } catch (_: Exception) {}
             try { it.release() } catch (_: Exception) {}

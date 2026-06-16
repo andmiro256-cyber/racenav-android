@@ -49,6 +49,7 @@ class TrackingService : Service() {
     private var lastLocationTimeMs = 0L
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pendingAutoSaveJob: Job? = null
+    private var autoSaveFailed = false
 
     private fun normalizedTrackTimes(points: List<Pair<Double, Double>>, times: List<Long?>): List<Long?> {
         return points.indices.map { times.getOrNull(it) }
@@ -238,11 +239,14 @@ class TrackingService : Service() {
 
     private fun stopTracking() {
         isRunning = false
+        val prefs = getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(MapFragment.PREF_WAS_RECORDING, false)) {
+            autoSaveTrack(trackPoints.toList(), trackPointTimes.toList())  // Final save before stopping
+            if (!prefs.getBoolean(MapFragment.PREF_WAS_RECORDING, false)) {
+                TrackTempStore.deleteAll(this)
+            }
+        }
         NotificationHelper.trackingText = null
-        autoSaveTrack(trackPoints.toList(), trackPointTimes.toList())  // Final save before stopping
-        // Clear recording flag so START_STICKY doesn't auto-resume after explicit stop
-        getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putBoolean(MapFragment.PREF_WAS_RECORDING, false).apply()
 
         // Release WakeLock
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -258,21 +262,15 @@ class TrackingService : Service() {
     }
 
     private fun restoreTrackFromTempIfNeeded() {
-        val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
-        if (!file.exists() || file.length() == 0L) return
-        try {
-            val savedTrack = GpxParser.parseGpxFull(file.inputStream())
-            val savedPoints = savedTrack.trackPoints
-            if (savedPoints.size < 2) return
-            trackPoints.clear()
-            trackPointTimes.clear()
-            trackPoints.addAll(savedPoints)
-            trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
-            trackLengthM = calcTrackLength(savedPoints)
-            Log.d("TrackingService", "Restored ${savedPoints.size} track points from tmp GPX")
-        } catch (e: Exception) {
-            Log.w("TrackingService", "Failed to restore tmp GPX: ${e.message}")
-        }
+        val savedTrack = TrackTempStore.readBest(this, "TrackingService")?.result ?: return
+        val savedPoints = savedTrack.trackPoints
+        if (savedPoints.size < 2) return
+        trackPoints.clear()
+        trackPointTimes.clear()
+        trackPoints.addAll(savedPoints)
+        trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
+        trackLengthM = calcTrackLength(savedPoints)
+        Log.d("TrackingService", "Restored ${savedPoints.size} track points from tmp GPX")
     }
 
     private fun scheduleAutoSaveTrack() {
@@ -292,14 +290,19 @@ class TrackingService : Service() {
     ) {
         if (points.isEmpty()) return
         try {
-            val file = java.io.File(filesDir, MapFragment.TRACK_TMP_FILENAME)
-            file.writeText(GpxParser.writeGpx(points, "Текущий трек", pointTimes))
-        } catch (_: Exception) {}
+            TrackTempStore.writeAtomic(this, points, pointTimes)
+            autoSaveFailed = false
+        } catch (e: Exception) {
+            autoSaveFailed = true
+            Log.w("TrackingService", "Failed to auto-save temp track", e)
+            updateNotification()
+        }
     }
 
     private fun updateNotification() {
         val km   = trackLengthM / 1000.0
-        NotificationHelper.trackingText = "⏺ ${String.format("%.1f", km)} км • ${trackPoints.size} точек"
+        val suffix = if (autoSaveFailed) " • ⚠ автосейв" else ""
+        NotificationHelper.trackingText = "⏺ ${String.format("%.1f", km)} км • ${trackPoints.size} точек$suffix"
         NotificationHelper.update(this)
     }
 
