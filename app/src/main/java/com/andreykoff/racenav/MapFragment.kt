@@ -541,6 +541,9 @@ class MapFragment : Fragment() {
         const val PREF_GPS_SMOOTHING = "gps_smoothing"
         const val DEFAULT_GPS_SMOOTHING = 5  // 1=responsive, 10=heavy
 
+        const val PREF_MAP_ROTATION_SPEED = "map_rotation_speed"
+        const val DEFAULT_MAP_ROTATION_SPEED = 7  // 1=smooth/slow turn, 10=near-instant
+
         const val PREF_XCOVER_KEY_ACTION = "xcover_key_action"
 
         const val PREF_LIVE_USERS_ENABLED = "live_users_enabled"
@@ -3824,9 +3827,11 @@ class MapFragment : Fragment() {
         }
     }
 
-    /** EMA-сглаживание курса, adaptive alpha по скорости */
+    /** EMA-сглаживание курса, adaptive alpha по скорости и уровню «Поворот карты» (1–10) */
     private fun smoothBearing(raw: Float, speedKmh: Double = 30.0): Double {
-        val effectiveAlpha = if (speedKmh < 30.0) 0.15 else 0.25
+        val t = (currentMapRotationLevel() - 1) / 9.0
+        // Higher level → larger alpha → input bearing catches up to the real heading faster.
+        val effectiveAlpha = if (speedKmh < 30.0) lerp(0.10, 0.45, t) else lerp(0.18, 0.60, t)
         if (smoothedBearing < 0) { smoothedBearing = raw.toDouble(); return smoothedBearing }
         var delta = raw - smoothedBearing
         while (delta > 180) delta -= 360
@@ -4012,6 +4017,13 @@ class MapFragment : Fragment() {
         return context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.getInt(PREF_GPS_SMOOTHING, DEFAULT_GPS_SMOOTHING)
             ?.coerceIn(1, 10) ?: DEFAULT_GPS_SMOOTHING
+    }
+
+    /** Map-rotation responsiveness in course-up mode (1=smooth/slow, 10=near-instant). */
+    private fun currentMapRotationLevel(): Int {
+        return context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.getInt(PREF_MAP_ROTATION_SPEED, DEFAULT_MAP_ROTATION_SPEED)
+            ?.coerceIn(1, 10) ?: DEFAULT_MAP_ROTATION_SPEED
     }
 
     // High zoom feels nervous mostly when coarse fixes are also extrapolated forward.
@@ -11082,8 +11094,24 @@ class MapFragment : Fragment() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (!needsRebuild && (now - lastTrackExtrapolatedUpdateMs) < 200L) return
 
-        // For extrapolation: clone only the last segment and append tip point
+        // For extrapolation: clone only the last segment and append tip point.
+        // Guard: if the live tip is far from the last committed point (e.g. app reopened in a NEW
+        // location and the fresh segment has <2 points yet, so `segments` still ends with the OLD
+        // track), do NOT connect — that would draw a straight line across locations. Just render
+        // the committed segments without the tip until the new segment grows.
         val lastIdx = segments.size - 1
+        val lastSeg = segments[lastIdx]
+        val tail = lastSeg.optJSONArray(lastSeg.length() - 1)
+        val tipFarFromTrack = tail != null &&
+            distanceM(LatLng(tail.optDouble(1), tail.optDouble(0)), LatLng(extrapolateLat, extrapolateLon)) > 200.0
+        if (tipFarFromTrack) {
+            val geoJson = cachedTrackGeoJson ?: return
+            if (geoJson == lastAppliedTrackGeoJson && sourceIdentity == lastAppliedTrackSourceIdentity) return
+            source.setGeoJson(geoJson)
+            lastAppliedTrackGeoJson = geoJson
+            lastAppliedTrackSourceIdentity = sourceIdentity
+            return
+        }
         val lastClone = JSONArray(segments[lastIdx].toString())
         lastClone.put(JSONArray().put(extrapolateLon).put(extrapolateLat))
         val outputSegments = segments.toMutableList().also { it[lastIdx] = lastClone }
@@ -13839,9 +13867,15 @@ class MapFragment : Fragment() {
                 if (displayBearing < 0) displayBearing = targetBearing
                 var delta = targetBearing - displayBearing
                 while (delta > 180) delta -= 360; while (delta < -180) delta += 360
-                // Smoother bearing lerp — less aggressive than before
+                // Per-frame catch-up scaled by the "Map rotation" level (1=smooth, 10=near-instant).
+                // Keeps the "bigger angle → faster" shape; the level just scales the base factors.
                 val absDelta = kotlin.math.abs(delta)
-                val lerpFactor = when { absDelta > 60 -> 0.45; absDelta > 30 -> 0.30; else -> 0.18 }
+                val rotT = (currentMapRotationLevel() - 1) / 9.0
+                // Cap the upper bound: input EMA already speeds catch-up, so we don't stack two
+                // aggressive contours at level 10 (would jitter on noisy low-speed GPS bearing).
+                val rotMul = lerp(0.6, 1.3, rotT)
+                val baseFactor = when { absDelta > 60 -> 0.45; absDelta > 30 -> 0.30; else -> 0.18 }
+                val lerpFactor = (baseFactor * rotMul).coerceIn(0.05, 0.85)
                 displayBearing = (displayBearing + delta * lerpFactor + 360) % 360
                 builder.bearing(displayBearing)
             }

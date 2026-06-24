@@ -788,6 +788,14 @@
                 <ImageButton android:id="@+id/btnGpsSmoothPlus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
             </LinearLayout>
 
+            <!-- Map rotation speed (course-up) -->
+            <LinearLayout android:id="@+id/rowMapRotationSpeed" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:orientation="horizontal" android:gravity="center_vertical" android:background="#1E1E1E" android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp" android:layout_marginTop="12dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Поворот карты по курсу" android:textColor="#FFFFFF" android:textSize="15sp" />
+                <ImageButton android:id="@+id/btnMapRotMinus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_remove" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+                <TextView android:id="@+id/txtMapRotationSpeed" android:layout_width="44dp" android:layout_height="wrap_content" android:text="7" android:textColor="#FFFFFF" android:textSize="15sp" android:gravity="center" />
+                <ImageButton android:id="@+id/btnMapRotPlus" android:layout_width="36dp" android:layout_height="36dp" android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless" android:tint="#FFFFFF" />
+            </LinearLayout>
+
             <!-- Hints toggle -->
             <LinearLayout
                 android:layout_width="match_parent"

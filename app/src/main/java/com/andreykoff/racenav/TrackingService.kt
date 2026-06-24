@@ -92,8 +92,10 @@ class TrackingService : Service() {
         val isStationary = loc.hasSpeed() && loc.speed < 1.0f
         if (stopFilter > 0 && isStationary && dist < stopFilter) return
 
-        // Segment break: big gap (>200m) + time pause (>30s) → insert NaN marker
-        if (trackPoints.isNotEmpty() && dist > 200 && lastLocationTimeMs > 0 && (now - lastLocationTimeMs) > 30_000) {
+        // Segment break: big gap (>200m) + time pause (>30s) → insert NaN marker.
+        // lastLocationTimeMs == 0 means "time unknown" (first fix right after a restart): a >200m jump
+        // then almost certainly means a new location, so break on distance alone.
+        if (trackPoints.isNotEmpty() && dist > 200 && (lastLocationTimeMs == 0L || (now - lastLocationTimeMs) > 30_000)) {
             trackPoints.add(Pair(Double.NaN, Double.NaN))
             trackPointTimes.add(null)
         }
@@ -270,6 +272,10 @@ class TrackingService : Service() {
         trackPoints.addAll(savedPoints)
         trackPointTimes.addAll(normalizedTrackTimes(savedPoints, savedTrack.trackPointTimes))
         trackLengthM = calcTrackLength(savedPoints)
+        // Restore the last-fix timestamp so the segment-break check works after a process restart.
+        // Without this, lastLocationTimeMs stays 0 → the first fix in a NEW location connects a
+        // straight line back to the old track tip instead of starting a fresh segment.
+        lastLocationTimeMs = trackPointTimes.lastOrNull { it != null } ?: 0L
         Log.d("TrackingService", "Restored ${savedPoints.size} track points from tmp GPX")
     }
 

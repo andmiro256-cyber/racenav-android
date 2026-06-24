@@ -314,6 +314,19 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // Map rotation speed (course-up)
+        run {
+            val txtRot = view.findViewById<android.widget.TextView>(R.id.txtMapRotationSpeed)
+            var rot = prefs.getInt(MapFragment.PREF_MAP_ROTATION_SPEED, MapFragment.DEFAULT_MAP_ROTATION_SPEED).coerceIn(1, 10)
+            txtRot.text = rot.toString()
+            view.findViewById<android.widget.ImageButton>(R.id.btnMapRotMinus).setOnClickListener {
+                if (rot > 1) { rot--; txtRot.text = rot.toString(); prefs.edit().putInt(MapFragment.PREF_MAP_ROTATION_SPEED, rot).apply() }
+            }
+            view.findViewById<android.widget.ImageButton>(R.id.btnMapRotPlus).setOnClickListener {
+                if (rot < 10) { rot++; txtRot.text = rot.toString(); prefs.edit().putInt(MapFragment.PREF_MAP_ROTATION_SPEED, rot).apply() }
+            }
+        }
+
         // Auto-recenter
         val switchRecenter = view.findViewById<SwitchCompat>(R.id.switchAutoRecenter)
         val rowDelay = view.findViewById<View>(R.id.rowRecenterDelay)
