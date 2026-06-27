@@ -437,6 +437,7 @@ class MapFragment : Fragment() {
         const val PREF_USER_POINTS_VISIBLE = "user_points_visible"
         const val PREF_ROUTE_LINE_VISIBLE = "route_line_visible"
         const val PREF_LOADED_TRACK_NAME = "loaded_track_name"
+        const val PREF_LOADED_TRACK_SOURCE_PATH = "loaded_track_source_path"
         const val PREF_LOADED_WP_NAME = "loaded_wp_name"
         const val PREF_TRACK_COLOR = "track_rec_color"
         const val PREF_TRACK_WIDTH = "track_rec_width"
@@ -4516,7 +4517,9 @@ class MapFragment : Fragment() {
         // Clear stale loaded-track name prefs (track is gone after app restart)
         if (loadedTrackPoints.isEmpty()) {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
-                ?.remove(PREF_LOADED_TRACK_NAME)?.apply()
+                ?.remove(PREF_LOADED_TRACK_NAME)
+                ?.remove(PREF_LOADED_TRACK_SOURCE_PATH)
+                ?.apply()
         }
         restoreLiveTrackFromTempIfNeeded()
         if (trackPoints.isNotEmpty()) updateTrackOnMap()
@@ -4883,6 +4886,17 @@ class MapFragment : Fragment() {
 
     private fun findTrackGpxFileByBaseName(ctx: android.content.Context, displayName: String): java.io.File? {
         val baseName = safeTrackBaseName(displayName)
+        val sourcePath = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_SOURCE_PATH, null)
+        val sourceFile = sourcePath?.let { java.io.File(it) }
+        if (sourceFile != null &&
+            sourceFile.exists() &&
+            sourceFile.isFile &&
+            sourceFile.extension.equals("gpx", ignoreCase = true) &&
+            sourceFile.nameWithoutExtension.equals(baseName, ignoreCase = true)
+        ) {
+            return sourceFile
+        }
         return collectNavigationFiles(ctx)
             .map { it.file }
             .firstOrNull { file ->
@@ -4904,7 +4918,23 @@ class MapFragment : Fragment() {
         return target
     }
 
-    private fun applyEditorPointsToLoadedTrack(name: String, pts: List<Pair<Double, Double>>, pointTimes: List<Long?>) {
+    private fun updateLoadedTrackSourcePref(ctx: android.content.Context?, sourceFile: java.io.File?) {
+        val prefs = ctx?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val editor = prefs.edit()
+        if (sourceFile != null && sourceFile.exists()) {
+            editor.putString(PREF_LOADED_TRACK_SOURCE_PATH, sourceFile.absolutePath)
+        } else {
+            editor.remove(PREF_LOADED_TRACK_SOURCE_PATH)
+        }
+        editor.apply()
+    }
+
+    private fun applyEditorPointsToLoadedTrack(
+        name: String,
+        pts: List<Pair<Double, Double>>,
+        pointTimes: List<Long?>,
+        sourceFile: java.io.File?
+    ) {
         loadedTrackPoints.clear()
         loadedTrackTimes.clear()
         loadedTrackImports.clear()
@@ -4913,6 +4943,7 @@ class MapFragment : Fragment() {
         loadedTrackImports.add(LoadedTrackImport(name, pts.size))
         updateLoadedTrackOnMap()
         saveTrackToPrefs()
+        updateLoadedTrackSourcePref(context, sourceFile)
     }
 
     private fun showEditorSaveDialog() {
@@ -4946,7 +4977,7 @@ class MapFragment : Fragment() {
                             Toast.makeText(ctx, "Ошибка сохранения: ${e.message}", Toast.LENGTH_LONG).show()
                             return@setItems
                         }
-                        applyEditorPointsToLoadedTrack(savedFile.nameWithoutExtension, pts, pointTimes)
+                        applyEditorPointsToLoadedTrack(savedFile.nameWithoutExtension, pts, pointTimes, savedFile)
                         exitTrackEditMode()
                         val msg = if (sourceFile != null) {
                             "Файл обновлён: ${savedFile.name}"
@@ -4960,7 +4991,7 @@ class MapFragment : Fragment() {
                             .format(java.util.Date())
                         try {
                             val file = writeTrackGpxFile(ctx, "${safeTrackBaseName(origName)}_edited_$timestamp", pts, pointTimes)
-                            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes)
+                            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes, file)
                             exitTrackEditMode()
                             Toast.makeText(ctx, "Сохранено: ${file.name}", Toast.LENGTH_LONG).show()
                         } catch (e: Exception) {
@@ -4980,7 +5011,7 @@ class MapFragment : Fragment() {
             .format(java.util.Date())
         try {
             val file = writeTrackGpxFile(ctx, "${safeTrackBaseName(baseName)}_edited_$timestamp", pts, pointTimes)
-            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes)
+            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes, file)
             exitTrackEditMode()
             Toast.makeText(ctx, "Сохранено: ${file.name}", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
@@ -5192,7 +5223,7 @@ class MapFragment : Fragment() {
                 val pts = drawnPoints.map { Pair(it.lat, it.lon) }
                 try {
                     val file = writeTrackGpxFile(ctx, name, pts, emptyList())
-                    loadTrack(pts, append = false, name = file.nameWithoutExtension)
+                    loadTrack(pts, append = false, name = file.nameWithoutExtension, sourceFile = file)
                     context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         ?.edit()?.putString(PREF_LOADED_TRACK_NAME, file.nameWithoutExtension)?.apply()
                     exitDrawMode()
@@ -6803,9 +6834,11 @@ class MapFragment : Fragment() {
         points: List<Pair<Double, Double>>,
         pointTimes: List<Long?> = emptyList(),
         append: Boolean = false,
-        name: String? = null
+        name: String? = null,
+        sourceFile: java.io.File? = null
     ) {
         val cleanPoints = points.filter { !(it.first.isNaN() || it.second.isNaN()) }
+        val appendToExistingTrack = append && loadedTrackPoints.any { it != SEGMENT_BREAK }
         if (!append || loadedTrackPoints.none { it != SEGMENT_BREAK }) {
             loadedTrackPoints.clear()
             loadedTrackTimes.clear()
@@ -6841,6 +6874,7 @@ class MapFragment : Fragment() {
             Toast.makeText(context, "$verb: $realCount точек$segInfo", Toast.LENGTH_SHORT).show()
         }
         saveTrackToPrefs()
+        updateLoadedTrackSourcePref(context, if (appendToExistingTrack) null else sourceFile)
     }
 
     private fun updateLoadedTrackOnMap() {
@@ -8051,7 +8085,13 @@ class MapFragment : Fragment() {
                             }
                             val pts = result.trackPoints
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts, pointTimes = result.trackPointTimes, append = hasLoadedTrack(), name = trackFileName)
+                                loadTrack(
+                                    pts,
+                                    pointTimes = result.trackPointTimes,
+                                    append = hasLoadedTrack(),
+                                    name = trackFileName,
+                                    sourceFile = file
+                                )
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -8085,7 +8125,13 @@ class MapFragment : Fragment() {
                             }
                             val pts = result.trackPoints
                             if (pts.isNotEmpty()) {
-                                loadTrack(pts, pointTimes = result.trackPointTimes, append = false, name = trackFileName)
+                                loadTrack(
+                                    pts,
+                                    pointTimes = result.trackPointTimes,
+                                    append = false,
+                                    name = trackFileName,
+                                    sourceFile = file
+                                )
                                 ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                     .edit().putString(PREF_LOADED_TRACK_NAME, trackFileName).apply()
                                 dialog.dismiss()
@@ -8566,7 +8612,8 @@ class MapFragment : Fragment() {
                     parsed.trackPoints,
                     pointTimes = parsed.trackPointTimes,
                     append = false,
-                    name = parsed.trackName ?: file.nameWithoutExtension
+                    name = parsed.trackName ?: file.nameWithoutExtension,
+                    sourceFile = file
                 )
                 fitCameraToPoints(parsed.trackPoints)
                 dialog.dismiss()
@@ -10179,6 +10226,7 @@ class MapFragment : Fragment() {
                 .remove(PREF_SAVED_TRACK_TIMES_JSON)
                 .remove(PREF_SAVED_TRACK_META_JSON)
                 .remove(PREF_LOADED_TRACK_NAME)
+                .remove(PREF_LOADED_TRACK_SOURCE_PATH)
                 .apply()
             return
         }
