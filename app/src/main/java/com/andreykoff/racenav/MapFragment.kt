@@ -217,6 +217,8 @@ class MapFragment : Fragment() {
     // Draw mode state
     private var drawMode = false
     private val drawnPoints = mutableListOf<TrackEditor.TrackPoint>()
+    private var drawModeContinuationName: String? = null
+    private var drawModeSeedCount = 0
 
     private var initialZoomDone = false
     private var waitingForFirstGps = false
@@ -4852,8 +4854,7 @@ class MapFragment : Fragment() {
     }
 
     private fun confirmMovePoint() {
-        val map = mapboxMap ?: return
-        val center = map.cameraPosition.target ?: return
+        val center = currentCrosshairLatLng() ?: return
         val idx = TrackEditor.selectedIndex
         if (idx >= 0) {
             TrackEditor.movePoint(idx, center.latitude, center.longitude)
@@ -4871,6 +4872,47 @@ class MapFragment : Fragment() {
         }
         // Restore crosshair to its proper state (may have been off before move mode)
         applyFollowMode()
+    }
+
+    private fun safeTrackBaseName(raw: String): String {
+        val withoutExt = raw.substringBeforeLast('.', raw)
+            .replace(Regex("[/\\\\:*?\"<>|]"), "_")
+            .trim()
+        return withoutExt.ifBlank { "track" }
+    }
+
+    private fun findTrackGpxFileByBaseName(ctx: android.content.Context, displayName: String): java.io.File? {
+        val baseName = safeTrackBaseName(displayName)
+        return collectNavigationFiles(ctx)
+            .map { it.file }
+            .firstOrNull { file ->
+                file.extension.equals("gpx", ignoreCase = true) &&
+                    file.nameWithoutExtension.equals(baseName, ignoreCase = true)
+            }
+    }
+
+    private fun writeTrackGpxFile(
+        ctx: android.content.Context,
+        desiredName: String,
+        points: List<Pair<Double, Double>>,
+        pointTimes: List<Long?>,
+        overwriteFile: java.io.File? = null
+    ): java.io.File {
+        val target = overwriteFile ?: uniqueFileInDir(getRaceNavDir(ctx, "tracks"), "${safeTrackBaseName(desiredName)}.gpx")
+        target.parentFile?.mkdirs()
+        target.writeText(GpxParser.writeGpx(points, target.nameWithoutExtension, pointTimes))
+        return target
+    }
+
+    private fun applyEditorPointsToLoadedTrack(name: String, pts: List<Pair<Double, Double>>, pointTimes: List<Long?>) {
+        loadedTrackPoints.clear()
+        loadedTrackTimes.clear()
+        loadedTrackImports.clear()
+        loadedTrackPoints.addAll(pts.map { com.mapbox.mapboxsdk.geometry.LatLng(it.first, it.second) })
+        loadedTrackTimes.addAll(pointTimes)
+        loadedTrackImports.add(LoadedTrackImport(name, pts.size))
+        updateLoadedTrackOnMap()
+        saveTrackToPrefs()
     }
 
     private fun showEditorSaveDialog() {
@@ -4896,29 +4938,31 @@ class MapFragment : Fragment() {
                 val pointTimes = pts.indices.map { loadedTrackTimes.getOrNull(it) }
                 when (which) {
                     0 -> {
-                        // Replace in-memory loaded track and exit editor
-                        loadedTrackPoints.clear()
-                        loadedTrackTimes.clear()
-                        loadedTrackImports.clear()
-                        loadedTrackPoints.addAll(pts.map { com.mapbox.mapboxsdk.geometry.LatLng(it.first, it.second) })
-                        loadedTrackTimes.addAll(pointTimes)
-                        loadedTrackImports.add(LoadedTrackImport(origName, pts.size))
-                        updateLoadedTrackOnMap()
-                        saveTrackToPrefs()
+                        val sourceFile = findTrackGpxFileByBaseName(ctx, origName)
+                        val savedFile = try {
+                            if (sourceFile != null) writeTrackGpxFile(ctx, origName, pts, pointTimes, sourceFile)
+                            else writeTrackGpxFile(ctx, "${safeTrackBaseName(origName)}_edited", pts, pointTimes)
+                        } catch (e: Exception) {
+                            Toast.makeText(ctx, "Ошибка сохранения: ${e.message}", Toast.LENGTH_LONG).show()
+                            return@setItems
+                        }
+                        applyEditorPointsToLoadedTrack(savedFile.nameWithoutExtension, pts, pointTimes)
                         exitTrackEditMode()
-                        Toast.makeText(ctx, "Трек обновлён (${pts.size} точек)", Toast.LENGTH_SHORT).show()
+                        val msg = if (sourceFile != null) {
+                            "Файл обновлён: ${savedFile.name}"
+                        } else {
+                            "Исходный файл не найден, сохранена копия: ${savedFile.name}"
+                        }
+                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                     }
                     1 -> {
-                        val gpx = GpxParser.writeGpx(pts, "${origName}_edited", pointTimes)
                         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
                             .format(java.util.Date())
-                        val filename = "track_edited_$timestamp.gpx"
                         try {
-                            val dir = getRaceNavDir(ctx, "tracks")
-                            val file = java.io.File(dir, filename)
-                            file.writeText(gpx)
+                            val file = writeTrackGpxFile(ctx, "${safeTrackBaseName(origName)}_edited_$timestamp", pts, pointTimes)
+                            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes)
                             exitTrackEditMode()
-                            Toast.makeText(ctx, "Сохранено: $filename", Toast.LENGTH_LONG).show()
+                            Toast.makeText(ctx, "Сохранено: ${file.name}", Toast.LENGTH_LONG).show()
                         } catch (e: Exception) {
                             Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
                         }
@@ -4932,15 +4976,13 @@ class MapFragment : Fragment() {
     private fun saveEditorAsNewFile(ctx: android.content.Context, baseName: String) {
         val pts = TrackEditor.editPoints.map { Pair(it.lat, it.lon) }
         val pointTimes = pts.indices.map { loadedTrackTimes.getOrNull(it) }
-        val gpx = GpxParser.writeGpx(pts, "${baseName}_edited", pointTimes)
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
             .format(java.util.Date())
-        val filename = "track_edited_$timestamp.gpx"
         try {
-            val file = java.io.File(getRaceNavDir(ctx, "tracks"), filename)
-            file.writeText(gpx)
+            val file = writeTrackGpxFile(ctx, "${safeTrackBaseName(baseName)}_edited_$timestamp", pts, pointTimes)
+            applyEditorPointsToLoadedTrack(file.nameWithoutExtension, pts, pointTimes)
             exitTrackEditMode()
-            Toast.makeText(ctx, "Сохранено: $filename", Toast.LENGTH_LONG).show()
+            Toast.makeText(ctx, "Сохранено: ${file.name}", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             Toast.makeText(ctx, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -4950,37 +4992,73 @@ class MapFragment : Fragment() {
 
     private fun showTrackEditorModeDialog(ctx: android.content.Context) {
         val hasTrack = loadedTrackPoints.isNotEmpty()
-        val editLabel = if (hasTrack) "✏️ Редактировать загруженный трек" else "✏️ Редактировать трек (нет загруженного)"
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        if (hasTrack) {
+            actions.add("✏️ Редактировать загруженный трек" to { enterTrackEditMode() })
+            actions.add("➕ Продолжить загруженный трек" to { enterDrawModeFromLoadedTrack() })
+        } else {
+            actions.add("✏️ Редактировать трек (нет загруженного)" to {
+                Toast.makeText(ctx, "Сначала загрузите GPX-трек", Toast.LENGTH_SHORT).show()
+            })
+        }
+        actions.add("🖊 Нарисовать новый трек с нуля" to { enterDrawMode() })
         android.app.AlertDialog.Builder(ctx)
             .setTitle("Редактор треков")
-            .setItems(arrayOf(editLabel, "🖊 Нарисовать новый трек с нуля")) { _, which ->
-                when (which) {
-                    0 -> if (hasTrack) enterTrackEditMode()
-                         else Toast.makeText(ctx, "Сначала загрузите GPX-трек", Toast.LENGTH_SHORT).show()
-                    1 -> enterDrawMode()
-                }
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions.getOrNull(which)?.second?.invoke()
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
-    private fun enterDrawMode() {
+    private fun enterDrawModeFromLoadedTrack() {
+        val ctx = context ?: return
+        val seed = loadedTrackPoints
+            .filter { it != SEGMENT_BREAK && isValidTrackCoordinate(it.latitude, it.longitude) }
+            .map { TrackEditor.TrackPoint(it.latitude, it.longitude) }
+        if (seed.size < 2) {
+            Toast.makeText(ctx, "Нет точек для продолжения", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val baseName = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_LOADED_TRACK_NAME, "track") ?: "track"
+        enterDrawMode(seed, safeTrackBaseName(baseName))
+        if (loadedTrackPoints.any { it == SEGMENT_BREAK }) {
+            Toast.makeText(ctx, "Сегменты объединены в один продолженный трек", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun enterDrawMode(
+        seedPoints: List<TrackEditor.TrackPoint> = emptyList(),
+        continuationName: String? = null
+    ) {
         val ctx = context ?: return
         if (trackEditorMode) exitTrackEditMode()
         drawMode = true
+        drawModeContinuationName = continuationName
+        drawModeSeedCount = seedPoints.size
         drawnPoints.clear()
+        drawnPoints.addAll(seedPoints)
         _binding?.drawModeBar?.visibility = View.VISIBLE
         // Force FREE mode so crosshair is visible
         followMode = FollowMode.FREE
         _binding?.crosshairView?.visibility = View.VISIBLE
         applyTrackEditorOverlayState()
+        renderDrawnLine()
         updateDrawStats()
         setupDrawModeButtons()
-        Toast.makeText(ctx, "Режим рисования. Наведите крестик и нажмите ＋", Toast.LENGTH_SHORT).show()
+        val msg = if (seedPoints.isEmpty()) {
+            "Режим рисования. Наведите крестик и нажмите ＋"
+        } else {
+            "Продолжение трека. Новые точки добавляются в конец"
+        }
+        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
     }
 
     private fun exitDrawMode() {
         drawMode = false
+        drawModeContinuationName = null
+        drawModeSeedCount = 0
         drawnPoints.clear()
         _binding?.drawModeBar?.visibility = View.GONE
         applyTrackEditorOverlayState()
@@ -4998,6 +5076,9 @@ class MapFragment : Fragment() {
         b.btnDrawUndo.setOnClickListener { undoDrawPoint() }
         b.btnDrawSave.setOnClickListener {
             if (drawnPoints.size < 2) Toast.makeText(ctx, "Нужно минимум 2 точки", Toast.LENGTH_SHORT).show()
+            else if (drawModeContinuationName != null && drawnPoints.size <= drawModeSeedCount) {
+                Toast.makeText(ctx, "Добавьте хотя бы одну новую точку", Toast.LENGTH_SHORT).show()
+            }
             else saveDrawnTrack()
         }
         b.btnDrawExit.setOnClickListener {
@@ -5006,7 +5087,7 @@ class MapFragment : Fragment() {
             } else {
                 android.app.AlertDialog.Builder(ctx)
                     .setTitle("Выйти из режима рисования?")
-                    .setMessage("Нарисованный трек будет потерян")
+                    .setMessage("Несохранённые изменения будут потеряны")
                     .setPositiveButton("Выйти") { _, _ -> exitDrawMode() }
                     .setNegativeButton("Отмена", null)
                     .show()
@@ -5030,14 +5111,17 @@ class MapFragment : Fragment() {
     }
 
     private fun addDrawPoint() {
-        val center = mapboxMap?.cameraPosition?.target ?: return
+        val center = currentCrosshairLatLng() ?: return
         drawnPoints.add(TrackEditor.TrackPoint(center.latitude, center.longitude))
         renderDrawnLine()
         updateDrawStats()
     }
 
     private fun undoDrawPoint() {
-        if (drawnPoints.isEmpty()) return
+        if (drawnPoints.size <= drawModeSeedCount) {
+            if (drawModeSeedCount > 0) context?.let { Toast.makeText(it, "Исходный трек сохранён, отменять нечего", Toast.LENGTH_SHORT).show() }
+            return
+        }
         drawnPoints.removeAt(drawnPoints.size - 1)
         renderDrawnLine()
         updateDrawStats()
@@ -5058,7 +5142,8 @@ class MapFragment : Fragment() {
             }
         }
         val distText = if (distKm >= 1.0) "${"%.1f".format(distKm)} км" else "${(distKm * 1000).toInt()} м"
-        _binding?.drawModeStats?.text = "🖊 Новый трек · $n точек${if (n >= 2) " · $distText" else ""}"
+        val title = if (drawModeContinuationName != null) "Продолжение трека" else "Новый трек"
+        _binding?.drawModeStats?.text = "🖊 $title · $n точек${if (n >= 2) " · $distText" else ""}"
     }
 
     private fun renderDrawnLine() {
@@ -5096,23 +5181,22 @@ class MapFragment : Fragment() {
     private fun saveDrawnTrack() {
         val ctx = context ?: return
         val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())
-        val input = android.widget.EditText(ctx).apply { setText("drawn_$ts"); selectAll() }
+        val defaultName = drawModeContinuationName?.let { "${safeTrackBaseName(it)}_continued_$ts" } ?: "drawn_$ts"
+        val input = android.widget.EditText(ctx).apply { setText(defaultName); selectAll() }
         android.app.AlertDialog.Builder(ctx)
             .setTitle("Сохранить трек")
             .setMessage("Введите название файла:")
             .setView(input)
             .setPositiveButton("Сохранить") { _, _ ->
-                val name = input.text.toString().trim().ifBlank { "drawn_$ts" }
+                val name = input.text.toString().trim().ifBlank { defaultName }
                 val pts = drawnPoints.map { Pair(it.lat, it.lon) }
-                val gpx = GpxParser.writeGpx(pts, name)
                 try {
-                    val file = java.io.File(getRaceNavDir(ctx, "tracks"), "$name.gpx")
-                    file.writeText(gpx)
-                    loadTrack(pts, append = false, name = name)
+                    val file = writeTrackGpxFile(ctx, name, pts, emptyList())
+                    loadTrack(pts, append = false, name = file.nameWithoutExtension)
                     context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        ?.edit()?.putString(PREF_LOADED_TRACK_NAME, name)?.apply()
+                        ?.edit()?.putString(PREF_LOADED_TRACK_NAME, file.nameWithoutExtension)?.apply()
                     exitDrawMode()
-                    Toast.makeText(ctx, "Сохранено: $name.gpx (${pts.size} точек)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(ctx, "Сохранено: ${file.name} (${pts.size} точек)", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
                     Toast.makeText(ctx, "Ошибка сохранения: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -6845,14 +6929,36 @@ class MapFragment : Fragment() {
         }
     }
 
+    private fun currentCrosshairLatLng(): LatLng? {
+        val map = mapboxMap ?: return null
+        val binding = _binding
+        val crosshair = binding?.crosshairView
+        val mapView = binding?.mapView
+        if (crosshair != null &&
+            mapView != null &&
+            crosshair.visibility == View.VISIBLE &&
+            crosshair.width > 0 &&
+            crosshair.height > 0
+        ) {
+            val crosshairLoc = IntArray(2)
+            val mapLoc = IntArray(2)
+            crosshair.getLocationOnScreen(crosshairLoc)
+            mapView.getLocationOnScreen(mapLoc)
+            val x = crosshairLoc[0] - mapLoc[0] + crosshair.width / 2f
+            val y = crosshairLoc[1] - mapLoc[1] + crosshair.height / 2f
+            return map.projection.fromScreenLocation(android.graphics.PointF(x, y))
+        }
+        return map.cameraPosition.target
+    }
+
     private fun addWaypointAtCurrentPosition() {
         val ctx = context ?: return
         if (!LicenseManager.hasFullAccess(ctx) && userMarkers.size >= LicenseManager.getMaxUserWaypoints(ctx)) {
             Toast.makeText(ctx, "Макс. ${LicenseManager.getMaxUserWaypoints(ctx)} точек. Для снятия ограничения — лицензия.", Toast.LENGTH_LONG).show()
             return
         }
-        // Place point at crosshair (map center), not GPS position
-        val pos = mapboxMap?.cameraPosition?.target
+        // Place point at the visible crosshair, not only at camera target.
+        val pos = currentCrosshairLatLng()
         if (pos == null) {
             Toast.makeText(ctx, "Карта не готова", Toast.LENGTH_SHORT).show()
             return
@@ -7058,6 +7164,12 @@ class MapFragment : Fragment() {
         val folder: String
     )
 
+    private data class NavFolderEntry(
+        val dir: java.io.File,
+        val fileCount: Int,
+        val folderCount: Int
+    )
+
     private data class NavFileMetadata(
         val hasTrack: Boolean = false,
         val hasPoints: Boolean = false,
@@ -7142,12 +7254,19 @@ class MapFragment : Fragment() {
         return false
     }
 
+    private fun raceNavBaseDir(ctx: android.content.Context): java.io.File? =
+        getRaceNavDir(ctx, "tracks").parentFile
+
     private fun collectNavigationFiles(ctx: android.content.Context): List<NavFileEntry> {
         // Recursively scan the whole Documents/RaceNav tree so existing files in any
         // subfolder (incl. race folders the user copied in) are visible — not just the
         // 5 app-managed subfolders. Skip the offline-map tile folder (large .mbtiles).
-        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return emptyList()
-        return base.walkTopDown()
+        val base = raceNavBaseDir(ctx) ?: return emptyList()
+        return collectNavigationFilesUnder(base)
+    }
+
+    private fun collectNavigationFilesUnder(root: java.io.File): List<NavFileEntry> {
+        return root.walkTopDown()
             .onEnter { dir -> !dir.name.equals("maps", ignoreCase = true) }
             .maxDepth(5)
             .filter { isSupportedNavigationFile(it) }
@@ -7155,6 +7274,24 @@ class MapFragment : Fragment() {
             .map { NavFileEntry(it, it.parentFile?.name ?: "") }
             .toList()
             .sortedByDescending { it.file.lastModified() }
+    }
+
+    private fun collectNavigationFolders(ctx: android.content.Context, parent: java.io.File?): List<NavFolderEntry> {
+        val base = raceNavBaseDir(ctx) ?: return emptyList()
+        val root = parent ?: base
+        if (!root.exists()) root.mkdirs()
+        return root.listFiles { file ->
+            file.isDirectory && !file.name.equals("maps", ignoreCase = true)
+        }
+            ?.sortedBy { it.name.lowercase() }
+            ?.map { dir ->
+                NavFolderEntry(
+                    dir = dir,
+                    fileCount = collectNavigationFilesUnder(dir).size,
+                    folderCount = dir.listFiles { f -> f.isDirectory && !f.name.equals("maps", ignoreCase = true) }?.size ?: 0
+                )
+            }
+            ?: emptyList()
     }
 
     private fun navigationTrackDistanceM(points: List<Pair<Double, Double>>): Double {
@@ -8008,7 +8145,10 @@ class MapFragment : Fragment() {
 
     private fun buildNavigationFilesBrowser(ctx: android.content.Context, root: android.widget.LinearLayout, dialog: BottomSheetDialog, dp: Float) {
         val palette = currentModalPalette()
+        val baseDir = raceNavBaseDir(ctx) ?: return
+        var currentFolder: java.io.File? = null
         val files = collectNavigationFiles(ctx).toMutableList()
+        val folders = collectNavigationFolders(ctx, currentFolder).toMutableList()
         val metadataCache = mutableMapOf<String, NavFileMetadata>()
         fun seedFallbackMetadata() {
             metadataCache.clear()
@@ -8021,12 +8161,13 @@ class MapFragment : Fragment() {
 
         var activeFilter = NavFileFilter.ALL
 
-        root.addView(android.widget.TextView(ctx).apply {
+        val titleView = android.widget.TextView(ctx).apply {
             text = "ФАЙЛЫ RACENAV"
             setTextColor(palette.textMuted)
             textSize = 11f
             setPadding(0, (4 * dp).toInt(), 0, (8 * dp).toInt())
-        })
+        }
+        root.addView(titleView)
 
         // Without "All files access" the app can't read files it didn't create itself
         // (scoped storage) — File.listFiles() returns nothing. Prompt the user to grant it.
@@ -8116,7 +8257,7 @@ class MapFragment : Fragment() {
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = (8 * dp).toInt() }
             setOnClickListener {
-                showCreateFolderDialog(ctx) { dir ->
+                showCreateFolderDialog(ctx, currentFolder ?: baseDir) { dir ->
                     Toast.makeText(ctx, "Папка создана: ${dir.name}", Toast.LENGTH_SHORT).show()
                     reloadFilesAction()
                 }
@@ -8131,16 +8272,27 @@ class MapFragment : Fragment() {
         root.addView(listContainer)
 
         fun refreshList() {
+            titleView.text = currentFolder?.let { "ФАЙЛЫ RACENAV / ${it.name}" } ?: "ФАЙЛЫ RACENAV / ВСЕ"
             renderNavigationFileList(
                 ctx = ctx,
                 files = files,
+                folders = folders,
                 metadataCache = metadataCache,
                 activeFilter = activeFilter,
                 searchInputText = searchInput.text?.toString(),
+                currentFolder = currentFolder,
                 container = listContainer,
                 dialog = dialog,
                 dp = dp,
-                onChanged = { reloadFilesAction() }
+                onChanged = { reloadFilesAction() },
+                onFolderClick = { dir ->
+                    currentFolder = dir
+                    reloadFilesAction()
+                },
+                onBackToAll = {
+                    currentFolder = null
+                    reloadFilesAction()
+                }
             )
         }
         fun parseMetadataAsync() {
@@ -8155,7 +8307,9 @@ class MapFragment : Fragment() {
         }
         fun reloadFiles() {
             files.clear()
-            files.addAll(collectNavigationFiles(ctx))
+            files.addAll(currentFolder?.let { collectNavigationFilesUnder(it) } ?: collectNavigationFiles(ctx))
+            folders.clear()
+            folders.addAll(collectNavigationFolders(ctx, currentFolder))
             seedFallbackMetadata()
             refreshList()
             parseMetadataAsync()
@@ -8183,18 +8337,29 @@ class MapFragment : Fragment() {
     private fun renderNavigationFileList(
         ctx: android.content.Context,
         files: List<NavFileEntry>,
+        folders: List<NavFolderEntry>,
         metadataCache: Map<String, NavFileMetadata>,
         activeFilter: NavFileFilter,
         searchInputText: String?,
+        currentFolder: java.io.File?,
         container: android.widget.LinearLayout?,
         dialog: BottomSheetDialog,
         dp: Float,
-        onChanged: () -> Unit
+        onChanged: () -> Unit,
+        onFolderClick: (java.io.File) -> Unit,
+        onBackToAll: () -> Unit
     ) {
         val target = container ?: return
         val palette = currentModalPalette()
         target.removeAllViews()
         val query = searchInputText?.trim()?.lowercase().orEmpty()
+        val shownFolders = if (activeFilter == NavFileFilter.ALL) {
+            folders.filter { entry ->
+                entry.dir.exists() && (query.isBlank() || entry.dir.name.lowercase().contains(query))
+            }
+        } else {
+            emptyList()
+        }
         val shown = files.filter { entry ->
             if (!entry.file.exists()) return@filter false
             val metadata = metadataCache[entry.file.absolutePath] ?: fallbackMetadataForFolder(entry.folder)
@@ -8204,10 +8369,87 @@ class MapFragment : Fragment() {
             nameMatches && matchesNavigationFileFilter(metadata, activeFilter)
         }
 
-        if (shown.isEmpty()) {
+        if (currentFolder != null) {
+            val backRow = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((6 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt())
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onBackToAll() }
+            }
+            backRow.addView(android.widget.TextView(ctx).apply {
+                text = "←"
+                textSize = 20f
+                setTextColor(palette.textSecondary)
+                setPadding(0, 0, (8 * dp).toInt(), 0)
+            })
+            backRow.addView(android.widget.TextView(ctx).apply {
+                text = "Все папки"
+                setTextColor(palette.textPrimary)
+                textSize = 13f
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            target.addView(backRow)
+            target.addView(View(ctx).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                setBackgroundColor(palette.divider)
+            })
+        }
+
+        shownFolders.forEachIndexed { index, folder ->
+            val row = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((6 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt())
+                if (index % 2 == 0) setBackgroundColor(palette.surfaceVariant)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onFolderClick(folder.dir) }
+            }
+            row.addView(android.widget.TextView(ctx).apply {
+                text = "📁"
+                textSize = 18f
+                setPadding(0, 0, (8 * dp).toInt(), 0)
+            })
+            val info = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            info.addView(android.widget.TextView(ctx).apply {
+                text = folder.dir.name
+                setTextColor(palette.textPrimary)
+                textSize = 13f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            info.addView(android.widget.TextView(ctx).apply {
+                val parts = mutableListOf<String>()
+                parts.add("${folder.fileCount} файлов")
+                if (folder.folderCount > 0) parts.add("${folder.folderCount} папок")
+                text = parts.joinToString(" · ")
+                setTextColor(palette.textMuted)
+                textSize = 11f
+            })
+            row.addView(info)
+            row.addView(android.widget.TextView(ctx).apply {
+                text = "›"
+                textSize = 22f
+                gravity = android.view.Gravity.CENTER
+                setTextColor(palette.textSecondary)
+                layoutParams = android.widget.LinearLayout.LayoutParams((42 * dp).toInt(), (42 * dp).toInt())
+            })
+            target.addView(row)
+            target.addView(View(ctx).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                setBackgroundColor(palette.divider)
+            })
+        }
+
+        if (shown.isEmpty() && shownFolders.isEmpty()) {
             target.addView(android.widget.TextView(ctx).apply {
                 text = if (files.isEmpty()) {
-                    "Нет файлов. Импортируйте с устройства или запишите трек."
+                    if (currentFolder != null) "Папка пустая." else "Нет файлов. Импортируйте с устройства или запишите трек."
                 } else {
                     "Нет файлов под выбранный фильтр."
                 }
@@ -8417,8 +8659,12 @@ class MapFragment : Fragment() {
             .show()
     }
 
-    private fun showCreateFolderDialog(ctx: android.content.Context, onCreated: (java.io.File) -> Unit) {
-        val base = getRaceNavDir(ctx, "tracks").parentFile ?: return
+    private fun showCreateFolderDialog(
+        ctx: android.content.Context,
+        parentDir: java.io.File? = null,
+        onCreated: (java.io.File) -> Unit
+    ) {
+        val base = parentDir ?: getRaceNavDir(ctx, "tracks").parentFile ?: return
         val input = android.widget.EditText(ctx).apply {
             hint = "Название папки"
             styleModalInput(this)
