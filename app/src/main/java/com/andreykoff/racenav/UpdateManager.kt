@@ -2,6 +2,7 @@ package com.andreykoff.racenav
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -108,6 +109,28 @@ object UpdateManager {
         if (remotePre.rank != localPre.rank) return remotePre.rank > localPre.rank
         if (remotePre.number != localPre.number) return remotePre.number > localPre.number
         return remotePre.raw > localPre.raw
+    }
+
+    fun installedVersionCode(context: Context): Long {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+    }
+
+    fun isUpdateAvailable(
+        remoteVersion: String,
+        remoteVersionCode: Long,
+        localVersion: String,
+        localVersionCode: Long
+    ): Boolean {
+        if (remoteVersionCode > 0L && localVersionCode > 0L) {
+            return remoteVersionCode > localVersionCode
+        }
+        return isNewer(remoteVersion, localVersion)
     }
 
     private data class ParsedVersion(

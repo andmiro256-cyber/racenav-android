@@ -18,8 +18,8 @@ fun secretProperty(name: String): String? {
         ?: System.getenv(name)
 }
 
-val appVersionCode = secretProperty("RACENAV_VERSION_CODE")?.toIntOrNull() ?: 407
-val appVersionName = secretProperty("RACENAV_VERSION_NAME") ?: "2.9.97"
+val appVersionCode = secretProperty("RACENAV_VERSION_CODE")?.toIntOrNull() ?: 409
+val appVersionName = secretProperty("RACENAV_VERSION_NAME") ?: "2.9.98"
 
 val releaseStoreFile = secretProperty("RACENAV_STORE_FILE")
     ?: secretProperty("KEYSTORE_PATH")
@@ -107,4 +107,5 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-analytics")
+    testImplementation("junit:junit:4.13.2")
 }

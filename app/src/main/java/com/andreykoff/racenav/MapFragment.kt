@@ -12217,17 +12217,38 @@ class MapFragment : Fragment() {
     }
 
     fun checkForUpdates(onResult: (latest: String?, current: String, hasUpdate: Boolean, apkUrl: String?, changelog: String?) -> Unit) {
-        val current = requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName ?: "0"
+        val appContext = requireContext().applicationContext
+        val current = appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "0"
+        val currentCode = UpdateManager.installedVersionCode(appContext)
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.IO) {
                     fun readJson(vararg urls: String): JSONObject {
                         var lastError: Exception? = null
                         for (candidate in urls) {
+                            var conn: java.net.HttpURLConnection? = null
                             try {
-                                return JSONObject(URL(candidate).readText())
+                                val separator = if (candidate.contains("?")) "&" else "?"
+                                val noCacheUrl = "$candidate${separator}_=${System.currentTimeMillis()}"
+                                conn = URL(noCacheUrl).openConnection() as java.net.HttpURLConnection
+                                conn.useCaches = false
+                                conn.connectTimeout = 10_000
+                                conn.readTimeout = 10_000
+                                conn.setRequestProperty("Cache-Control", "no-cache")
+                                conn.setRequestProperty("Pragma", "no-cache")
+                                val code = conn.responseCode
+                                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                                    ?.bufferedReader()
+                                    ?.use { it.readText() }
+                                    .orEmpty()
+                                if (code !in 200..299) {
+                                    throw IllegalStateException("HTTP $code: ${body.take(120)}")
+                                }
+                                return JSONObject(body)
                             } catch (e: Exception) {
                                 lastError = e
+                            } finally {
+                                conn?.disconnect()
                             }
                         }
                         throw lastError ?: IllegalStateException("No update URLs provided")
@@ -12278,13 +12299,18 @@ class MapFragment : Fragment() {
                         }
                     }
 
-                    Log.d("RaceNavUpdate", "Update route=$route email=${email ?: ""} current=$current latest=${json.optString("versionName", json.optString("version", ""))}")
+                    Log.d(
+                        "RaceNavUpdate",
+                        "Update route=$route email=${email ?: ""} current=$current($currentCode) " +
+                            "latest=${json.optString("versionName", json.optString("version", ""))}(${json.optLong("versionCode", 0L)})"
+                    )
                     json
                 }
                 val latestVersion = json.optString("versionName", json.optString("version", ""))
+                val latestVersionCode = json.optLong("versionCode", 0L)
                 val apkUrl = json.optString("apkUrl", json.optString("url", ""))
                 val changelog = json.optString("changelog").ifBlank { null }
-                val hasUpdate = UpdateManager.isNewer(latestVersion, current)
+                val hasUpdate = UpdateManager.isUpdateAvailable(latestVersion, latestVersionCode, current, currentCode)
                 onResult("v$latestVersion", "v$current", hasUpdate, apkUrl, changelog)
             } catch (e: Exception) {
                 Log.d("RaceNav", "Update check: ${e.message}")
