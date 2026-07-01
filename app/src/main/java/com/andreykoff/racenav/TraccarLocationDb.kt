@@ -13,15 +13,20 @@ data class TraccarPoint(
     val bearing: Float,
     val altitude: Double,
     val timestamp: Long,   // epoch ms
-    val battery: Int       // 0-100 or -1 if unknown
+    val battery: Int,      // 0-100 or -1 if unknown
+    val accuracy: Float    // metres, 0 if unknown
 )
 
 class TraccarLocationDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
 
     companion object {
         private const val DB_NAME = "traccar_buffer.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val TABLE = "locations"
+    }
+
+    init {
+        setWriteAheadLoggingEnabled(true)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -35,10 +40,12 @@ class TraccarLocationDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, n
                 altitude REAL NOT NULL DEFAULT 0,
                 timestamp INTEGER NOT NULL,
                 battery INTEGER NOT NULL DEFAULT -1,
+                accuracy REAL NOT NULL DEFAULT 0,
                 sent INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execSQL("CREATE INDEX idx_sent ON $TABLE(sent)")
+        db.execSQL("CREATE INDEX idx_unsent_time ON $TABLE(sent, timestamp)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
@@ -46,10 +53,14 @@ class TraccarLocationDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, n
             // Add battery column
             db.execSQL("ALTER TABLE $TABLE ADD COLUMN battery INTEGER NOT NULL DEFAULT -1")
         }
+        if (old < 3) {
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN accuracy REAL NOT NULL DEFAULT 0")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_unsent_time ON $TABLE(sent, timestamp)")
+        }
     }
 
     fun insertPoint(lat: Double, lon: Double, speed: Float, bearing: Float,
-                    altitude: Double, timestamp: Long, battery: Int = -1) {
+                    altitude: Double, timestamp: Long, battery: Int = -1, accuracy: Float = 0f) {
         writableDatabase.insert(TABLE, null, ContentValues().apply {
             put("lat", lat)
             put("lon", lon)
@@ -58,6 +69,7 @@ class TraccarLocationDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, n
             put("altitude", altitude)
             put("timestamp", timestamp)
             put("battery", battery)
+            put("accuracy", accuracy)
             put("sent", 0)
         })
     }
@@ -79,7 +91,8 @@ class TraccarLocationDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, n
                     bearing = it.getFloat(it.getColumnIndexOrThrow("bearing")),
                     altitude = it.getDouble(it.getColumnIndexOrThrow("altitude")),
                     timestamp = it.getLong(it.getColumnIndexOrThrow("timestamp")),
-                    battery = it.getInt(it.getColumnIndexOrThrow("battery"))
+                    battery = it.getInt(it.getColumnIndexOrThrow("battery")),
+                    accuracy = it.getFloat(it.getColumnIndexOrThrow("accuracy"))
                 ))
             }
         }

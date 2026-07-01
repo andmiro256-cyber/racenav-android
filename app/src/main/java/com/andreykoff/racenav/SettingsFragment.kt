@@ -81,6 +81,8 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -125,6 +127,13 @@ class SettingsFragment : Fragment() {
     private val offlineMapPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> if (uri != null) loadOfflineMap(uri) }
+
+    private val traccarQrLauncher = registerForActivityResult(ScanContract()) { result ->
+        val raw = result.contents?.trim().orEmpty()
+        if (raw.isNotBlank()) {
+            applyTraccarProvisioningUrl(raw)
+        }
+    }
 
     private var monitoringSoundTargetPrefKey: String? = null
     private var monitoringSoundTargetNameKey: String? = null
@@ -2124,12 +2133,16 @@ class SettingsFragment : Fragment() {
 
         // ── Server Live Monitoring ──
         val switchTraccar = view.findViewById<SwitchCompat>(R.id.switchTraccar)
+        val rowTraccarDeviceId = view.findViewById<View>(R.id.rowTraccarDeviceId)
         val rowTraccarDeviceName = view.findViewById<View>(R.id.rowTraccarDeviceName)
+        val rowTraccarProvisioning = view.findViewById<View>(R.id.rowTraccarProvisioning)
         val rowTraccarStatus = view.findViewById<View>(R.id.rowTraccarStatus)
+        val txtTraccarDeviceId = view.findViewById<TextView>(R.id.txtTraccarDeviceId)
         val txtTraccarDeviceName = view.findViewById<TextView>(R.id.txtTraccarDeviceName)
         val txtTraccarStatus = view.findViewById<TextView>(R.id.txtTraccarStatus)
         val viewTraccarStatusDot = view.findViewById<View>(R.id.viewTraccarStatusDot)
         val btnTraccarSendNow = view.findViewById<android.widget.Button>(R.id.btnTraccarSendNow)
+        val btnTraccarQr = view.findViewById<android.widget.Button>(R.id.btnTraccarQr)
         val switchRestrictedZone = view.findViewById<SwitchCompat>(R.id.switchRestrictedZone)
 
         switchRestrictedZone.isChecked = prefs.getBoolean(MapFragment.PREF_RESTRICTED_ZONE_MODE, false)
@@ -2158,36 +2171,24 @@ class SettingsFragment : Fragment() {
             if (currentId.isBlank()) {
                 // New install — use stable ID
                 prefs.edit().putString(MapFragment.PREF_TRACCAR_DEVICE_ID, stableTraccarId).apply()
-            } else if (currentId != stableTraccarId && !prefs.getBoolean("traccar_id_migrated", false)) {
-                // Existing user with old random ID — migrate to stable
-                val oldId = currentId
-                prefs.edit()
-                    .putString(MapFragment.PREF_TRACCAR_DEVICE_ID, stableTraccarId)
-                    .putString("traccar_old_device_id", oldId)
-                    .putBoolean("traccar_id_migrated", true)
-                    .apply()
-                // Update device on Traccar server (change uniqueId)
-                val url = TraccarSender.currentBaseUrl(prefs)
-                val name = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_NAME, "") ?: ""
-                if (url.isNotBlank()) {
-                    migrateTraccarDeviceId(url, oldId, stableTraccarId, name)
-                }
-                android.util.Log.d("Settings", "Traccar ID migrated: $oldId -> $stableTraccarId")
             }
         }
 
         val traccarEnabled = prefs.getBoolean(MapFragment.PREF_TRACCAR_ENABLED, false)
         switchTraccar.isChecked = traccarEnabled
         fun showTraccarRows(show: Boolean) {
-            val vis = if (show) View.VISIBLE else View.GONE
-            rowTraccarDeviceName.visibility = vis
-            rowTraccarStatus.visibility = vis
+            rowTraccarDeviceId.visibility = View.VISIBLE
+            rowTraccarDeviceName.visibility = View.VISIBLE
+            rowTraccarProvisioning.visibility = View.VISIBLE
+            rowTraccarStatus.visibility = if (show) View.VISIBLE else View.GONE
         }
         showTraccarRows(traccarEnabled)
 
         // Display saved values
         fun refreshTraccarDisplay() {
+            val devId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
             val devName = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_NAME, "") ?: ""
+            txtTraccarDeviceId.text = if (devId.isNotBlank()) devId else "Не задано"
             txtTraccarDeviceName.text = if (devName.isNotBlank()) devName else "Не задано"
         }
         refreshTraccarDisplay()
@@ -2261,7 +2262,14 @@ class SettingsFragment : Fragment() {
             showTraccarRows(checked)
             val ctx = requireContext()
             if (checked) {
+                val devId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
                 val devName = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_NAME, "") ?: ""
+                if (devId.isBlank()) {
+                    Toast.makeText(ctx, "Сначала укажите идентификатор устройства", Toast.LENGTH_LONG).show()
+                    switchTraccar.isChecked = false
+                    prefs.edit().putBoolean(MapFragment.PREF_TRACCAR_ENABLED, false).apply()
+                    return@setOnCheckedChangeListener
+                }
                 if (devName.isBlank()) {
                     Toast.makeText(ctx, "Сначала укажите имя устройства", Toast.LENGTH_LONG).show()
                     switchTraccar.isChecked = false
@@ -2301,7 +2309,6 @@ class SettingsFragment : Fragment() {
                 }
                 // Register device on Traccar server, then start service
                 val url = TraccarSender.currentBaseUrl(prefs)
-                val devId = prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, "") ?: ""
                 registerTraccarDevice(url, devId, devName) {
                     ctx.startForegroundService(
                         android.content.Intent(ctx, TraccarService::class.java).apply {
@@ -2334,6 +2341,38 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        rowTraccarDeviceId.setOnClickListener {
+            val container = android.widget.FrameLayout(requireContext()).apply {
+                setBackgroundColor(0xFF2A2A2A.toInt())
+                setPadding(48, 24, 48, 24)
+            }
+            val input = EditText(requireContext()).apply {
+                setText(prefs.getString(MapFragment.PREF_TRACCAR_DEVICE_ID, ""))
+                hint = "улифон test"
+                setSingleLine(true)
+                setTextColor(0xFFFFFFFF.toInt())
+                setHintTextColor(0xFF888888.toInt())
+                setBackgroundColor(0xFF333333.toInt())
+                setPadding(24, 16, 24, 16)
+            }
+            container.addView(input)
+            AlertDialog.Builder(requireContext(), androidx.appcompat.R.style.Theme_AppCompat_Dialog)
+                .setTitle("Идентификатор устройства")
+                .setMessage("OsmAnd id для Traccar. Можно использовать кириллицу и пробелы.")
+                .setView(container)
+                .setPositiveButton("OK") { _, _ ->
+                    val id = input.text.toString().trim()
+                    if (id.isBlank()) {
+                        Toast.makeText(requireContext(), "Идентификатор не может быть пустым", Toast.LENGTH_LONG).show()
+                        return@setPositiveButton
+                    }
+                    prefs.edit().putString(MapFragment.PREF_TRACCAR_DEVICE_ID, id).apply()
+                    refreshTraccarDisplay()
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
+
         // Edit Device Name on click
         rowTraccarDeviceName.setOnClickListener {
             val container = android.widget.FrameLayout(requireContext()).apply {
@@ -2360,6 +2399,15 @@ class SettingsFragment : Fragment() {
                 }
                 .setNegativeButton("Отмена", null)
                 .show()
+        }
+
+        btnTraccarQr.setOnClickListener {
+            val options = ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Сканируйте QR логгера")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+            traccarQrLauncher.launch(options)
         }
 
         // Live Users on map toggle
@@ -3198,7 +3246,7 @@ class SettingsFragment : Fragment() {
                     val deviceServerId = device.getInt("id")
                     device.put("uniqueId", newId)
                     if (deviceName.isNotBlank()) device.put("name", deviceName)
-                    if (!device.has("groupId") || device.isNull("groupId") || device.optInt("groupId", 0) == 0) device.put("groupId", 66)
+                    if (!device.has("groupId") || device.isNull("groupId") || device.optInt("groupId", 0) != 1) device.put("groupId", 1)
                     val updateReq = okhttp3.Request.Builder()
                         .url("$apiBase/api/devices/$deviceServerId")
                         .put(device.toString().toRequestBody("application/json".toMediaType()))
@@ -3211,6 +3259,41 @@ class SettingsFragment : Fragment() {
                 android.util.Log.w("Settings", "Traccar migration failed: ${e.message}")
             }
         }
+    }
+
+    private fun applyTraccarProvisioningUrl(rawValue: String) {
+        val raw = rawValue.trim()
+        val uri = try {
+            Uri.parse(raw)
+        } catch (_: Exception) {
+            null
+        }
+        if (uri == null || (uri.scheme != "http" && uri.scheme != "https") || uri.host.isNullOrBlank()) {
+            Toast.makeText(requireContext(), "QR не похож на Traccar URL", Toast.LENGTH_LONG).show()
+            return
+        }
+        val id = uri.getQueryParameter("id")?.trim().orEmpty()
+        if (id.isBlank()) {
+            Toast.makeText(requireContext(), "В QR нет параметра id", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val pathPart = uri.encodedPath.orEmpty().let { if (it == "/") "" else it }
+        val serverUrl = "${uri.scheme}://${uri.encodedAuthority.orEmpty()}$pathPart".trimEnd('/')
+        val edit = requireContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(MapFragment.PREF_TRACCAR_DEVICE_ID, id)
+        if (serverUrl == MapFragment.ENDPOINT_DIRECT || serverUrl == MapFragment.ENDPOINT_RELAY) {
+            edit.remove(MapFragment.PREF_TRACCAR_URL)
+                .putString(MapFragment.PREF_LAST_TRACCAR_ENDPOINT, serverUrl)
+        } else {
+            edit.putString(MapFragment.PREF_TRACCAR_URL, serverUrl)
+        }
+        edit.apply()
+
+        Toast.makeText(requireContext(), "Логгер настроен: $id", Toast.LENGTH_SHORT).show()
+        view?.findViewById<TextView>(R.id.txtTraccarDeviceId)?.text = id
     }
 
     private fun registerTraccarDevice(serverUrl: String, uniqueId: String, deviceName: String, onDone: () -> Unit) {
@@ -3240,10 +3323,10 @@ class SettingsFragment : Fragment() {
                         val existingName = existing.optString("name", "")
                         val deviceId = existing.getInt("id")
                         val needNameUpdate = deviceName.isNotBlank() && deviceName != existingName
-                        val needGroupUpdate = !existing.has("groupId") || existing.isNull("groupId") || existing.optInt("groupId", 0) == 0
+                        val needGroupUpdate = !existing.has("groupId") || existing.isNull("groupId") || existing.optInt("groupId", 0) != 1
                         if (needNameUpdate || needGroupUpdate) {
                             if (needNameUpdate) existing.put("name", deviceName)
-                            if (needGroupUpdate) existing.put("groupId", 66)  // Users group
+                            if (needGroupUpdate) existing.put("groupId", 1)  // ATVRUSSIA
                             val updateReq = okhttp3.Request.Builder()
                                 .url("$apiBase/api/devices/$deviceId")
                                                                 .put(existing.toString()
@@ -3260,7 +3343,7 @@ class SettingsFragment : Fragment() {
                         val json = org.json.JSONObject().apply {
                             put("name", deviceName)
                             put("uniqueId", uniqueId)
-                            put("groupId", 66)  // Users group
+                            put("groupId", 1)  // ATVRUSSIA
                         }
                         val createReq = okhttp3.Request.Builder()
                             .url("$apiBase/api/devices")

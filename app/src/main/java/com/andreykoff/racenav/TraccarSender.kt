@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import kotlinx.coroutines.*
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -169,23 +170,29 @@ class TraccarSender(
 
     /**
      * Send single point using OsmAnd protocol:
-     * GET /?id=DEVICE_ID&lat=X&lon=Y&timestamp=EPOCH_SEC&speed=KMH&bearing=DEG&altitude=M
+     * GET /?id=DEVICE_ID&lat=X&lon=Y&timestamp=EPOCH_SEC&speed=KMH&bearing=DEG&altitude=M&accuracy=M
      */
     private fun sendPoint(serverUrl: String, deviceId: String, point: TraccarPoint): Boolean {
-        val baseUrl = serverUrl.trimEnd('/')
         val speedKmh = point.speed * 3.6  // m/s → km/h
         val timestampSec = point.timestamp / 1000
 
-        var url = "$baseUrl/?id=$deviceId" +
-                "&lat=${point.lat}" +
-                "&lon=${point.lon}" +
-                "&timestamp=$timestampSec" +
-                "&speed=${String.format(java.util.Locale.US, "%.1f", speedKmh)}" +
-                "&bearing=${String.format(java.util.Locale.US, "%.0f", point.bearing)}" +
-                "&altitude=${String.format(java.util.Locale.US, "%.0f", point.altitude)}"
+        val baseUrl = serverUrl.trim().trimEnd('/')
+        val urlBuilder = baseUrl.toHttpUrlOrNull()?.newBuilder() ?: return false
+        urlBuilder
+            .addQueryParameter("id", deviceId)
+            .addQueryParameter("lat", String.format(java.util.Locale.US, "%.7f", point.lat))
+            .addQueryParameter("lon", String.format(java.util.Locale.US, "%.7f", point.lon))
+            .addQueryParameter("timestamp", timestampSec.toString())
+            .addQueryParameter("speed", String.format(java.util.Locale.US, "%.1f", speedKmh))
+            .addQueryParameter("bearing", String.format(java.util.Locale.US, "%.0f", point.bearing))
+            .addQueryParameter("altitude", String.format(java.util.Locale.US, "%.0f", point.altitude))
         if (point.battery in 0..100) {
-            url += "&batt=${point.battery}"
+            urlBuilder.addQueryParameter("batt", point.battery.toString())
         }
+        if (point.accuracy > 0f) {
+            urlBuilder.addQueryParameter("accuracy", String.format(java.util.Locale.US, "%.1f", point.accuracy))
+        }
+        val url = urlBuilder.build()
 
         val request = Request.Builder().url(url).get().build()
         return try {

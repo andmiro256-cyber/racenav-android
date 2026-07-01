@@ -42,7 +42,7 @@ class TraccarService : Service() {
         override fun onLocationChanged(loc: Location) {
             if (System.currentTimeMillis() - loc.time > 30_000) return
             if (TrackingService.isRunning) return
-            savePoint(loc.latitude, loc.longitude, loc.speed, loc.bearing, loc.altitude)
+            savePoint(loc.latitude, loc.longitude, loc.speed, loc.bearing, loc.altitude, accuracy = loc.accuracy)
         }
         @Deprecated("Deprecated in API 29")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -57,7 +57,7 @@ class TraccarService : Service() {
         } catch (_: Exception) { false }
     }
 
-    private fun savePoint(lat: Double, lon: Double, speed: Float, bearing: Float, altitude: Double) {
+    private fun savePoint(lat: Double, lon: Double, speed: Float, bearing: Float, altitude: Double, accuracy: Float = 0f) {
         val batteryLevel = getBatteryLevel()
         traccarDb?.insertPoint(
             lat = lat,
@@ -66,7 +66,8 @@ class TraccarService : Service() {
             bearing = bearing,
             altitude = altitude,
             timestamp = System.currentTimeMillis(),
-            battery = batteryLevel
+            battery = batteryLevel,
+            accuracy = accuracy
         )
     }
 
@@ -130,7 +131,7 @@ class TraccarService : Service() {
         serviceScope.launch {
             TrackingService.locationFlow.filterNotNull().collect { loc ->
                 if (!isRunning) return@collect
-                savePoint(loc.lat, loc.lon, loc.speed, loc.bearing, loc.altitude)
+                savePoint(loc.lat, loc.lon, loc.speed, loc.bearing, loc.altitude, loc.accuracy)
             }
         }
 
@@ -143,7 +144,7 @@ class TraccarService : Service() {
             fusedCallback = object : com.google.android.gms.location.LocationCallback() {
                 override fun onLocationResult(result: com.google.android.gms.location.LocationResult) {
                     if (TrackingService.isRunning) return
-                    result.lastLocation?.let { savePoint(it.latitude, it.longitude, it.speed, it.bearing, it.altitude) }
+                    result.lastLocation?.let { savePoint(it.latitude, it.longitude, it.speed, it.bearing, it.altitude, it.accuracy) }
                 }
             }
             try {
