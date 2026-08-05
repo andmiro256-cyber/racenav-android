@@ -111,6 +111,10 @@ class MapFragment : Fragment() {
     private val recordingStartMs get() = TrackingService.startTimeMs
     private var autoRecordDone = false  // prevent repeated auto-start on style change
     private var autoSyncDone = false    // prevent repeated auto-sync on resume
+    private var pendingSyncMapRender = false
+    private var pendingSyncFocusPoints: List<Pair<Double, Double>> = emptyList()
+    private var syncRenderRetryAttempts = 0
+    private var syncRenderRetryScheduled = false
     private var lastTraccarStatusName: String? = null
     private var lastUiLocationUpdate: LocationUpdate? = null
     private var lastUiLocationUpdateAtMs = 0L
@@ -5402,6 +5406,7 @@ class MapFragment : Fragment() {
         if (trackWasEmpty && loadedTrackPoints.isNotEmpty()) {
             updateLoadedTrackOnMap()
         }
+        renderPendingSyncSnapshot()
     }
 
     private fun updateWaypointsOnMap() {
@@ -12337,6 +12342,252 @@ class MapFragment : Fragment() {
         }
     }
 
+    private fun persistSyncSnapshot(
+        prefs: android.content.SharedPreferences,
+        payload: SyncPayload,
+    ): Boolean {
+        val userPointsJson = JSONArray()
+        payload.waypoints.forEach { point ->
+            userPointsJson.put(
+                JSONObject()
+                    .put("name", point.name)
+                    .put("lat", point.coordinate.lat)
+                    .put("lon", point.coordinate.lon)
+                    .put("color", point.color)
+                    .put("symbol", point.symbol)
+                    .put("proximity", point.proximity)
+                    .put("sourceType", POINT_SOURCE_MANUAL)
+                    .put("sourceName", "")
+            )
+        }
+
+        val firstRoute = payload.routes.firstOrNull()
+        val routeJson = JSONArray()
+        firstRoute?.points?.take(MAX_WAYPOINTS)?.forEachIndexed { index, point ->
+            routeJson.put(
+                JSONObject()
+                    .put("name", point.name)
+                    .put("lat", point.coordinate.lat)
+                    .put("lon", point.coordinate.lon)
+                    .put("index", index + 1)
+                    .put("description", firstRoute.name)
+                    .put("color", point.color)
+                    .put("symbol", point.symbol)
+                    .put("proximity", point.proximity)
+            )
+        }
+
+        val flatTrackPoints = mutableListOf<SyncCoordinate?>()
+        payload.tracks.forEach { track ->
+            if (flatTrackPoints.isNotEmpty()) flatTrackPoints.add(null)
+            flatTrackPoints.addAll(track.points)
+        }
+        val savedTrackPoints = flatTrackPoints.take(5000)
+        val trackJson = JSONArray()
+        val trackTimesJson = JSONArray()
+        savedTrackPoints.forEach { point ->
+            if (point == null) {
+                trackJson.put(JSONObject.NULL)
+            } else {
+                trackJson.put(JSONArray().put(point.lat).put(point.lon))
+            }
+            trackTimesJson.put(JSONObject.NULL)
+        }
+        val trackMetaJson = JSONArray()
+        payload.tracks.forEach { track ->
+            trackMetaJson.put(JSONObject().put("name", track.name).put("pointCount", track.points.size))
+        }
+
+        val editor = prefs.edit()
+            .putString(PREF_USER_POINTS_JSON, userPointsJson.toString())
+            .remove(PREF_LOADED_WP_NAME)
+
+        if (firstRoute == null) {
+            editor.remove(PREF_SAVED_WAYPOINTS_JSON)
+                .remove(PREF_ROUTE_NAME)
+                .remove(PREF_ACTIVE_WP_INDEX)
+        } else {
+            editor.putString(PREF_SAVED_WAYPOINTS_JSON, routeJson.toString())
+                .putString(PREF_ROUTE_NAME, firstRoute.name)
+                .putInt(PREF_ACTIVE_WP_INDEX, 0)
+                .putBoolean(PREF_LOADED_WP_VISIBLE, true)
+                .putBoolean(PREF_ROUTE_LINE_VISIBLE, true)
+        }
+
+        if (savedTrackPoints.none { it != null }) {
+            editor.remove(PREF_SAVED_TRACK_JSON)
+                .remove(PREF_SAVED_TRACK_TIMES_JSON)
+                .remove(PREF_SAVED_TRACK_META_JSON)
+                .remove(PREF_LOADED_TRACK_NAME)
+                .remove(PREF_LOADED_TRACK_SOURCE_PATH)
+        } else {
+            val trackLabel = if (payload.tracks.size == 1) {
+                payload.tracks.first().name
+            } else {
+                "Синхр. треки: ${payload.tracks.size} (${payload.trackPointCount} точек)"
+            }
+            editor.putString(PREF_SAVED_TRACK_JSON, trackJson.toString())
+                .putString(PREF_SAVED_TRACK_TIMES_JSON, trackTimesJson.toString())
+                .putString(PREF_SAVED_TRACK_META_JSON, trackMetaJson.toString())
+                .putString(PREF_LOADED_TRACK_NAME, trackLabel)
+                .remove(PREF_LOADED_TRACK_SOURCE_PATH)
+                .putBoolean(PREF_LOADED_TRACK_VISIBLE, true)
+        }
+        if (payload.waypoints.isNotEmpty()) editor.putBoolean(PREF_USER_POINTS_VISIBLE, true)
+        return editor.commit()
+    }
+
+    private fun applySyncSnapshotToMemory(payload: SyncPayload) {
+        userMarkers.clear()
+        userMarkers.addAll(payload.waypoints.map { point ->
+            UserPoint(
+                name = point.name,
+                position = LatLng(point.coordinate.lat, point.coordinate.lon),
+                color = point.color,
+                symbol = point.symbol,
+                proximity = point.proximity,
+            )
+        })
+
+        waypoints.clear()
+        payload.routes.firstOrNull()?.let { route ->
+            waypoints.addAll(route.points.take(MAX_WAYPOINTS).mapIndexed { index, point ->
+                Waypoint(
+                    name = point.name,
+                    lat = point.coordinate.lat,
+                    lon = point.coordinate.lon,
+                    index = index + 1,
+                    description = route.name,
+                    proximity = point.proximity,
+                    color = point.color,
+                    symbol = point.symbol,
+                )
+            })
+        }
+        activeWpIndex = 0
+        wpBitmapCache.clear()
+
+        loadedTrackPoints.clear()
+        loadedTrackTimes.clear()
+        loadedTrackImports.clear()
+        payload.tracks.forEach { track ->
+            if (loadedTrackPoints.isNotEmpty()) {
+                loadedTrackPoints.add(SEGMENT_BREAK)
+                loadedTrackTimes.add(null)
+            }
+            track.points.forEach { point ->
+                loadedTrackPoints.add(LatLng(point.lat, point.lon))
+                loadedTrackTimes.add(null)
+            }
+            loadedTrackImports.add(LoadedTrackImport(track.name, track.points.size))
+        }
+    }
+
+    private fun boundedSyncPayload(payload: SyncPayload): SyncPayload {
+        var storedEntries = 0
+        val boundedTracks = mutableListOf<SyncTrack>()
+        payload.tracks.forEach { track ->
+            val separatorCost = if (boundedTracks.isEmpty()) 0 else 1
+            val availablePoints = 5000 - storedEntries - separatorCost
+            if (availablePoints <= 0) return@forEach
+            val acceptedPoints = track.points.take(availablePoints)
+            if (acceptedPoints.isNotEmpty()) {
+                boundedTracks.add(track.copy(points = acceptedPoints))
+                storedEntries += separatorCost + acceptedPoints.size
+            }
+        }
+        return payload.copy(tracks = boundedTracks)
+    }
+
+    private fun syncFocusPoints(payload: SyncPayload): List<Pair<Double, Double>> {
+        return buildList {
+            payload.waypoints.forEach { add(it.coordinate.lat to it.coordinate.lon) }
+            payload.routes.forEach { route ->
+                route.points.forEach { add(it.coordinate.lat to it.coordinate.lon) }
+            }
+            payload.tracks.forEach { track ->
+                track.points.forEach { add(it.lat to it.lon) }
+            }
+        }
+    }
+
+    private fun scheduleSyncRenderRetry() {
+        if (!pendingSyncMapRender || syncRenderRetryScheduled || syncRenderRetryAttempts >= 8) return
+        syncRenderRetryScheduled = true
+        emergencyHandler.postDelayed({
+            syncRenderRetryScheduled = false
+            if (!pendingSyncMapRender || !isAdded || _binding == null) return@postDelayed
+            syncRenderRetryAttempts++
+            renderPendingSyncSnapshot()
+        }, 500L)
+    }
+
+    private fun renderPendingSyncSnapshot(): Boolean {
+        if (!pendingSyncMapRender) return true
+        val style = mapboxMap?.style ?: run {
+            scheduleSyncRenderRetry()
+            return false
+        }
+        val hasRequiredSources =
+            style.getSource(USER_MARKER_SOURCE_ID) != null &&
+                style.getSource(WP_SOURCE_ID) != null &&
+                style.getSource(LOADED_TRACK_SOURCE_ID) != null
+        if (!hasRequiredSources) {
+            scheduleSyncRenderRetry()
+            return false
+        }
+
+        val ctx = context ?: return false
+        val failedStages = mutableListOf<String>()
+        fun guarded(stage: String, block: () -> Unit) {
+            try {
+                block()
+            } catch (e: Exception) {
+                failedStages.add(stage)
+                Log.w("RaceNavSync", "Render stage $stage failed: ${e::class.java.simpleName}")
+            }
+        }
+
+        guarded("points") {
+            updateUserMarkersOnMap()
+            updateUserMarkerRadiusCircles()
+            if (userMarkers.isNotEmpty()) setUserPointsVisible(true)
+        }
+        guarded("route") {
+            updateWaypointsOnMap()
+            updateRouteLineOnMap()
+            updateRadiusCircles()
+            updateNavLine()
+            updateWaypointNavBar()
+            updateNextCpWidget()
+            updateNavCompass()
+            if (waypoints.isNotEmpty()) {
+                setLoadedWpVisible(true)
+                setRouteLineVisible(true)
+            }
+        }
+        guarded("track") {
+            updateLoadedTrackOnMap()
+            applyLoadedTrackStyle()
+            if (loadedTrackPoints.any { it != SEGMENT_BREAK }) setLoadedTrackVisible(true)
+        }
+        guarded("camera") { fitCameraToPoints(pendingSyncFocusPoints) }
+
+        val rendered = failedStages.isEmpty()
+        DiagnosticsCollector.logEvent(
+            ctx,
+            "Sync pull stage=render ok=$rendered failures=${failedStages.size}"
+        )
+        if (rendered) {
+            pendingSyncMapRender = false
+            pendingSyncFocusPoints = emptyList()
+            syncRenderRetryAttempts = 0
+        } else {
+            scheduleSyncRenderRetry()
+        }
+        return rendered
+    }
+
     /** Pull points, tracks and routes from TND Sync server and load them into Android structures. */
     fun syncPull(apiKey: String, onResult: (ok: Boolean, message: String) -> Unit) {
         val ctx = context ?: run { onResult(false, "Контекст недоступен"); return }
@@ -12346,6 +12597,7 @@ class MapFragment : Fragment() {
         val useModernSync = email.isNotEmpty()
 
         lifecycleScope.launch {
+            var phase = "receive"
             try {
                 val json = withContext(Dispatchers.IO) {
                     val path = if (useModernSync) "/api/sync/pull" else "/api/state"
@@ -12362,121 +12614,71 @@ class MapFragment : Fragment() {
                     }
                     readSyncJson(conn)
                 }
+                DiagnosticsCollector.logEvent(ctx, "Sync pull stage=receive ok=true")
 
-                val syncUserPoints = mutableListOf<UserPoint>()
-                val wptArray = json.optJSONArray("waypoints")
-                if (wptArray != null) {
-                    for (i in 0 until wptArray.length()) {
-                        val w = wptArray.getJSONObject(i)
-                        syncUserPoints.add(UserPoint(
-                            name = w.optString("name", "Точка ${i + 1}"),
-                            position = LatLng(w.optDouble("lat"), w.optDouble("lng")),
-                            color = w.optString("color", "#1565C0"),
-                            symbol = w.optString("icon", w.optString("symbol", "")),
-                            proximity = w.optDouble("radius", w.optDouble("proximity", 0.0))
-                        ))
-                    }
+                phase = "parse"
+                val parsedPayload = withContext(Dispatchers.Default) { SyncPayloadParser.parse(json) }
+                DiagnosticsCollector.logEvent(
+                    ctx,
+                    "Sync pull stage=parse ok=true points=${parsedPayload.waypoints.size} " +
+                        "tracks=${parsedPayload.tracks.size} trackPoints=${parsedPayload.trackPointCount} " +
+                        "routes=${parsedPayload.routes.size} skipped=${parsedPayload.skippedCoordinates}"
+                )
+                val payload = boundedSyncPayload(parsedPayload)
+                val truncatedTrackPoints = parsedPayload.trackPointCount - payload.trackPointCount
+
+                phase = "persist"
+                val persisted = withContext(Dispatchers.IO) { persistSyncSnapshot(prefs, payload) }
+                if (!persisted) throw IllegalStateException("Не удалось сохранить данные на устройстве")
+                DiagnosticsCollector.logEvent(
+                    ctx,
+                    "Sync pull stage=persist ok=true points=${payload.waypoints.size} " +
+                        "trackPoints=${payload.trackPointCount} routes=${payload.routes.size}"
+                )
+
+                phase = "render"
+                try {
+                    applySyncSnapshotToMemory(payload)
+                } catch (e: Exception) {
+                    DiagnosticsCollector.logEvent(
+                        ctx,
+                        "Sync pull stage=render ok=false error=${e::class.java.simpleName} persisted=true"
+                    )
+                    onResult(
+                        true,
+                        "Данные получены и сохранены, но карту обновить не удалось. Перезапустите приложение."
+                    )
+                    return@launch
+                }
+                pendingSyncFocusPoints = syncFocusPoints(payload)
+                pendingSyncMapRender = true
+                syncRenderRetryAttempts = 0
+                val rendered = renderPendingSyncSnapshot()
+                if (!rendered) {
+                    DiagnosticsCollector.logEvent(ctx, "Sync pull stage=render deferred=true")
                 }
 
-                val syncTrackPts = mutableListOf<Pair<Double, Double>>()
-                val tracksArray = json.optJSONArray("tracks")
-                if (tracksArray != null) {
-                    for (i in 0 until tracksArray.length()) {
-                        val t = tracksArray.getJSONObject(i)
-                        val pts = t.optJSONArray("points") ?: continue
-                        if (syncTrackPts.isNotEmpty()) syncTrackPts.add(Pair(Double.NaN, Double.NaN))
-                        for (j in 0 until pts.length()) {
-                            val p = pts.getJSONObject(j)
-                            val lat = p.optDouble("lat", Double.NaN)
-                            val lng = p.optDouble("lng", Double.NaN)
-                            if (!lat.isNaN() && !lng.isNaN()) syncTrackPts.add(Pair(lat, lng))
-                        }
-                    }
+                val summary = buildString {
+                    append("${payload.waypoints.size} точек")
+                    append(", ${payload.tracks.size} треков")
+                    if (payload.trackPointCount > 0) append(" (${payload.trackPointCount} точек трека)")
+                    append(", ${payload.routes.size} маршрутов")
+                    if (payload.routes.size > 1) append(" (загружен первый)")
+                    if (payload.skippedCoordinates > 0) append(", пропущено: ${payload.skippedCoordinates}")
+                    if (truncatedTrackPoints > 0) append(", трек обрезан на $truncatedTrackPoints точек")
                 }
-
-                val syncRouteWaypoints = mutableListOf<Waypoint>()
-                var syncRoutesCount = 0
-                var importedRouteName: String? = null
-                val routesArray = json.optJSONArray("routes")
-                if (routesArray != null && routesArray.length() > 0) {
-                    syncRoutesCount = routesArray.length()
-                    val firstRoute = routesArray.optJSONObject(0)
-                    if (firstRoute != null) {
-                        importedRouteName = firstRoute.optString("name", "Маршрут синхронизации").ifBlank { "Маршрут синхронизации" }
-                        val pts = firstRoute.optJSONArray("points")
-                        val labels = firstRoute.optJSONArray("labels")
-                        if (pts != null) {
-                            for (j in 0 until pts.length()) {
-                                val p = pts.getJSONObject(j)
-                                val label = labels?.optString(j)?.takeIf { it.isNotBlank() } ?: "WP${j + 1}"
-                                syncRouteWaypoints.add(Waypoint(
-                                    lat = p.optDouble("lat"),
-                                    lon = p.optDouble("lng"),
-                                    name = label,
-                                    index = j + 1,
-                                    description = importedRouteName ?: "",
-                                    color = firstRoute.optString("color", "")
-                                ))
-                            }
-                        }
-                    }
+                val mapStatus = if (rendered) {
+                    "Показано на карте"
+                } else {
+                    "Карта загружается — данные появятся автоматически"
                 }
-
-                withContext(Dispatchers.Main) {
-                    userMarkers.clear()
-                    userMarkers.addAll(syncUserPoints)
-                    updateUserMarkersOnMap()
-                    updateUserMarkerRadiusCircles()
-                    saveUserPoints()
-
-                    if (syncRouteWaypoints.isNotEmpty()) {
-                        loadRoute(syncRouteWaypoints, importedRouteName ?: "Маршрут синхронизации")
-                    } else {
-                        waypoints.clear()
-                        activeWpIndex = 0
-                        wpBitmapCache.clear()
-                        updateWaypointsOnMap()
-                        updateRouteLineOnMap()
-                        updateRadiusCircles()
-                        updateNavLine()
-                        updateWaypointNavBar()
-                        saveWaypointsToPrefs()
-                        prefs.edit().remove(PREF_ROUTE_NAME).apply()
-                    }
-
-                    val trackLoadName = if ((tracksArray?.length() ?: 0) > 1) "Синхр. треки" else "Синхр. трек"
-                    loadTrack(syncTrackPts, append = false, name = trackLoadName)
-                    if (syncTrackPts.isNotEmpty()) {
-                        val realTrackPoints = syncTrackPts.count { !it.first.isNaN() && !it.second.isNaN() }
-                        val trackLabel = if ((tracksArray?.length() ?: 0) > 1) {
-                            "Синхр. треки: ${tracksArray?.length()} (${realTrackPoints} точек)"
-                        } else {
-                            "Синхр. трек (${realTrackPoints} точек)"
-                        }
-                        prefs.edit().putString(PREF_LOADED_TRACK_NAME, trackLabel).apply()
-                    } else {
-                        prefs.edit().remove(PREF_LOADED_TRACK_NAME).apply()
-                    }
-
-                    val msg = buildString {
-                        if (syncUserPoints.isNotEmpty()) append("${syncUserPoints.size} точек")
-                        if (syncTrackPts.isNotEmpty()) {
-                            if (isNotEmpty()) append(", ")
-                            append("трек (${syncTrackPts.count { !it.first.isNaN() && !it.second.isNaN() }} точек)")
-                        }
-                        if (syncRoutesCount > 0) {
-                            if (isNotEmpty()) append(", ")
-                            if (syncRoutesCount == 1) append("1 маршрут")
-                            else append("$syncRoutesCount маршрутов (загружен первый)")
-                        }
-                        if (isEmpty()) append("нет данных")
-                    }
-                    onResult(true, "Получено: $msg")
-                }
+                onResult(true, "Получено и сохранено: $summary. $mapStatus")
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    onResult(false, "Ошибка: ${e.message}")
-                }
+                DiagnosticsCollector.logEvent(
+                    ctx,
+                    "Sync pull stage=$phase ok=false error=${e::class.java.simpleName}"
+                )
+                onResult(false, "Ошибка на этапе $phase: ${e.message}")
             }
         }
     }
@@ -14229,6 +14431,8 @@ class MapFragment : Fragment() {
         locationTrackingStarted = false
         emergencyHandler.removeCallbacksAndMessages(null)
         emergencyRunnable = null
+        syncRenderRetryScheduled = false
+        syncRenderRetryAttempts = 0
         _binding?.lockFlashBorder?.animate()?.cancel()
         liveUsersPoller?.stop(); liveUsersPoller = null
         stopMonitoringMessagesPolling()

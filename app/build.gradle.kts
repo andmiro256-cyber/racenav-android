@@ -108,4 +108,5 @@ dependencies {
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-analytics")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
