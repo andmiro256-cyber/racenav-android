@@ -119,8 +119,14 @@ class SettingsFragment : Fragment() {
     }
 
     private val filePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? -> if (uri != null) loadFile(uri) }
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        val limited = uris.take(50)
+        if (limited.size < uris.size) {
+            Toast.makeText(context, "Максимум 50 файлов, загружены первые 50", Toast.LENGTH_LONG).show()
+        }
+        loadFiles(limited)
+    }
 
     private val offlineMapPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -4193,7 +4199,7 @@ class SettingsFragment : Fragment() {
         waypoints: List<Waypoint> = emptyList(),
         rawBytes: ByteArray? = null,
         originalExtension: String? = null
-    ) {
+    ): java.io.File? {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(MapFragment.PREFS_NAME, Context.MODE_PRIVATE)
         val existing = try {
@@ -4252,6 +4258,7 @@ class SettingsFragment : Fragment() {
         for (i in 0 until minOf(filtered.length(), MAX_DATASETS - 1)) result.put(filtered.getJSONObject(i))
 
         prefs.edit().putString(PREF_DATASETS_JSON, result.toString()).apply()
+        return filePath?.let { java.io.File(it) }
     }
 
     private fun deleteDataset(dsId: String) {
@@ -4437,7 +4444,10 @@ class SettingsFragment : Fragment() {
         saveDataset: Boolean = true,
         loadTrack: Boolean = parsed.hasTrack,
         loadPointSet: Boolean = parsed.hasPointSet,
-        loadRoute: Boolean = parsed.hasRoute
+        loadRoute: Boolean = parsed.hasRoute,
+        replaceExistingFilePoints: Boolean = true,
+        showFeedback: Boolean = true,
+        sourceFile: java.io.File? = null
     ) {
         val mapFrag = parentFragmentManager.fragments.filterIsInstance<MapFragment>().firstOrNull() ?: return
         val rootView = view
@@ -4451,40 +4461,7 @@ class SettingsFragment : Fragment() {
         val rowNavButtons = rootView?.findViewById<View>(R.id.rowNavButtons)
         val rowShareWp = rootView?.findViewById<View>(R.id.rowShareWp)
         val rowWpRouteButtons = rootView?.findViewById<View>(R.id.rowWpRouteButtons)
-
-        if (loadPointSet && parsed.pointWaypoints.isNotEmpty()) {
-            mapFrag.loadPointSet(parsed.pointWaypoints, fileName.substringBeforeLast('.'))
-            prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null)?.let { label ->
-                txtWp?.text = label
-                rowWp?.visibility = View.VISIBLE
-            }
-        }
-        if (loadRoute && parsed.routeWaypoints.isNotEmpty()) {
-            mapFrag.loadRoute(parsed.routeWaypoints, parsed.routeName ?: fileName.substringBeforeLast('.'))
-            rowRouteLine?.visibility = View.VISIBLE
-            rowNavButtons?.visibility = View.VISIBLE
-        }
-        if (loadTrack && parsed.trackPoints.isNotEmpty()) {
-            mapFrag.loadTrack(
-                parsed.trackPoints,
-                pointTimes = parsed.trackPointTimes,
-                append = mapFrag.hasLoadedTrack(),
-                name = parsed.trackName ?: fileName.substringBeforeLast('.')
-            )
-            prefs.getString(MapFragment.PREF_LOADED_TRACK_NAME, null)?.let { label ->
-                txtTrack?.text = label
-                rowTrack?.visibility = View.VISIBLE
-                rowTrackStyle?.visibility = View.VISIBLE
-            }
-        }
-
-        val hasAnyPoints = mapFrag.hasUserMarkers() || mapFrag.hasLoadedWaypoints()
-        if (hasAnyPoints) {
-            rowShareWp?.visibility = View.VISIBLE
-            rowWpRouteButtons?.visibility = View.VISIBLE
-        }
-
-        if (saveDataset && rawBytes != null) {
+        val persistedSourceFile = if (saveDataset && rawBytes != null) {
             val savedWpCount =
                 (if (loadPointSet) parsed.pointWaypoints.size else 0) +
                 (if (loadRoute) parsed.routeWaypoints.size else 0)
@@ -4503,7 +4480,52 @@ class SettingsFragment : Fragment() {
                 rawBytes = rawBytes,
                 originalExtension = originalExtension
             )
+        } else sourceFile
+
+        if (loadPointSet && parsed.pointWaypoints.isNotEmpty()) {
+            mapFrag.loadPointSet(
+                parsed.pointWaypoints,
+                fileName.substringBeforeLast('.'),
+                replaceExistingFilePoints = replaceExistingFilePoints,
+                showFeedback = showFeedback
+            )
+            prefs.getString(MapFragment.PREF_LOADED_WP_NAME, null)?.let { label ->
+                txtWp?.text = label
+                rowWp?.visibility = View.VISIBLE
+            }
         }
+        if (loadRoute && parsed.routeWaypoints.isNotEmpty()) {
+            mapFrag.loadRoute(
+                parsed.routeWaypoints,
+                parsed.routeName ?: fileName.substringBeforeLast('.'),
+                showFeedback = showFeedback
+            )
+            rowRouteLine?.visibility = View.VISIBLE
+            rowNavButtons?.visibility = View.VISIBLE
+        }
+        if (loadTrack && parsed.trackPoints.isNotEmpty()) {
+            mapFrag.loadTrack(
+                parsed.trackPoints,
+                pointTimes = parsed.trackPointTimes,
+                append = mapFrag.hasLoadedTrack(),
+                name = parsed.trackName ?: fileName.substringBeforeLast('.'),
+                sourceFile = persistedSourceFile,
+                showFeedback = showFeedback,
+                focusOnLoad = showFeedback
+            )
+            prefs.getString(MapFragment.PREF_LOADED_TRACK_NAME, null)?.let { label ->
+                txtTrack?.text = label
+                rowTrack?.visibility = View.VISIBLE
+                rowTrackStyle?.visibility = View.VISIBLE
+            }
+        }
+
+        val hasAnyPoints = mapFrag.hasUserMarkers() || mapFrag.hasLoadedWaypoints()
+        if (hasAnyPoints) {
+            rowShareWp?.visibility = View.VISIBLE
+            rowWpRouteButtons?.visibility = View.VISIBLE
+        }
+
     }
 
     private fun loadDatasetFromFile(ds: LoadedDataset) {
@@ -4527,7 +4549,8 @@ class SettingsFragment : Fragment() {
                         parsed = parsed,
                         rawBytes = null,
                         originalExtension = ds.name.substringAfterLast('.', ""),
-                        saveDataset = false
+                        saveDataset = false,
+                        sourceFile = file
                     )
                     if (!ds.mapKey.isNullOrBlank()) {
                         val mapFragment = parentFragmentManager.fragments
@@ -4546,53 +4569,69 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    private fun loadFile(uri: Uri) {
-        val name = getFileName(uri)
-        val ext = name.substringAfterLast('.', "").lowercase()
+    private fun loadFiles(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         val txtErr = view?.findViewById<TextView>(R.id.txtLoadedFile)
 
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val bytes = requireContext().contentResolver.openInputStream(uri)?.readBytes()
-                    ?: throw Exception("Не удалось открыть файл")
-                val parsed = NavigationFileImporter.parse(name, bytes)
-                withContext(Dispatchers.Main) {
-                    if (!parsed.hasAnything) {
-                        txtErr?.text = "Файл пустой: $name"
-                        txtErr?.visibility = View.VISIBLE
-                        return@withContext
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            var loadedCount = 0
+            val isBatch = uris.size > 1
+            uris.forEach { uri ->
+                val name = getFileName(uri)
+                val ext = name.substringAfterLast('.', "").lowercase()
+                try {
+                    val bytes = requireContext().contentResolver.openInputStream(uri)?.buffered(65536)?.use { it.readBytes() }
+                        ?: throw Exception("Не удалось открыть файл")
+                    val parsed = NavigationFileImporter.parse(name, bytes)
+                    withContext(Dispatchers.Main) {
+                        if (!parsed.hasAnything) {
+                            txtErr?.text = "Файл пустой: $name"
+                            txtErr?.visibility = View.VISIBLE
+                            return@withContext
+                        }
+                        txtErr?.visibility = View.GONE
+                        val sectionCount = listOf(parsed.hasPointSet, parsed.hasRoute, parsed.hasTrack).count { it }
+                        if (sectionCount > 1 && !isBatch) {
+                            showGpxImportDialog(
+                                fileName = name,
+                                trackPointCount = parsed.trackPoints.count { !it.first.isNaN() && !it.second.isNaN() },
+                                pointWaypoints = parsed.pointWaypoints,
+                                routeWaypoints = parsed.routeWaypoints,
+                                onConfirm = { loadTrack, loadPoints, loadRoute ->
+                                    applyParsedImport(
+                                        fileName = name,
+                                        parsed = parsed,
+                                        rawBytes = bytes,
+                                        originalExtension = ext,
+                                        loadTrack = loadTrack,
+                                        loadPointSet = loadPoints,
+                                        loadRoute = loadRoute
+                                    )
+                                }
+                            )
+                        } else {
+                            applyParsedImport(
+                                fileName = name,
+                                parsed = parsed,
+                                rawBytes = bytes,
+                                originalExtension = ext,
+                                replaceExistingFilePoints = !isBatch,
+                                showFeedback = !isBatch
+                            )
+                        }
+                        loadedCount++
                     }
-                    val sectionCount = listOf(parsed.hasPointSet, parsed.hasRoute, parsed.hasTrack).count { it }
-                    if (sectionCount > 1) {
-                        showGpxImportDialog(
-                            fileName = name,
-                            trackPointCount = parsed.trackPoints.count { !it.first.isNaN() && !it.second.isNaN() },
-                            pointWaypoints = parsed.pointWaypoints,
-                            routeWaypoints = parsed.routeWaypoints,
-                            onConfirm = { loadTrack, loadPoints, loadRoute ->
-                                applyParsedImport(
-                                    fileName = name,
-                                    parsed = parsed,
-                                    rawBytes = bytes,
-                                    originalExtension = ext,
-                                    loadTrack = loadTrack,
-                                    loadPointSet = loadPoints,
-                                    loadRoute = loadRoute
-                                )
-                            }
-                        )
-                    } else {
-                        applyParsedImport(
-                            fileName = name,
-                            parsed = parsed,
-                            rawBytes = bytes,
-                            originalExtension = ext
-                        )
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Ошибка $name: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }
-            } catch (e: Exception) {
+            }
+            if (isBatch) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Ошибка: ${e.message}", Toast.LENGTH_LONG).show()
+                    parentFragmentManager.fragments.filterIsInstance<MapFragment>()
+                        .firstOrNull()?.focusAllLoadedNavigationData()
+                    Toast.makeText(context, "Загружено файлов: $loadedCount из ${uris.size}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
